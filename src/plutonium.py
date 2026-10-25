@@ -32,10 +32,6 @@ import time
 from log import get_logger
 from net import DownloadError, download
 from depot_downgrade import plut_game_dir
-from plutonium_common import (  # noqa: F401 (re-exported)
-    METADATA_FILE, MENU_MOD_ASSETS_DIR, MENU_MOD_FILES,
-    install_menu_mod, plut_storage_ready, wine_path, write_metadata,
-)
 
 _log = get_logger(__name__)
 
@@ -131,6 +127,8 @@ GAME_META = {
     "iw5mp_ds": (42750, "iw5Path", "iw5mp_server.exe"),
 }
 
+METADATA_FILE = "deckops_plutonium.json"
+
 # Standalone wrapper exe names for OLED own games.
 # These are new files dropped into the game folder — the original exe is
 # left untouched. shortcut.py points the non-Steam shortcut at these.
@@ -195,9 +193,21 @@ _OLD_OLED_LAN_WRAPPER_NAMES = {
     "t6zm":  "t6plut_lan.sh",
 }
 
-# The DeckOps menu mods (METADATA_FILE, MENU_MOD_FILES, MENU_MOD_ASSETS_DIR)
-# are shared with plutonium_lcd.py and live in plutonium_common.py.
+# DeckOps client-side menu mods packaged as .iwd files (renamed .zip).
+# Bundled with the repo at assets/mods/ and copied locally into Plutonium's
+# storage/ directory where they are loaded automatically on game launch.
+#
+# T6 uses a single consolidated .iwd (deckops_bo2_menu.iwd) for both MP
+# and ZM. The Lua inside contains both PopulateButtons_Multiplayer and
+# PopulateButtons_Zombie, with the engine's CoD.isZombie dispatch selecting
+# the right button set at runtime. Both t6mp and t6zm point at the same
+# source file and same destination -- idempotent when both are installed.
 _OLED_HERE = os.path.dirname(os.path.abspath(__file__))
+MENU_MOD_ASSETS_DIR = os.path.join(os.path.dirname(_OLED_HERE), "assets", "mods")
+MENU_MOD_FILES = {
+    "t6mp":  ("t6/deckops_bo2_menu.iwd", "storage/t6/raw/deckops_bo2_menu.iwd"),
+    "t6zm":  ("t6/deckops_bo2_menu.iwd", "storage/t6/raw/deckops_bo2_menu.iwd"),
+}
 
 
 # ── path helpers ──────────────────────────────────────────────────────────────
@@ -219,7 +229,9 @@ def _plut_dir_in_compatdata(steam_root: str, appid: int) -> str:
     )
 
 
-_wine_path = wine_path  # shared with plutonium_lcd.py: see plutonium_common.py
+def _wine_path(linux_path: str) -> str:
+    """Convert a Linux path to Wine Z: drive notation."""
+    return "Z:" + linux_path.replace("/", "\\")
 
 
 # ── dedicated prefix helpers ──────────────────────────────────────────────────
@@ -232,10 +244,17 @@ def get_dedicated_plut_dir() -> str:
 def is_plutonium_ready() -> bool:
     """
     Returns True if the user has logged in and Plutonium has downloaded
-    its client files into DeckOps's dedicated prefix (checked by the
-    storage/ folder, see plutonium_common.plut_storage_ready).
+    its client files. We check for the storage/ folder which is only
+    created after a successful login.
     """
-    return plut_storage_ready(get_dedicated_plut_dir())
+    storage = os.path.join(get_dedicated_plut_dir(), "storage")
+    if not os.path.isdir(storage):
+        return False
+    # Must have at least one game subfolder inside storage/
+    return any(
+        os.path.isdir(os.path.join(storage, d))
+        for d in os.listdir(storage)
+    )
 
 
 # ── bootstrapper ──────────────────────────────────────────────────────────────
@@ -476,7 +495,47 @@ def _write_config(plut_dir: str, game_keys: list, installed_games: dict):
 
 # ── client-side menu mods ────────────────────────────────────────────────────
 
-_install_menu_mod = install_menu_mod  # shared with plutonium_lcd.py: see plutonium_common.py
+def _install_menu_mod(dest_plut_dir: str, game_key: str, on_progress=None):
+    """
+    Copy and install the DeckOps menu mod for the given game key.
+
+    Copies the bundled mod file from assets/mods/ into the prefix's
+    Plutonium storage path at raw/. Plutonium loads .iwd files from
+    raw/ automatically on game launch, overriding the default main
+    menu with the DeckOps community version (server connect, unlock
+    all, reset stats buttons).
+
+    Uses .iwd in raw/ (not mods/) so it:
+    - Uses normal player stats (no separate mod stats)
+    - Persists across disconnects
+    - Loads automatically on every launch
+
+    Skips silently for game keys without a menu mod defined.
+    """
+    def prog(msg):
+        if on_progress:
+            on_progress(msg)
+
+    if game_key not in MENU_MOD_FILES:
+        return
+
+    asset_rel, local_path = MENU_MOD_FILES[game_key]
+    src_file = os.path.join(MENU_MOD_ASSETS_DIR, asset_rel)
+    dest_file = os.path.join(dest_plut_dir, local_path)
+
+    prog(f"  Installing DeckOps menu mod for {game_key}...")
+
+    if not os.path.isfile(src_file):
+        prog(f"  ⚠ Menu mod asset missing: {src_file}")
+        return  # Non-fatal -- game still works without the mod
+
+    os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+
+    try:
+        shutil.copy2(src_file, dest_file)
+        prog(f"  ✓ Menu mod installed ({os.path.getsize(dest_file)} bytes)")
+    except OSError as ex:
+        prog(f"  ⚠ Menu mod copy failed: {ex}")
 
 
 # ── launcher prefix game configs ──────────────────────────────────────────────
@@ -851,7 +910,10 @@ def remove_offline_files(game: dict, game_key: str):
 
 # ── metadata ──────────────────────────────────────────────────────────────────
 
-_write_metadata = write_metadata  # shared with plutonium_lcd.py: see plutonium_common.py
+def _write_metadata(install_dir: str, data: dict):
+    path = os.path.join(install_dir, METADATA_FILE)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def cleanup_zd_from_other_prefixes(installed_games: dict, steam_root: str,

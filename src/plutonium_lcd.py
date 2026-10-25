@@ -40,10 +40,6 @@ from identity import VENV_PYTHON
 from depot_downgrade import plut_game_dir
 from log import get_logger
 from net import DownloadError
-from plutonium_common import (  # noqa: F401 (re-exported)
-    METADATA_FILE, MENU_MOD_ASSETS_DIR, MENU_MOD_FILES,
-    install_menu_mod, plut_storage_ready, wine_path, write_metadata,
-)
 
 _log = get_logger(__name__)
 
@@ -83,8 +79,8 @@ HEROIC_GAMES_DIR           = os.path.expanduser("~/Games/Heroic")
 HEROIC_DEFAULT_WINE_PREFIX = os.path.join(HEROIC_GAMES_DIR, "Prefixes", "default")
 DECKOPS_PLUT_DIR           = os.path.join(HEROIC_GAMES_DIR, "deckops_plutonium")
 
-# The bootstrapper download (and its pinned fallback) is plutonium.fetch_bootstrapper,
-# which _download_plutonium_exe below calls.
+PLUT_BOOTSTRAPPER_URL = "https://cdn.plutonium.pw/updater/plutonium.exe"
+_PLUT_ARCHIVE_FALLBACK_URL = "https://archive.org/download/plutonium_202605/plutonium.exe"
 
 # Deterministic sideload app_name for the one-off login entry. Not hashed
 # so it's easy to spot in Heroic's library if testers need to debug.
@@ -148,8 +144,22 @@ LCD_LAN_WRAPPER_NAMES = {
     "iw5mp_ds": "iw5plut_lan.sh",
 }
 
-# The DeckOps menu mods (MENU_MOD_FILES, MENU_MOD_ASSETS_DIR) are shared with
-# plutonium.py and live in plutonium_common.py.
+# DeckOps client-side menu mods packaged as .iwd files (renamed .zip).
+# Bundled with the repo at assets/mods/ and copied locally into Plutonium's
+# storage/ path inside the shared Heroic prefix. Loaded automatically on
+# game launch, overriding the default main menu.
+#
+# T6 uses a single consolidated .iwd (deckops_bo2_menu.iwd) for both MP
+# and ZM. The Lua inside contains both PopulateButtons_Multiplayer and
+# PopulateButtons_Zombie, with the engine's CoD.isZombie dispatch selecting
+# the right button set at runtime. Both t6mp and t6zm point at the same
+# source file and same destination -- idempotent when both are installed.
+_LCD_HERE = os.path.dirname(os.path.abspath(__file__))
+MENU_MOD_ASSETS_DIR = os.path.join(os.path.dirname(_LCD_HERE), "assets", "mods")
+MENU_MOD_FILES = {
+    "t6mp":  ("t6/deckops_bo2_menu.iwd", "storage/t6/raw/deckops_bo2_menu.iwd"),
+    "t6zm":  ("t6/deckops_bo2_menu.iwd", "storage/t6/raw/deckops_bo2_menu.iwd"),
+}
 
 
 # ── Steam paths (same as shortcut.py) ───────────────────────────────────────
@@ -638,13 +648,26 @@ def is_plutonium_ready_lcd() -> bool:
     """
     LCD counterpart to plutonium.is_plutonium_ready. Returns True if the
     user has logged in inside the shared Heroic prefix and Plutonium has
-    finished downloading its client files (checked by the storage/ folder,
-    see plutonium_common.plut_storage_ready).
+    finished downloading its client files. Checked by looking for the
+    storage/ subdir, which Plutonium only creates after a successful login.
     """
-    return plut_storage_ready(get_shared_plut_dir())
+    storage = os.path.join(get_shared_plut_dir(), "storage")
+    if not os.path.isdir(storage):
+        return False
+    # Must have at least one game subfolder (t4, t5, t6, iw5, demonware)
+    try:
+        return any(
+            os.path.isdir(os.path.join(storage, d))
+            for d in os.listdir(storage)
+        )
+    except OSError:
+        _log.debug("operation failed", exc_info=True)
+        return False
 
 
-_wine_path_lcd = wine_path  # shared with plutonium.py: see plutonium_common.py
+def _wine_path_lcd(linux_path: str) -> str:
+    """Convert a Linux path to Wine Z: drive notation (same as plutonium.py)."""
+    return "Z:" + linux_path.replace("/", "\\")
 
 
 def _write_plutonium_config_lcd(plut_dir: str, selected_keys: list,
@@ -699,15 +722,17 @@ def _write_plutonium_config_lcd(plut_dir: str, selected_keys: list,
 def _write_metadata_lcd(install_dir: str, data: dict):
     """
     Write the DeckOps metadata sentinel into a game's install directory.
-    Best effort: an LCD install carries on without it, so a missing folder
-    or a write error is only logged.
+    Mirrors plutonium._write_metadata so plutonium_lcd.py doesn't need
+    to import private helpers from plutonium.py.
     """
     if not install_dir:
         return
+    path = os.path.join(install_dir, "deckops_plutonium.json")
     try:
-        write_metadata(install_dir, data)
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
     except OSError:
-        _log.debug("could not write %s in %s", METADATA_FILE, install_dir, exc_info=True)
+        _log.debug("operation failed", exc_info=True)
 
 
 def _write_lcd_menu_files(game: dict, game_key: str, lan_wrapper_path: str = None):
@@ -725,7 +750,41 @@ def _write_lcd_menu_files(game: dict, game_key: str, lan_wrapper_path: str = Non
         write_offline_menu_file(os.path.join(game["install_dir"], offline))
 
 
-_install_menu_mod_lcd = install_menu_mod  # shared with plutonium.py: see plutonium_common.py
+def _install_menu_mod_lcd(plut_dir: str, game_key: str, on_progress=None):
+    """
+    Copy and install the DeckOps menu mod for the given game key.
+
+    LCD counterpart to plutonium._install_menu_mod. Copies the
+    bundled mod file from assets/mods/ into the shared Heroic prefix's
+    Plutonium storage path so it is loaded automatically by the
+    Plutonium client on game launch.
+
+    Skips silently for game keys without a menu mod defined.
+    """
+    def prog(msg):
+        if on_progress:
+            on_progress(msg)
+
+    if game_key not in MENU_MOD_FILES:
+        return
+
+    asset_rel, local_path = MENU_MOD_FILES[game_key]
+    src_file = os.path.join(MENU_MOD_ASSETS_DIR, asset_rel)
+    dest_file = os.path.join(plut_dir, local_path)
+
+    prog(f"  Installing DeckOps menu mod for {game_key}...")
+
+    if not os.path.isfile(src_file):
+        prog(f"  ⚠ Menu mod asset missing: {src_file}")
+        return  # Non-fatal -- game still works without the mod
+
+    os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+
+    try:
+        shutil.copy2(src_file, dest_file)
+        prog(f"  ✓ Menu mod installed ({os.path.getsize(dest_file)} bytes)")
+    except OSError as ex:
+        prog(f"  ⚠ Menu mod copy failed: {ex}")
 
 
 def _download_plutonium_exe(dest_dir: str, on_progress=None) -> str:
