@@ -7,6 +7,8 @@ and ui_qt.py can all import from a single source without circular deps.
 
 import html
 import os
+import shutil
+import subprocess
 
 from qt import (
     QLabel, QPushButton, QFrame, QHBoxLayout, QMessageBox, QWidget,
@@ -352,30 +354,28 @@ def _detached_open(args):
     """
     Launch an external command fully detached from DeckOps.
 
-    Double-forks so the resulting process is adopted by PID 1 (init/systemd)
-    and has no parent relationship to DeckOps. It will not appear as a child
+    A short-lived sh in a new session starts the command in the background
+    and exits at once, so the command is adopted by PID 1 (init/systemd) and
+    has no parent relationship to DeckOps. It will not appear as a child
     or subprocess of DeckOps in any task manager.
+
+    This used to os.fork() the whole (multithreaded Qt) process: when the
+    exec failed (e.g. no xdg-open), the forked copy fell into the except
+    below and carried on as a second DeckOps; a failed second fork also
+    left the parent stuck in waitpid. Nothing of DeckOps runs in the child
+    now; a failed launch is only logged.
     """
+    if not args or not shutil.which(args[0]):
+        _log.warning("detached_open: %s not found, cannot open %s",
+                     args[0] if args else "(nothing)", args[1:])
+        return
     try:
-        pid = os.fork()
-        if pid == 0:
-            # First child — new session, then fork again and exit
-            os.setsid()
-            pid2 = os.fork()
-            if pid2 == 0:
-                # Grandchild — close inherited fds and exec
-                devnull = os.open(os.devnull, os.O_RDWR)
-                os.dup2(devnull, 0)
-                os.dup2(devnull, 1)
-                os.dup2(devnull, 2)
-                os.close(devnull)
-                os.execlp(args[0], *args)
-            else:
-                os._exit(0)
-        else:
-            # Parent — reap the first child immediately
-            os.waitpid(pid, 0)
-    except OSError:
+        sh = subprocess.Popen(
+            ["/bin/sh", "-c", 'exec "$@" </dev/null >/dev/null 2>&1 &', "sh", *args],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+        sh.wait(timeout=5)       # returns at once; reaps the sh
+    except (OSError, subprocess.SubprocessError):
         _log.warning("detached_open failed for %s", args, exc_info=True)
 
 

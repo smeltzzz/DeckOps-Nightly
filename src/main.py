@@ -14,6 +14,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from log import setup_logging, get_logger
 setup_logging()
 
+# Uncaught exceptions (any thread) and hard crashes go to the log from here on
+import crash
+crash.install()
+
 
 def _ensure_qt6():
     # Updates only copy files, so venvs made before the PyQt6 move still

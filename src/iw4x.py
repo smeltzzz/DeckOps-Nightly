@@ -350,21 +350,6 @@ def install_iw4x(game: dict, steam_root: str,
     _migrate_dlc_ff(install_dir)
     _migrate_old_layout(install_dir)
 
-    iw4x_dir = os.path.join(install_dir, "main", "iw4x", "x86")
-    if os.path.exists(iw4x_dir):
-        if remove_dlc:
-            shutil.rmtree(iw4x_dir)
-        else:
-            for entry in os.listdir(iw4x_dir):
-                p = os.path.join(iw4x_dir, entry)
-                if os.path.isdir(p):
-                    shutil.rmtree(p)
-                elif not entry.endswith(".iwd"):
-                    os.remove(p)
-
-    if remove_dlc:
-        _remove_dlc_ff(install_dir)
-
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     base_end = 50 if install_dlc else 100
@@ -374,58 +359,111 @@ def install_iw4x(game: dict, steam_root: str,
             scaled = int(pct / 100 * base_end)
             on_progress(scaled, msg)
 
+    # Order matters: resolve and download everything (into a staging folder)
+    # and check it BEFORE touching the existing install. The old client files
+    # used to be deleted first, so a GitHub rate limit (60 requests/hour
+    # unauthenticated), an outage or a failed download left MW2 with IW4x
+    # half removed.
+
     # ── Resolve URLs + sha256 digests ────────────────────────────────────
-    # The launcher zip name is versioned, so its lookup has no fallback.
+    # The launcher zip name is versioned, so its lookup has no fallback URL.
+    # The launcher updates itself on every launch, so an existing one is kept
+    # when the lookup fails; only a first install needs it.
     prog(2, "Checking latest launcher version...")
-    launcher_url, launcher_dg = github_asset("iw4x/launcher", "x86_64-windows.zip")
+    existing_launcher = os.path.isfile(os.path.join(install_dir, "iw4x-launcher.exe"))
+    try:
+        launcher_url, launcher_dg = github_asset("iw4x/launcher", "x86_64-windows.zip")
+    except Exception as ex:
+        if not existing_launcher:
+            raise RuntimeError(f"Could not look up the IW4x launcher download: {ex}") from ex
+        _log.warning("IW4x launcher lookup failed, keeping the installed launcher: %s", ex)
+        prog(3, "Launcher lookup failed -- keeping the installed launcher (it self-updates)")
+        launcher_url = launcher_dg = None
     dll_url, dll_dg = github_asset("iw4x/iw4x-client", "iw4x.dll", fallback=DLL_URL)
     zip_url, zip_dg = github_asset("iw4x/iw4x-rawfiles", "release.zip", fallback=ZIP_URL)
 
-    # ── Download iw4x.dll, release.zip, and launcher concurrently ────────
-    prog(5, "Downloading iw4x files...")
+    staging = os.path.join(install_dir, ".deckops_iw4x_download")
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging)
+    try:
+        # ── Download iw4x.dll, release.zip, and launcher concurrently ────
+        prog(5, "Downloading iw4x files...")
 
-    launcher_zip = os.path.join(install_dir, "launcher.zip")
-    dl_tasks = [
-        (dll_url,       os.path.join(install_dir, "iw4x.dll"), "iw4x.dll", dll_dg),
-        (zip_url,       os.path.join(install_dir, "release.zip"), "release.zip", zip_dg),
-        (launcher_url,  launcher_zip, "iw4x-launcher", launcher_dg),
-    ]
-    dl_errors = []
-    dl_done   = [0]
-    dl_lock   = threading.Lock()
+        staged_dll = os.path.join(staging, "iw4x.dll")
+        staged_zip = os.path.join(staging, "release.zip")
+        launcher_zip = os.path.join(staging, "launcher.zip")
+        dl_tasks = [
+            (dll_url, staged_dll, "iw4x.dll", dll_dg),
+            (zip_url, staged_zip, "release.zip", zip_dg),
+        ]
+        if launcher_url:
+            dl_tasks.append((launcher_url, launcher_zip, "iw4x-launcher", launcher_dg))
+        dl_errors = []
+        dl_done   = [0]
+        dl_lock   = threading.Lock()
 
-    def _dl(url, dest, label, digest):
-        _download(url, dest, None, f"Downloading {label}...", timeout=120, digest=digest)
-        with dl_lock:
-            dl_done[0] += 1
-            prog(5 + int(dl_done[0] / len(dl_tasks) * 40), f"Downloaded {label}")
+        def _dl(url, dest, label, digest):
+            _download(url, dest, None, f"Downloading {label}...", timeout=120, digest=digest)
+            with dl_lock:
+                dl_done[0] += 1
+                prog(5 + int(dl_done[0] / len(dl_tasks) * 40), f"Downloaded {label}")
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futs = {ex.submit(_dl, *t): t[2] for t in dl_tasks}
-        for fut in as_completed(futs):
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = {ex.submit(_dl, *t): t[2] for t in dl_tasks}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception as e:
+                    dl_errors.append(f"{futs[fut]}: {e}")
+
+        if dl_errors:
+            raise RuntimeError("Download failed (existing IW4x left untouched):\n"
+                               + "\n".join(dl_errors))
+
+        # Corrupt archives are caught here too, while nothing is changed yet
+        for z in [staged_zip] + ([launcher_zip] if launcher_url else []):
             try:
-                fut.result()
-            except Exception as e:
-                dl_errors.append(f"{futs[fut]}: {e}")
+                with zipfile.ZipFile(z) as zf:
+                    bad = zf.testzip()
+            except zipfile.BadZipFile as e:
+                raise RuntimeError(f"{os.path.basename(z)} is not a valid zip "
+                                   f"(existing IW4x left untouched): {e}") from e
+            if bad:
+                raise RuntimeError(f"{os.path.basename(z)} is corrupt at {bad} "
+                                   f"(existing IW4x left untouched)")
 
-    if dl_errors:
-        raise RuntimeError("Download failed:\n" + "\n".join(dl_errors))
+        # ── Everything is here: now replace the old client files ─────────
+        iw4x_dir = os.path.join(install_dir, "main", "iw4x", "x86")
+        if os.path.exists(iw4x_dir):
+            if remove_dlc:
+                shutil.rmtree(iw4x_dir)
+            else:
+                for entry in os.listdir(iw4x_dir):
+                    p = os.path.join(iw4x_dir, entry)
+                    if os.path.isdir(p):
+                        shutil.rmtree(p)
+                    elif not entry.endswith(".iwd"):
+                        os.remove(p)
 
-    # ── Extract release.zip and relocate to launcher layout ──────────────
-    prog(50, "Extracting release.zip...")
-    zip_dest = os.path.join(install_dir, "release.zip")
-    with zipfile.ZipFile(zip_dest) as zf:
-        zf.extractall(install_dir)
-    os.remove(zip_dest)
+        if remove_dlc:
+            _remove_dlc_ff(install_dir)
 
-    prog(60, "Relocating files to launcher layout...")
-    _relocate_extracted(install_dir)
+        # ── Extract release.zip and relocate to launcher layout ──────────
+        prog(50, "Extracting release.zip...")
+        with zipfile.ZipFile(staged_zip) as zf:
+            zf.extractall(install_dir)
 
-    # ── Extract launcher ─────────────────────────────────────────────────
-    prog(70, "Extracting iw4x-launcher...")
-    with zipfile.ZipFile(launcher_zip) as zf:
-        zf.extractall(install_dir)
-    os.remove(launcher_zip)
+        prog(60, "Relocating files to launcher layout...")
+        _relocate_extracted(install_dir)
+        os.replace(staged_dll, os.path.join(install_dir, "iw4x.dll"))
+
+        # ── Extract launcher ─────────────────────────────────────────────
+        if launcher_url:
+            prog(70, "Extracting iw4x-launcher...")
+            with zipfile.ZipFile(launcher_zip) as zf:
+                zf.extractall(install_dir)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
     # ── Launch menu (Steam only) ─────────────────────────────────────────
     # The stock entry (tagged) stays vanilla MW2; "Play IW4x" runs the launcher

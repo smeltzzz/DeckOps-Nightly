@@ -14,7 +14,9 @@ executed) and every file is size checked, plus hash checked when the
 manifest gives one (md5, sha1, sha256, sha512 or blake2b hex, told apart
 by length; anything else means size only). A receipt in
 <games>/.deckops_manifests/ lists what was installed so updates and
-option switches only touch those files.
+option switches only touch those files. A file that was already there
+is never deleted; one we replace is first moved to
+<games>/.deckops_manifests/<id>.orig/ and put back when no longer used.
 
 One CDN URL is shared by all mods. It is remembered in deckops.json and
 mirrored into the save backup folder, which survives uninstall.
@@ -485,13 +487,9 @@ def _matches(path: str, entry: dict) -> bool:
         return False
 
 
-def _remove(path: str, root: str):
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
+def _prune(d: str, root: str):
+    # Remove empty folders from d up to (not including) root.
     root = os.path.realpath(root)
-    d = os.path.dirname(path)
     while os.path.realpath(d) != root and os.path.commonpath([root, os.path.realpath(d)]) == root:
         try:
             os.rmdir(d)
@@ -500,11 +498,66 @@ def _remove(path: str, root: str):
         d = os.path.dirname(d)
 
 
+def _remove(path: str, root: str):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    _prune(os.path.dirname(path), root)
+
+
+# --- Backups of files that were there before us
+
+def _backup_root(root: str, mod_id: str) -> str:
+    return os.path.join(root, RECEIPT_DIR, f"{mod_id}.orig")
+
+
+def _backup_path(root: str, mod_id: str, relpath: str) -> str:
+    # Kept under the receipt folder, not next to the file, so a game that
+    # loads everything in a mods folder never picks up the old copy.
+    return os.path.join(_backup_root(root, mod_id), *relpath.split("/"))
+
+
+def _move(src: str, dst: str):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.move(src, dst)       # a rename on the same drive, copy + delete otherwise
+
+
+def _restore_backup(root: str, mod_id: str, relpath: str, dest: str, tag: str = None) -> bool:
+    """Put the user's original back over our file. Not done if the file was
+    changed since we installed it (tag doesn't match); both are left then."""
+    bk = _backup_path(root, mod_id, relpath)
+    if not os.path.isfile(bk):
+        return False
+    if os.path.isfile(dest) and tag and not _receipt_ok(dest, tag):
+        _log.warning("manifest %s: %s changed since install, original left in %s", mod_id, relpath, bk)
+        return False
+    if os.path.lexists(dest):
+        os.remove(dest)
+    _move(bk, dest)
+    _prune(os.path.dirname(bk), os.path.join(root, RECEIPT_DIR))
+    return True
+
+
 def _remove_ours(root: str, receipt: dict, keep: set = frozenset()):
     """Remove receipt files not in keep, only if they are still the file we installed.
-    Files that were there before us, or changed since, are left alone."""
-    skip = set(receipt.get("overwritten", [])) | set(keep)
-    for p, sha in (receipt.get("files") or {}).items():
+    Files that were there before us are put back from their backup (or left
+    alone if there is none); files changed since are left alone."""
+    keep = set(keep)
+    files = receipt.get("files") or {}
+    mod_id = receipt.get("id")
+    if isinstance(mod_id, str) and _SLUG.match(mod_id):
+        for p in receipt.get("overwritten", []):
+            if p in keep:
+                continue
+            try:
+                _check_relpath(p); dest = _safe_dest(root, p)
+                if _restore_backup(root, mod_id, p, dest, files.get(p)):
+                    _log.info("manifest %s: restored original %s", mod_id, p)
+            except (ManifestError, OSError) as ex:
+                _log.warning("manifest %s: could not restore %r: %s", mod_id, p, ex)
+    skip = set(receipt.get("overwritten", [])) | keep
+    for p, sha in files.items():
         if p in skip:
             continue
         try:
@@ -558,30 +611,58 @@ def install_manifest(m: dict, option_id: str, cdn_text: str, games_root: str,
 
     for i, (f, dest, url) in enumerate(plan):
         base_b = done_b; done_b += f["size"]
+        backup = None
         if os.path.isfile(dest):
             prog(pct(base_b), f"Verifying {i + 1}/{total}: {f['path']}")
+            foreign = f["path"] not in ours and f["path"] not in overwritten
             if _matches(dest, f):
+                # Already there before us: record it as not ours, or a later
+                # option switch / update would delete the user's file.
+                if foreign:
+                    overwritten.append(f["path"])
                 log(f"  skip {f['path']} (up to date)")
                 continue
-            if f["path"] not in ours and f["path"] not in overwritten:
+            if foreign:
+                # Move the user's file aside before replacing it, so it can be
+                # put back (switching away from this file, or a failed download)
+                backup = _backup_path(dest_root, m["id"], f["path"])
+                try:
+                    if os.path.lexists(backup):
+                        raise OSError(f"a backup already exists at {backup}")
+                    _move(dest, backup)
+                except OSError as ex:
+                    _log.warning("manifest %s: could not back up %s: %s", m["id"], f["path"], ex)
+                    log(f"✗ not replaced, could not back up the existing file: {f['path']} ({ex})")
+                    errors.append(f["path"]); continue
                 overwritten.append(f["path"])
+                log(f"  backed up existing {f['path']}")
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         log(f"  get  {f['path']}")
+        failed = False
         try:
             _download(url, dest, timeout=300, headers=MOD_HEADERS, label=f"{i + 1}/{total}: {f['path']}",
                       on_progress=lambda p, msg, _b=base_b, _s=f["size"]: prog(pct(_b + _s * p // 100), msg))
         except DownloadError as ex:
             log(f"✗ download failed: {f['path']} ({ex})")
-            errors.append(f["path"]); continue
+            failed = True
         except Exception as ex:
             _log.warning("manifest %s: download failed for %s", m["id"], f["path"], exc_info=True)
             log(f"✗ download failed: {f['path']} ({ex})")
-            errors.append(f["path"]); continue
-        if not _matches(dest, f):
+            failed = True
+        if not failed and not _matches(dest, f):
             _log.warning("manifest %s: checksum mismatch for %s", m["id"], f["path"])
             log(f"✗ checksum mismatch: {f['path']}")
             _remove(dest, dest_root)
+            failed = True
+        if failed:
             errors.append(f["path"])
+            if backup:
+                try:
+                    _restore_backup(dest_root, m["id"], f["path"], dest)
+                    log(f"  restored existing {f['path']}")
+                except OSError as ex:
+                    _log.warning("manifest %s: could not restore %s from %s: %s",
+                                 m["id"], f["path"], backup, ex)
 
     # Switching option or version: drop our files the new option does not list.
     _remove_ours(dest_root, old, keep={f["path"] for f in opt["files"]})

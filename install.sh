@@ -23,15 +23,25 @@ die()     {
 # Source deckops_identity.sh if available (normal install path).
 # Fallback for curl-piped installs where identity.sh isn't on disk yet.
 # These fallback values must match deckops_identity.sh and be updated together.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
+#
+# Only ever load THIS branch's identity. Never fall back to the other
+# branch's install dir: with stable installed and nightly not, that made
+# the nightly installer load stable's identity and install stable instead.
+# SCRIPT_DIR comes from BASH_SOURCE, which is empty under `curl | bash`
+# ($0 is then just "bash", which would make SCRIPT_DIR the current dir).
+EXPECTED_BRANCH="nightly"
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+BRANCH=""
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
     source "$SCRIPT_DIR/deckops_identity.sh"
 elif [ -f "$HOME/DeckOps-Nightly/deckops_identity.sh" ]; then
     source "$HOME/DeckOps-Nightly/deckops_identity.sh"
-elif [ -f "$HOME/DeckOps/deckops_identity.sh" ]; then
-    source "$HOME/DeckOps/deckops_identity.sh"
-else
-    GITHUB_USER="GalvarinoDev"
+fi
+if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then
+    GITHUB_USER="smeltzzz"
     GITHUB_REPO="DeckOps-Nightly"
     INSTALL_DIR="$HOME/DeckOps-Nightly"
     VENV_DIR="$INSTALL_DIR/.venv"
@@ -189,6 +199,11 @@ fi
 # install time (OLED offline-mode plumbing). Pass 1 stopped creating them but
 # left existing files on disk. Sweep all known Steam libraries (internal +
 # libraryfolders.vdf entries + SD card mounts) and remove them.
+#
+# Only the old shared names (t4/t5/t6plut_lan.sh, see
+# _OLD_OLED_LAN_WRAPPER_NAMES in src/plutonium.py) are stale. Do NOT widen
+# this to a "*plut_lan.sh" glob: iw5plut_lan.sh is the live MW3 offline
+# wrapper (OLED_LAN_WRAPPER_NAMES) and must survive a reinstall.
 info "Sweeping stale plut_lan.sh sidecars..."
 
 STEAM_ROOT_FOR_SWEEP=""
@@ -221,7 +236,7 @@ for common_dir in "${LAN_SWEEP_DIRS[@]}"; do
             info "  Removed: $sidecar"
             lan_removed=$((lan_removed + 1))
         fi
-    done < <(find "$common_dir" -maxdepth 2 -name "*plut_lan.sh" -print0 2>/dev/null)
+    done < <(find "$common_dir" -maxdepth 2 \( -name "t4plut_lan.sh" -o -name "t5plut_lan.sh" -o -name "t6plut_lan.sh" \) -print0 2>/dev/null)
 done
 
 if [ "$lan_removed" -gt 0 ]; then

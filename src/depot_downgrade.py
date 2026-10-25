@@ -548,6 +548,24 @@ def find_depot_staging(steam_root: str, app_id: int) -> str | None:
     return None
 
 
+def find_depot_stagings(steam_root: str, app_ids) -> list:
+    """
+    Every staging directory for the given apps. Steam saves
+    `download_depot <app> <depot> ...` under content/app_<app>, and a job
+    requests depots under several apps (MW3: 42680 SP, 42690 MP + DLC,
+    42750 DS; Ghosts/AW: their MP apps). Looking only in the base app's
+    folder left the MP, server and DLC depots unmerged.
+    """
+    found = []
+    for app_id in dict.fromkeys(app_ids):      # keep order, drop duplicates
+        for c in (os.path.join(steam_root, "ubuntu12_32", "steamapps", "content", f"app_{app_id}"),
+                  os.path.join(steam_root, "steamapps", "content", f"app_{app_id}")):
+            if os.path.isdir(c) and c not in found:
+                _log.debug("Found depot staging at %s", c)
+                found.append(c)
+    return found
+
+
 # --- Steam console helpers
 
 def open_steam_console():
@@ -620,14 +638,57 @@ def ensure_depotdownloader(on_progress=None) -> str:
     return DEPOTDOWNLOADER_BIN
 
 
-def cleanup_depotdownloader():
+def _isolated_storage_roots() -> list:
+    """Where .NET keeps per-user IsolatedStorage on Linux (current runtime,
+    plus the old Mono location)."""
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    return [os.path.join(data_home, "IsolatedStorage"),
+            os.path.expanduser("~/.config/.isolated-storage")]
+
+
+def _remove_saved_logins(since: float | None) -> int:
+    """
+    Delete DepotDownloader's saved Steam login. With -remember-password it
+    stores the login token as account.config in .NET IsolatedStorage --
+    NOT in DEPOTDOWNLOADER_DIR, so removing that folder never removed it.
+    Another .NET app could keep a file of the same name there, so with
+    `since` only files changed during this session are removed.
+    Returns how many were removed.
+    """
+    removed = 0
+    for root in _isolated_storage_roots():
+        for dirpath, _, files in os.walk(root):
+            if "account.config" not in files:
+                continue
+            p = os.path.join(dirpath, "account.config")
+            try:
+                if since is not None and os.path.getmtime(p) < since - 60:
+                    continue
+                os.remove(p)
+                removed += 1
+                _log.info("Removed saved DepotDownloader login %s", p)
+            except OSError as ex:
+                _log.warning("Could not remove %s: %s", p, ex)
+    return removed
+
+
+def cleanup_depotdownloader(since: float | None = None) -> int:
+    """
+    Remove DepotDownloader and the Steam login token it saved. `since` is
+    the time.time() the download session started (see _remove_saved_logins).
+    Returns the number of saved logins removed.
+    """
     try:
         if os.path.isdir(DEPOTDOWNLOADER_DIR):
             shutil.rmtree(DEPOTDOWNLOADER_DIR, ignore_errors=True)
-            _log.info("Removed DepotDownloader and credentials at %s",
-                       DEPOTDOWNLOADER_DIR)
+            _log.info("Removed DepotDownloader at %s", DEPOTDOWNLOADER_DIR)
     except Exception as ex:
         _log.warning("Failed to clean up DepotDownloader: %s", ex)
+    try:
+        return _remove_saved_logins(since)
+    except Exception as ex:
+        _log.warning("Failed to remove DepotDownloader's saved login: %s", ex)
+        return 0
 
 
 # --- QR-based depot download
@@ -918,7 +979,21 @@ def _merge_tree(src: str, dst: str, prog):
     return merged
 
 
-def merge_depots(game_id: str, staging_dir: str, install_dir: str,
+def _depot_subdirs(staging_dir: str, order) -> list:
+    """(depot_id, path) for every depot_<id> folder in staging_dir: the
+    configured depots in their merge order first, then any others (DLC
+    depots aren't in depot_ids and used to be deleted unmerged)."""
+    try:
+        found = {int(n[6:]): os.path.join(staging_dir, n) for n in os.listdir(staging_dir)
+                 if n.startswith("depot_") and n[6:].isdigit()
+                 and os.path.isdir(os.path.join(staging_dir, n))}
+    except OSError:
+        return []
+    ids = [d for d in order if d in found] + sorted(d for d in found if d not in order)
+    return [(d, found[d]) for d in ids]
+
+
+def merge_depots(game_id: str, staging_dir, install_dir: str,
                  on_progress=None):
     """
     Merge 32-bit depot files into the game directory.
@@ -926,6 +1001,8 @@ def merge_depots(game_id: str, staging_dir: str, install_dir: str,
     MW3 (iw5) merges into a downgrade/ subfolder so the 64-bit Steam
     install stays intact. All other games merge directly into install_dir.
 
+    staging_dir is one folder or a list of them (the manual path has one
+    content/app_<id> folder per app the depots were requested under).
     Handles both manual path (depot_XXXXX subdirs) and QR path
     (files directly in staging_dir).
     """
@@ -938,28 +1015,23 @@ def merge_depots(game_id: str, staging_dir: str, install_dir: str,
         if on_progress:
             on_progress(msg)
 
+    staging_dirs = [staging_dir] if isinstance(staging_dir, str) else list(staging_dir)
+
     target = _merge_dir(game_id, install_dir)
     os.makedirs(target, exist_ok=True)
 
-    depot_ids = cfg["depot_ids"]
-    has_depot_subdirs = any(
-        os.path.isdir(os.path.join(staging_dir, f"depot_{d}"))
-        for d in depot_ids
-    )
-
     merged = {}
-    if has_depot_subdirs:
-        for depot_id in depot_ids:
-            depot_path = os.path.join(staging_dir, f"depot_{depot_id}")
-            if not os.path.isdir(depot_path):
-                continue
-            prog(f"Merging depot {depot_id} into {cfg['name']} install...")
-            merged.update(_merge_tree(depot_path, target, prog))
-            prog(f"Depot {depot_id} merged.")
-    else:
-        prog(f"Merging 32-bit files into {cfg['name']} install...")
-        merged.update(_merge_tree(staging_dir, target, prog))
-        prog("Merge complete.")
+    for sdir in staging_dirs:
+        subdirs = _depot_subdirs(sdir, cfg["depot_ids"])
+        if subdirs:
+            for depot_id, depot_path in subdirs:
+                prog(f"Merging depot {depot_id} into {cfg['name']} install...")
+                merged.update(_merge_tree(depot_path, target, prog))
+                prog(f"Depot {depot_id} merged.")
+        else:
+            prog(f"Merging 32-bit files into {cfg['name']} install...")
+            merged.update(_merge_tree(sdir, target, prog))
+            prog("Merge complete.")
 
     if merged:
         _write_receipt(game_id, install_dir, merged)
@@ -967,11 +1039,12 @@ def merge_depots(game_id: str, staging_dir: str, install_dir: str,
     _cleanup_dd_artifacts(target)
 
     prog("Cleaning up depot staging files...")
-    try:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        prog("Staging files removed.")
-    except Exception as ex:
-        prog(f"Could not remove staging dir: {ex}")
+    for sdir in staging_dirs:
+        try:
+            shutil.rmtree(sdir, ignore_errors=True)
+        except Exception as ex:
+            prog(f"Could not remove staging dir {sdir}: {ex}")
+    prog("Staging files removed.")
 
     # Post-merge sanity: MW3 skips this since the game root stays 64-bit
     # by design. Other games check their marker files.

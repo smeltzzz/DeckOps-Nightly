@@ -574,6 +574,18 @@ _PLUT_KEY_MAP = {
     "iw5mp_ds": "iw5mp",
 }
 
+def bash_name_arg(player_name) -> str:
+    """+name "<name>" for a bash script. The name sits in double quotes, where
+    bash still expands $ and `, so a name like  Bob $(...)  ran a command on
+    every offline launch. Cleaned by config, then escaped as well. Always
+    the  +name "..."  shape game_config._rename_in_lan_scripts looks for."""
+    from config import clean_player_name
+    name = clean_player_name(player_name) or "Player"
+    for ch in ("\\", "$", "`"):     # the characters bash expands inside "..."
+        name = name.replace(ch, "\\" + ch)
+    return '+name "' + name.replace('"', "") + '"'
+
+
 def _plut_key(game_key: str) -> str:
     """Return the Plutonium protocol key for a DeckOps game key."""
     return _PLUT_KEY_MAP.get(game_key, game_key)
@@ -658,12 +670,12 @@ def _write_offline_wrapper(game: dict, game_key: str, source: str = "steam") -> 
 
     import config as _cfg
     from steam_common import wine_path_for_prefix
-    name = (_cfg.get_player_name() or "Player").replace('"', "")
+    name_arg = bash_name_arg(_cfg.get_player_name())
     mode = _plut_key(game_key)
     game_dir = plut_game_dir(game_key, install_dir, source)
     q = lambda v: "'" + v.replace("'", "'\\''") + "'"
     run = (f'exec {q(os.path.join(os.path.dirname(_OLED_HERE), "assets", "LAN", "lan_server.sh"))} '
-           f'{mode} {q(wine_path_for_prefix(game_dir, LAN_PREFIX))} +name "{name}"')
+           f'{mode} {q(wine_path_for_prefix(game_dir, LAN_PREFIX))} {name_arg}')
     lines = ["#!/bin/bash", f"# DeckOps offline {mode} (plutonium._write_offline_wrapper)"]
     if game_key in LAN_KEYS:
         run += f" {LAN_PORT} {q(wine_path_for_prefix(game_dir, LAN_SERVER_PREFIX))} " + _LAN_SERVER_ARGS[mode]

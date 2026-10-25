@@ -14,6 +14,7 @@
 
 init()
 {
+    botsRestoreSaved();
     level.dcac = dcacCatalog();
     level thread onPlayerConnect();
     level thread applyMatchOptions();
@@ -353,7 +354,16 @@ botSkillName(n)
     return "Veteran";
 }
 
-// Bots hold still while anyone has the menu open (Bot Warfare reads bots_play_* live)
+botPlayDvars()
+{
+    return strTok("bots_play_move,bots_play_fire,bots_play_knife,bots_play_nade,bots_play_killstreak", ",");
+}
+
+// Bots hold still while anyone has the menu open (Bot Warfare reads bots_play_* live).
+// bots_play_* are server dvars and outlive the level, but level.* does not: an sd round ending
+// with map_restart (players are frozen then, so menuPauseWatch never fires), or any other level
+// change with the menu open, used to leave them at 0 for good. So the originals also go in the
+// dcac_botplay_saved server dvar, which init() puts back on the next level.
 botsPause()
 {
     if (!isDefined(level.dcac_menus)) level.dcac_menus = 0;
@@ -361,12 +371,35 @@ botsPause()
     if (level.dcac_menus > 1)
         return;
     level.dcac_botplay = [];
-    dvars = strTok("bots_play_move,bots_play_fire,bots_play_knife,bots_play_nade,bots_play_killstreak", ",");
+    dvars = botPlayDvars();
+    saved = "";
     for (i = 0; i < dvars.size; i++)
     {
-        level.dcac_botplay[dvars[i]] = getDvar(dvars[i]);
+        v = getDvar(dvars[i]);
+        level.dcac_botplay[dvars[i]] = v;
+        // strTok drops empty tokens, so an unset dvar is saved as "-"
+        if (v == "") v = "-";
+        if (i > 0) saved += ",";
+        saved += v;
         setDvar(dvars[i], "0");
     }
+    setDvar("dcac_botplay_saved", saved);
+}
+
+// From init(): the previous level ended with the menu open, so its pause was never undone
+botsRestoreSaved()
+{
+    saved = getDvar("dcac_botplay_saved");
+    if (saved == "")
+        return;
+    vals = strTok(saved, ",");
+    dvars = botPlayDvars();
+    for (i = 0; i < dvars.size && i < vals.size; i++)
+    {
+        if (vals[i] == "-") setDvar(dvars[i], "");
+        else setDvar(dvars[i], vals[i]);
+    }
+    setDvar("dcac_botplay_saved", "");
 }
 
 // OPTIONAL: the Esc menu sends dcac_pause when it opens (Create-a-Class is reached through it). Menus can't send
@@ -403,9 +436,15 @@ botsResume()
     level.dcac_menus--;
     if (level.dcac_menus > 0)
         return;
-    keys = getArrayKeys(level.dcac_botplay);
-    for (i = 0; i < keys.size; i++)
-        setDvar(keys[i], level.dcac_botplay[keys[i]]);
+    if (isDefined(level.dcac_botplay))
+    {
+        keys = getArrayKeys(level.dcac_botplay);
+        for (i = 0; i < keys.size; i++)
+            setDvar(keys[i], level.dcac_botplay[keys[i]]);
+    }
+    // Cleared so botSetting/botToggle go back to the live dvars instead of a stale copy
+    level.dcac_botplay = undefined;
+    setDvar("dcac_botplay_saved", "");
 }
 
 // Maps and modes in WaW's order, names from its own strings (gen_catalog.py)

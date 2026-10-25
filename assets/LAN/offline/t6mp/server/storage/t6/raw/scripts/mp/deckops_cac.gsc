@@ -1417,6 +1417,15 @@ botsHold()
             if (p isBotPlayer())
                 p freezecontrols(true);
         wait 0.25;
+        // A player who disconnects with the menu open never runs cacCleanup (watchDeath ends on
+        // disconnect), which left every bot frozen until the map changed: recount who really has
+        // the menu open (after the wait: showMenu calls botsPause before it sets cac_ui)
+        open = 0;
+        foreach (p in level.players)
+            if (isdefined(p) && isdefined(p.cac_ui))
+                open++;
+        if (open < level.dcac_menus)
+            level.dcac_menus = open;
     }
     if (level.inprematchperiod)
         return;

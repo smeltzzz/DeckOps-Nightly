@@ -49,6 +49,10 @@ class BootstrapScreen(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        # Window restored / re-mapped: the bootstrap is already running
+        # (a second _bootstrap.run thread would race it)
+        if e.spontaneous():
+            return
         _start_audio()
         if _bootstrap.all_ready():
             QTimer.singleShot(300, self._proceed); return
@@ -161,11 +165,16 @@ class DeckOpsWindow(QMainWindow):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def run():
+    import crash
+    crash.install()     # no-op if main.py already did
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     _load_font()
     app.setStyleSheet(_app_style())
     win = DeckOpsWindow()
+    # With a sys.excepthook set, PyQt no longer aborts on an error in a slot;
+    # this adds the dialog so the user knows something failed
+    crash.install_qt(lambda: win)
     win.showMaximized()
     sys.exit(app.exec())
 

@@ -5,9 +5,13 @@
 # Change BRANCH to switch between nightly and stable.
 # Everything else derives from it.
 #
-# Usage in any shell script:
-#   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Usage in any shell script (see install.sh for the full pattern):
+#   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   source "$SCRIPT_DIR/deckops_identity.sh"
+#   [ "$BRANCH" = "<this branch>" ] || <use built-in fallback values>
+# Never fall back to the OTHER branch's install dir: stable and nightly can
+# be installed side by side, and loading the wrong identity makes a script
+# install, update or manage the wrong branch.
 
 # ── The one value you change per branch ──────────────────────────────────────
 
@@ -15,7 +19,7 @@ BRANCH="nightly"  # "nightly" or "stable"
 
 # ── Everything below is derived ──────────────────────────────────────────────
 
-GITHUB_USER="GalvarinoDev"
+GITHUB_USER="smeltzzz"
 
 if [ "$BRANCH" = "nightly" ]; then
     GITHUB_REPO="DeckOps-Nightly"

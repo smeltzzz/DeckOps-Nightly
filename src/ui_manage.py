@@ -1191,6 +1191,8 @@ class SetupCompleteScreen(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        if e.spontaneous():     # window restored, not a screen change
+            return
         is_lcd = cfg.is_lcd()
         self._lcd_div.setVisible(is_lcd)
         self._lcd_hdr.setVisible(is_lcd)
@@ -1430,6 +1432,8 @@ class ConfigureScreen(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if event.spontaneous():     # window restored: don't overwrite what's being typed
+            return
         # Sync music toggle with current state (may have changed via mute button)
         self._music_on = cfg.get_music_enabled()
         self._music_toggle.setText("Music: ON" if self._music_on else "Music: OFF")
@@ -1550,7 +1554,7 @@ class ConfigureScreen(QWidget):
                     gyro_mode,
                     on_progress=lambda msg: s.log.emit(msg)
                 )
-                if cfg.is_docked():
+                if cfg.uses_external_controller():
                     controller_type = cfg.get_external_controller() or "playstation"
                     assign_external_controller_profiles(
                         controller_type,
@@ -1588,10 +1592,13 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _save_name(self):
-        name = self._name_input.text().strip()
+        typed = self._name_input.text().strip()
+        name = cfg.clean_player_name(typed)
         if not name:
-            self.status.setText("Please enter a name.")
+            self.status.setText("Please enter a name (letters, numbers and most symbols; "
+                                "not \" \\ / $ ` ; < > : | ? *).")
             return
+        self._name_input.setText(name)
         cfg.set_player_name(name)
         self.status.setText(f"Updating player name to \"{name}\"...")
         s = _Sigs()
@@ -1939,7 +1946,8 @@ class UpdateScreen(QWidget):
         lr = QHBoxLayout(); lr.addStretch(); lr.addWidget(log_btn); lr.addWidget(self._log_status); lr.addStretch()
         lay.addLayout(lr)
 
-        self.steam_btn = _btn("Steam is closed  ✓", C_TREY, size=13, h=52)
+        # Shown while waiting for the Plutonium window; DeckOps closes Steam itself afterwards
+        self.steam_btn = _btn("I've closed Plutonium  ✓", C_TREY, size=13, h=52)
         self.steam_btn.setFixedWidth(360); self.steam_btn.setVisible(False)
         self.steam_btn.clicked.connect(lambda: self._steam_closed.set())
         sw = QHBoxLayout(); sw.addStretch(); sw.addWidget(self.steam_btn); sw.addStretch()
@@ -1965,6 +1973,10 @@ class UpdateScreen(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        # Spontaneous = window restored / re-mapped, not a screen change: that
+        # used to clear the log and start a second update thread
+        if e.spontaneous():
+            return
         self.bar.setValue(0); self.log.clear()
         self.title.setText(self.task[0] if self.task else "UPDATE")
         self.steam_btn.setVisible(False); self.back_btn.setVisible(False)
@@ -2125,14 +2137,19 @@ class UpdateScreen(QWidget):
         except Exception as ex:
             self._s.log.emit(f"  GE-Proton update skipped: {ex}")
 
-        if not has_plut:
-            self._s.progress.emit(5, "Closing Steam...")
-            self._s.log.emit("Closing Steam...")
-            try:
-                kill_steam(on_progress=lambda msg: self._s.log.emit(f"  {msg}"))
-                self._s.log.emit("  ✓ Steam closed.")
-            except Exception as ex:
-                self._s.log.emit(f"  Could not close Steam: {ex}")
+        # Always close Steam before the config writes below (launch options,
+        # compat tools, Steam Input, shortcuts): Steam rewrites config.vdf and
+        # localconfig.vdf when it exits, so anything written while it runs is
+        # lost. This used to be skipped whenever a Plutonium game was in the
+        # update -- the button only waits for the Plutonium window, not Steam.
+        # Same order as InstallScreen: Plutonium step first, then close Steam.
+        self._s.progress.emit(5, "Closing Steam...")
+        self._s.log.emit("Closing Steam...")
+        try:
+            kill_steam(on_progress=lambda msg: self._s.log.emit(f"  {msg}"))
+            self._s.log.emit("  ✓ Steam closed.")
+        except Exception as ex:
+            self._s.log.emit(f"  Could not close Steam: {ex}")
 
         # ── Clean slate: clear launch options and compat tools ─────────
         # Same clean-slate approach as InstallScreen.
@@ -2202,12 +2219,23 @@ class UpdateScreen(QWidget):
                     steamapps = os.path.dirname(os.path.dirname(game["install_dir"]))
                     compat = os.path.join(steamapps, "compatdata", str(_appid))
 
+                # CoD4 installers put registry keys, launcher.dll and the client
+                # DLL into the prefix of the appid they're given. An own copy runs
+                # in its shortcut's prefix, not Steam CoD4's (7940) -- the same
+                # appid InstallScreen passes (enrich_own_games' shortcut_appid).
+                cod4_appid = gd["appid"]
+                if source == "own" and c in ("cod4r", "cod4x", "iw3sp"):
+                    from shortcut import own_shortcut_appid
+                    from steam_common import nvme_compatdata
+                    cod4_appid = game.get("shortcut_appid") or own_shortcut_appid(key, game)
+                    compat = game.get("compatdata_path") or nvme_compatdata(cod4_appid)
+
                 if c == "cod4r":
                     install_cod4r(game, self.steam_root, proton, compat, op,
-                                  appid=gd["appid"], source=source)
+                                  appid=cod4_appid, source=source)
                 elif c == "cod4x":
                     install_cod4x(game, self.steam_root, proton, compat, op,
-                                  appid=gd["appid"])
+                                  appid=cod4_appid)
                 elif c == "iw3sp":
                     install_iw3sp(game, self.steam_root, proton, compat, op,
                                   source=source)

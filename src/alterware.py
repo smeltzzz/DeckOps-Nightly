@@ -9,8 +9,10 @@ the install step.
 For Steam games:
   - Sets Steam launch options to redirect the game exe to the mod exe
     using bash parameter substitution on %command%
-  - The original exe is NEVER modified — iw6-mod.exe maps the original
-    binary into memory at runtime, so it must remain a valid PE file
+  - The launch-option redirect never touches the original exe — iw6-mod.exe
+    maps it into memory at runtime, so it must remain a valid PE file.
+    (Ghosts' iw6mp64_ship.exe IS replaced by AlterWare's CDN build, see
+    _CDN_GAME_EXES; the stock copy is kept as iw6mp64_ship.exe.deckops_orig.)
   - Steam's own Proton invocation handles all env vars, cwd, prefix
   - GE-Proton compat tool mapping (set by ge_proton.py) is required
 
@@ -67,10 +69,16 @@ def cdn_digests() -> dict:
 
 # Game exe replacements the launcher doesn't download on its own.
 # (cdn_path, local_filename) — downloaded after the launcher finishes.
+# These overwrite a stock game file, so the original is kept first as
+# <file>.deckops_orig (see _backup_stock_file) for the uninstaller.
 _CDN_GAME_EXES = {
     "iw6mp": [("iw6/iw6mp64_ship.exe", "iw6mp64_ship.exe")],
     "iw6sp": [("iw6/iw6mp64_ship.exe", "iw6mp64_ship.exe")],
 }
+
+# Not ".bak": _migrate_old_wrapper treats a .bak as a legacy wrapper backup
+# and restores it over the exe.
+ORIG_SUFFIX = ".deckops_orig"
 
 METADATA_FILE = "deckops_alterware.json"
 
@@ -153,6 +161,40 @@ def _migrate_old_wrapper(install_dir: str, original_exe: str):
         if os.path.exists(original_path):
             os.remove(original_path)
         os.rename(backup_path, original_path)
+
+
+def _sha1(path: str) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _backup_stock_file(path: str, digest: str | None) -> bool:
+    """
+    Keep the stock copy of a game file the CDN download is about to replace,
+    as <path>.deckops_orig, so uninstall can put it back (a Steam "verify"
+    was the only way before). Only the first, real original is kept: nothing
+    happens if a backup already exists, the file is missing, or the file
+    already is the CDN build (sha1 matches). Without a CDN hash the file is
+    backed up anyway -- at worst that keeps a copy of a CDN build that is
+    already on disk.
+    Returns True if a backup exists afterwards.
+    """
+    backup = path + ORIG_SUFFIX
+    if os.path.exists(backup):
+        return True
+    if not os.path.isfile(path):
+        return False
+    if digest and digest.startswith("sha1:") and _sha1(path) == digest[5:].lower():
+        return False    # already the CDN build, the original is gone
+    tmp = backup + ".tmp"
+    shutil.copy2(path, tmp)
+    os.replace(tmp, backup)
+    _log.info("AlterWare: kept stock %s as %s", os.path.basename(path), os.path.basename(backup))
+    return True
 
 
 # ── public API ────────────────────────────────────────────────────────────────
@@ -265,11 +307,26 @@ def install_alterware(game: dict, game_key: str,
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(f"Failed to run AlterWare launcher: {e}")
 
+    # ── Step 3a: Undo the old wrapper-over-exe flow (Steam installs) ─────
+    # Before the CDN step: it puts a legacy .bak back over the exe, which
+    # used to undo the CDN replacement downloaded just before it.
+    appid = _APPIDS.get(game_key)
+    if source != "own" and appid and steam_root:
+        prog(74, "Checking for old wrapper migration...")
+        _migrate_old_wrapper(install_dir, original_exe)
+
     # ── Step 3b: Download CDN game exe replacements ─────────────────────
     cdn_files = _CDN_GAME_EXES.get(game_key, [])
     digests = cdn_digests() if cdn_files else {}
     for cdn_path, local_name in cdn_files:
         dst = os.path.join(install_dir, local_name)
+        try:
+            _backup_stock_file(dst, digests.get(cdn_path))
+        except OSError as e:
+            # No backup, no overwrite: leave the stock file alone
+            _log.warning("Could not back up %s, CDN replacement skipped: %s", local_name, e)
+            prog(76, f"Warning: could not back up {local_name}, left it unchanged: {e}")
+            continue
         prog(75, f"Downloading {local_name} from CDN...")
         try:
             _download(
@@ -307,12 +364,7 @@ def install_alterware(game: dict, game_key: str,
     # -multiplayer / -singleplayer to bypass it.
     mode_flag = _MODE_FLAGS.get(game_key, "")
     if source != "own":
-        appid = _APPIDS.get(game_key)
         if appid and steam_root:
-            # Migrate from old wrapper flow if needed — restore original exe
-            prog(83, "Checking for old wrapper migration...")
-            _migrate_old_wrapper(install_dir, original_exe)
-
             prog(85, f"Setting launch options for {original_exe}...")
             launch_opt = _build_launch_option(original_exe, client_exe,
                                               mode_flag)
@@ -336,6 +388,13 @@ def install_alterware(game: dict, game_key: str,
         "game_key": game_key,
         "download_bonus": download_bonus,
         "mode_flag": mode_flag,
+        # Stock files replaced by CDN builds -> their backups (for uninstall).
+        # Listed from disk so iw6sp/iw6mp, which share this file, both keep it.
+        "replaced_files": {
+            n: n + ORIG_SUFFIX
+            for n in sorted({ln for k in _CDN_GAME_EXES for _, ln in _CDN_GAME_EXES[k]})
+            if os.path.exists(os.path.join(install_dir, n + ORIG_SUFFIX))
+        },
     })
 
     # ── Step 7: Clean up temp dir ─────────────────────────────────────────

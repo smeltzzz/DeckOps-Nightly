@@ -13,10 +13,11 @@ import hashlib
 import json
 import os
 import shutil
+import urllib.parse
 import urllib.request
 
 from log import get_logger
-from net import download as _download, DownloadError, BROWSER_UA
+from net import download as _download, BROWSER_UA
 
 _log = get_logger(__name__)
 
@@ -129,8 +130,36 @@ def _manifest_hash(file_list: list) -> str:
     return hashlib.sha256("\n".join(file_list).encode()).hexdigest()[:16]
 
 
+# Everything ZD ships lives under one of these (relative to storage/t6)
+_ALLOWED_PREFIXES = ("mods/dlc5/", "usermaps/zm_", "raw/maps/", "raw/scripts/")
+
+
+def _check_relpath(relpath: str) -> bool:
+    """A manifest entry must be a plain relative path under one of ZD's own
+    folders: no absolute path, no "..", no backslashes or empty parts.
+    Entries went straight into os.path.join before, so a tampered manifest
+    (plain-text, from a third-party CDN) could write anywhere the user can."""
+    if not relpath or relpath.startswith("/") or "\\" in relpath or "\x00" in relpath:
+        return False
+    parts = relpath.split("/")
+    if any(p in ("", ".", "..") for p in parts) or ":" in parts[0]:
+        return False
+    return relpath.startswith(_ALLOWED_PREFIXES)
+
+
+def _safe_dest(plut_storage_t6: str, relpath: str) -> str:
+    """Destination of a checked entry, which must also resolve inside
+    storage/t6 (a symlinked folder could otherwise lead outside)."""
+    root = os.path.realpath(plut_storage_t6)
+    dest = os.path.realpath(os.path.join(plut_storage_t6, relpath))
+    if not dest.startswith(root + os.sep):
+        raise RuntimeError(f"Zombies Declassified path escapes storage/t6: {relpath}")
+    return os.path.join(plut_storage_t6, relpath)
+
+
 def fetch_manifest(on_progress=None):
-    """Fetch manifest.txt from Littlegods CDN. Returns list of relative paths."""
+    """Fetch manifest.txt from Littlegods CDN. Returns list of relative paths.
+    Refuses the whole manifest if any entry isn't a safe ZD path."""
     if on_progress:
         on_progress(0, "Checking for Zombies Declassified files...")
 
@@ -143,7 +172,63 @@ def fetch_manifest(on_progress=None):
     if not files:
         raise RuntimeError("Empty manifest from Littlegods CDN")
 
+    bad = [f for f in files if not _check_relpath(f)]
+    if bad:
+        raise RuntimeError(f"Zombies Declassified manifest has unexpected paths, refusing it: {bad[:5]}")
+
     return files
+
+
+def _file_url(relpath: str) -> str:
+    return ZD_CDN_BASE + urllib.parse.quote(relpath)
+
+
+def _remote_info(url: str):
+    """(size, etag) from a HEAD request, (None, None) if unavailable."""
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers=BROWSER_UA)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            size = r.headers.get("Content-Length")
+            return (int(size) if size and size.isdigit() else None,
+                    (r.headers.get("ETag") or "").strip())
+    except Exception:
+        _log.debug("HEAD failed for %s", url, exc_info=True)
+        return None, None
+
+
+def _etag_matches(path: str, etag: str):
+    """
+    Check a file against the CDN's ETag. True/False, or None if the ETag
+    isn't a checksum we can reproduce. The CDN is S3-style: a plain ETag is
+    the file's MD5; a multipart one ("<md5>-<N>") is the MD5 of the N parts'
+    MD5 digests (8 MiB parts on this CDN; other common sizes tried too).
+    """
+    tag = etag.strip()
+    if tag.startswith("W/"):
+        return None
+    tag = tag.strip('"').lower()
+    digest, _, parts = tag.partition("-")
+    if len(digest) != 32 or any(c not in "0123456789abcdef" for c in digest):
+        return None
+    if not parts:
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest() == digest
+    if not parts.isdigit():
+        return None
+    n, size = int(parts), os.path.getsize(path)
+    for part_size in (8 << 20, 16 << 20, 5 << 20, 15 << 20, 64 << 20, 100 << 20):
+        if -(-size // part_size) != n:
+            continue
+        md5s = []
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(part_size), b""):
+                md5s.append(hashlib.md5(chunk).digest())
+        if hashlib.md5(b"".join(md5s)).hexdigest() == digest:
+            return True
+    return False
 
 
 def _metadata_path(plut_storage_t6: str) -> str:
@@ -165,18 +250,26 @@ def get_zd_info(plut_storage_t6: str) -> dict:
         return {}
 
 
-def _write_metadata(plut_storage_t6: str, manifest_files: list):
+def _write_metadata(plut_storage_t6: str, manifest_files: list, failed=()):
     from datetime import datetime
     mp = _metadata_path(plut_storage_t6)
     os.makedirs(os.path.dirname(mp), exist_ok=True)
+    # A partial install must not look complete: update_zd skips when the
+    # stored hash equals the manifest's, so failed files were never retried.
+    # "incomplete-..." never equals it, so the next update fetches them.
+    h = _manifest_hash(manifest_files)
     meta = {
-        "manifest_hash": _manifest_hash(manifest_files),
+        "manifest_hash": h if not failed else f"incomplete-{h}",
         "installed_at": datetime.now().isoformat(),
         "file_count": len(manifest_files),
         "source": "littlegods",
     }
-    with open(mp, "w") as f:
+    if failed:
+        meta["failed_files"] = list(failed)
+    tmp = mp + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(meta, f, indent=2)
+    os.replace(tmp, mp)
 
 
 def install_zd(plut_storage_t6: str, on_progress=None):
@@ -195,11 +288,15 @@ def install_zd(plut_storage_t6: str, on_progress=None):
 
     errors = []
     for idx, relpath in enumerate(files):
-        dest = os.path.join(plut_storage_t6, relpath)
-        url = ZD_CDN_BASE + relpath
+        dest = _safe_dest(plut_storage_t6, relpath)
+        url = _file_url(relpath)
+        size, etag = _remote_info(url)
 
-        # Skip if file already exists with non-zero size
-        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+        # Keep a file that's already there when its size matches the CDN's
+        # (or the CDN gave none): a truncated or stale file is replaced now,
+        # where "exists and isn't empty" used to keep it forever.
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0 and \
+                (size is None or os.path.getsize(dest) == size):
             pct = 2 + int((idx + 1) / total * 96)
             prog(pct, f"Verified {idx + 1}/{total}: {relpath}")
             continue
@@ -216,15 +313,29 @@ def install_zd(plut_storage_t6: str, on_progress=None):
                 on_progress=lambda p, m, _i=idx: prog(
                     2 + int(_i * _span + p * _span / 100), m),
                 label=f"{idx + 1}/{total}: {relpath}", timeout=300)
-        except DownloadError:
+        except Exception as ex:
+            # net.download re-raises the network error itself, not DownloadError:
+            # catching only DownloadError let the first failure abort the whole pack
+            _log.warning("ZD download failed for %s: %s", relpath, ex)
             errors.append(relpath)
             continue
 
+        problem = None
         if not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+            problem = "empty or missing after download"
+        elif size is not None and os.path.getsize(dest) != size:
+            problem = f"size {os.path.getsize(dest)} != {size}"
+        elif etag and _etag_matches(dest, etag) is False:
+            problem = "checksum (ETag) mismatch"
+        if problem:
+            _log.warning("ZD file rejected, %s: %s", problem, relpath)
             errors.append(relpath)
-            _log.warning("Empty or missing after download: %s", relpath)
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
 
-    _write_metadata(plut_storage_t6, files)
+    _write_metadata(plut_storage_t6, files, errors)
 
     if errors:
         prog(100, f"Installed with {len(errors)} error(s)")

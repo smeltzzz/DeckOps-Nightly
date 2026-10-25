@@ -1242,10 +1242,17 @@ botsResume()
     level.dcac_menus--;
     if (level.dcac_menus > 0)
         return;
-    level notify("dcac_bots_resume");
+    botsUnfreeze();
+}
+
+botsUnfreeze()
+{
+    level.dcac_menus = 0;
     for (i = 0; i < level.players.size; i++)
         if ((level.players[i] getGuid() + "") == "0")
             level.players[i] freezeControls(false);
+    // Last: this ends botsFreeze, which may be the thread running this
+    level notify("dcac_bots_resume");
 }
 
 // Re-applied every second: bots that spawn or join while the menu is open freeze too
@@ -1258,6 +1265,18 @@ botsFreeze()
             if ((level.players[i] getGuid() + "") == "0")
                 level.players[i] freezeControls(true);
         wait 1;
+        // A player who disconnects with the menu open never runs cacCleanup (watchDeath ends on
+        // disconnect), which left every bot frozen until the level ended: recount who really has
+        // the menu open, and resume once nobody does
+        open = 0;
+        for (i = 0; i < level.players.size; i++)
+            if (isDefined(level.players[i]) && isDefined(level.players[i].cac_ui))
+                open++;
+        if (open >= level.dcac_menus)
+            continue;
+        level.dcac_menus = open;
+        if (open == 0)
+            botsUnfreeze();
     }
 }
 

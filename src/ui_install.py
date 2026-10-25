@@ -81,6 +81,8 @@ class WelcomeScreen(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        if e.spontaneous():     # window restored, not a screen change
+            return
         self._start_scan()
 
     def _go_back(self):
@@ -239,6 +241,8 @@ class SetupScreen(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        if e.spontaneous():     # window restored: keep the user's ticks
+            return
         self.warning.setVisible(False)
         self._build()
 
@@ -958,7 +962,7 @@ class _BaseInstallScreen(QWidget):
         """
         from depot_downgrade import (
             ensure_depotdownloader, run_depot_download_qr,
-            find_depot_staging, merge_depots, open_steam_console,
+            find_depot_stagings, merge_depots, open_steam_console,
             GAME_CONFIGS,
         )
 
@@ -977,6 +981,10 @@ class _BaseInstallScreen(QWidget):
         depot_num = 0
 
         if self._iw5_method == "qr":
+            # DepotDownloader may save a login from here on; the caller removes
+            # it (files changed since this time) whether or not this succeeds
+            import time as _time
+            self._dg_qr_started = _time.time()
             self._s.log.emit(
                 f"Downloading depot files for: {game_names}.\n"
                 "  Scan the QR code with your Steam mobile app.\n"
@@ -1049,7 +1057,7 @@ class _BaseInstallScreen(QWidget):
             self._s.progress.emit(self._ppct(2), "Depot download...")
             open_steam_console()
 
-            for game_id, game_name, install_dir, _, cmds in dg_jobs:
+            for game_id, game_name, install_dir, depots, cmds in dg_jobs:
                 gcfg = GAME_CONFIGS[game_id]
                 for cmd in cmds:
                     depot_num += 1
@@ -1064,7 +1072,10 @@ class _BaseInstallScreen(QWidget):
                     self._iw5_dg_event.wait()
                     self._s.iw5_dg_go.emit()
 
-                staging = find_depot_staging(self.steam_root, gcfg["app_id"])
+                # Steam saves each depot under the app it was requested from
+                # (MP, DS and DLC depots aren't under the base app)
+                staging = find_depot_stagings(
+                    self.steam_root, [d.get("app", gcfg["app_id"]) for d in depots])
                 if not staging:
                     self._s.log.emit(
                         f"✗  Could not find staging directory for {game_name}.")
@@ -1243,6 +1254,11 @@ class _BaseInstallScreen(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        # Spontaneous = the window system re-showing the window (restore from
+        # minimised, workspace switch), not a screen change: that used to
+        # clear the log and start a second install over the running one
+        if e.spontaneous():
+            return
         self._reset_and_run()
 
     def _reset_and_run(self):
@@ -1683,20 +1699,25 @@ class _BaseInstallScreen(QWidget):
 
         self.force_downgrade_ids = set()
 
-        _dg_user = None
+        # Clean up whenever the QR method ran -- also after a failure or an
+        # error, when it used to be skipped (it only ran if a depot succeeded)
+        self._dg_qr_started = None
         if _dg_jobs:
             self._phase("depot")
-            _dg_user = self._run_batch_depot_downgrade(_dg_jobs)
-
-        if _dg_user:
-            self._s.log.emit("  Removing DepotDownloader and any saved credentials...")
-            cleanup_depotdownloader()
-            self._s.log.emit("  ✓  Login credentials removed.")
+            try:
+                self._run_batch_depot_downgrade(_dg_jobs)
+            finally:
+                if self._dg_qr_started is not None:
+                    self._s.log.emit("  Removing DepotDownloader and its saved Steam login...")
+                    n = cleanup_depotdownloader(since=self._dg_qr_started)
+                    self._s.log.emit("  ✓  DepotDownloader removed, saved Steam login deleted." if n
+                                     else "  ✓  DepotDownloader removed (no saved Steam login found).")
 
         # --- Plutonium bootstrapper (Steam still running)
         # Downloads Plutonium and launches it so the user can log in. LCD
         # routes through HGL (shared default prefix); OLED uses the
         # dedicated DeckOps prefix via Proton directly.
+        plut_ok = has_plut
         if has_plut:
             from plutonium import (launch_bootstrapper, is_plutonium_ready,
                                    install_plutonium)
@@ -1711,133 +1732,152 @@ class _BaseInstallScreen(QWidget):
             else:
                 plut_ready = is_plutonium_ready()
 
-            if not plut_ready:
-                if is_lcd:
-                    self._s.progress.emit(self._ppct(0), "Setting up Plutonium through HGL...")
-                    self._s.log.emit(
-                        "Setting up Plutonium through HGL...\n"
-                        "  1. HGL will download and launch Plutonium (this may take a few minutes)\n"
-                        "  2. Log in with your Plutonium account\n"
-                        "  3. Close the Plutonium window\n"
-                        "  4. Click the button below to continue"
-                    )
+            # A Plutonium login/download problem only fails the Plutonium games:
+            # it used to end the whole batch (done + return), so Steam was never
+            # closed and every other game -- CoD4 launch option, IW4x, AlterWare,
+            # CleanOps, shortcuts, controller profiles -- was left half set up.
+            def _plut_bootstrap():
+                """Log in to / update Plutonium. None when ready, else the reason."""
+                if not plut_ready:
+                    if is_lcd:
+                        self._s.progress.emit(self._ppct(0), "Setting up Plutonium through HGL...")
+                        self._s.log.emit(
+                            "Setting up Plutonium through HGL...\n"
+                            "  1. HGL will download and launch Plutonium (this may take a few minutes)\n"
+                            "  2. Log in with your Plutonium account\n"
+                            "  3. Close the Plutonium window\n"
+                            "  4. Click the button below to continue"
+                        )
+                    else:
+                        self._s.progress.emit(self._ppct(0), "Launching Plutonium — please log in...")
+                        self._s.log.emit(
+                            "Plutonium is launching now.\n"
+                            "  1. Wait for it to finish downloading\n"
+                            "  2. Log in with your Plutonium account\n"
+                            "  3. Close the Plutonium window\n"
+                            "  4. Click the button below to continue"
+                        )
+                    try:
+                        if is_lcd:
+                            launch_bootstrapper_lcd(
+                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m)
+                            )
+                        else:
+                            launch_bootstrapper(
+                                proton,
+                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
+                                steam_root=self.steam_root,
+                            )
+                    except DownloadError as dl_ex:
+                        _dl_resolved = False
+                        while not _dl_resolved:
+                            self._retry_dl_event.clear()
+                            self._retry_dl_choice = ""
+                            self._s.retry_dl.emit(dl_ex.label, str(dl_ex))
+                            self._retry_dl_event.wait()
+                            if self._retry_dl_choice == "retry":
+                                try:
+                                    if is_lcd:
+                                        launch_bootstrapper_lcd(
+                                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m))
+                                    else:
+                                        launch_bootstrapper(
+                                            proton,
+                                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
+                                            steam_root=self.steam_root)
+                                    _dl_resolved = True
+                                except DownloadError as dl_ex2:
+                                    dl_ex = dl_ex2
+                            elif self._retry_dl_choice == "manual":
+                                self._manual_dl_event.clear()
+                                self._manual_dl_ok = False
+                                self._s.manual_dl.emit(
+                                    dl_ex.url, os.path.dirname(dl_ex.dest),
+                                    os.path.basename(dl_ex.dest), dl_ex.label,
+                                )
+                                self._manual_dl_event.wait()
+                                if not self._manual_dl_ok:
+                                    self._s.log.emit("  ✗  Skipped by user.")
+                                    return "Plutonium download skipped"
+                                self._s.log.emit(f"  ✓  {dl_ex.label} placed manually")
+                                _dl_resolved = True
+                            else:
+                                self._s.log.emit("  ✗  Skipped by user.")
+                                return "Plutonium download skipped"
+                    except Exception as ex:
+                        self._s.log.emit(f"✗  Plutonium launch failed: {ex}")
+                        return f"Plutonium launch failed: {ex}"
+
+                    if is_lcd:
+                        self._s.log.emit(
+                            "⏳  HGL is launching Plutonium. This may take a minute on first run\n"
+                            "   while HGL sets up the Wine prefix."
+                        )
+                        self._s.pulse_start.emit("Waiting for Plutonium login")
+
+                    self._s.plut_wait.emit()
+                    self._plut_event.wait()
+                    self._s.plut_go.emit()
+
+                    if is_lcd:
+                        self._s.pulse_stop.emit()
+
+                    ready_check = is_plutonium_ready_lcd() if is_lcd else is_plutonium_ready()
+                    if not ready_check:
+                        self._s.log.emit(
+                            "✗  Plutonium does not appear to be fully set up.\n"
+                            "   Make sure you logged in and let it finish downloading."
+                        )
+                        return "Plutonium login or download not finished"
+
+                    self._s.log.emit("✓  Plutonium ready.")
                 else:
-                    self._s.progress.emit(self._ppct(0), "Launching Plutonium — please log in...")
+                    self._s.progress.emit(self._ppct(0), "Launching Plutonium to check for updates...")
                     self._s.log.emit(
                         "Plutonium is launching now.\n"
-                        "  1. Wait for it to finish downloading\n"
-                        "  2. Log in with your Plutonium account\n"
+                        "  1. Wait for it to finish updating\n"
+                        "  2. Log in if prompted\n"
                         "  3. Close the Plutonium window\n"
                         "  4. Click the button below to continue"
                     )
-                try:
-                    if is_lcd:
-                        launch_bootstrapper_lcd(
-                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m)
-                        )
-                    else:
-                        launch_bootstrapper(
-                            proton,
-                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
-                            steam_root=self.steam_root,
-                        )
-                except DownloadError as dl_ex:
-                    _dl_resolved = False
-                    while not _dl_resolved:
-                        self._retry_dl_event.clear()
-                        self._retry_dl_choice = ""
-                        self._s.retry_dl.emit(dl_ex.label, str(dl_ex))
-                        self._retry_dl_event.wait()
-                        if self._retry_dl_choice == "retry":
-                            try:
-                                if is_lcd:
-                                    launch_bootstrapper_lcd(
-                                        on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m))
-                                else:
-                                    launch_bootstrapper(
-                                        proton,
-                                        on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
-                                        steam_root=self.steam_root)
-                                _dl_resolved = True
-                            except DownloadError as dl_ex2:
-                                dl_ex = dl_ex2
-                        elif self._retry_dl_choice == "manual":
-                            self._manual_dl_event.clear()
-                            self._manual_dl_ok = False
-                            self._s.manual_dl.emit(
-                                dl_ex.url, os.path.dirname(dl_ex.dest),
-                                os.path.basename(dl_ex.dest), dl_ex.label,
+                    try:
+                        if is_lcd:
+                            launch_bootstrapper_lcd(
+                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m)
                             )
-                            self._manual_dl_event.wait()
-                            if not self._manual_dl_ok:
-                                self._s.log.emit("  ✗  Skipped by user.")
-                                self._s.progress.emit(100, "Setup incomplete."); self._s.done.emit(False); return
-                            self._s.log.emit(f"  ✓  {dl_ex.label} placed manually")
-                            _dl_resolved = True
                         else:
-                            self._s.log.emit("  ✗  Skipped by user.")
-                            self._s.progress.emit(100, "Setup incomplete."); self._s.done.emit(False); return
-                except Exception as ex:
-                    self._s.log.emit(f"✗  Plutonium launch failed: {ex}")
-                    self._s.progress.emit(100, "Setup failed."); self._s.done.emit(False); return
+                            launch_bootstrapper(
+                                proton,
+                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
+                                steam_root=self.steam_root,
+                            )
+                    except Exception as ex:
+                        self._s.log.emit(f"  Plutonium update check skipped: {ex}")
 
-                if is_lcd:
-                    self._s.log.emit(
-                        "⏳  HGL is launching Plutonium. This may take a minute on first run\n"
-                        "   while HGL sets up the Wine prefix."
-                    )
-                    self._s.pulse_start.emit("Waiting for Plutonium login")
-
-                self._s.plut_wait.emit()
-                self._plut_event.wait()
-                self._s.plut_go.emit()
-
-                if is_lcd:
-                    self._s.pulse_stop.emit()
-
-                ready_check = is_plutonium_ready_lcd() if is_lcd else is_plutonium_ready()
-                if not ready_check:
-                    self._s.log.emit(
-                        "✗  Plutonium does not appear to be fully set up.\n"
-                        "   Make sure you logged in and let it finish downloading."
-                    )
-                    self._s.progress.emit(100, "Setup incomplete."); self._s.done.emit(False); return
-
-                self._s.log.emit("✓  Plutonium ready.")
-            else:
-                self._s.progress.emit(self._ppct(0), "Launching Plutonium to check for updates...")
-                self._s.log.emit(
-                    "Plutonium is launching now.\n"
-                    "  1. Wait for it to finish updating\n"
-                    "  2. Log in if prompted\n"
-                    "  3. Close the Plutonium window\n"
-                    "  4. Click the button below to continue"
-                )
-                try:
                     if is_lcd:
-                        launch_bootstrapper_lcd(
-                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m)
-                        )
-                    else:
-                        launch_bootstrapper(
-                            proton,
-                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
-                            steam_root=self.steam_root,
-                        )
-                except Exception as ex:
-                    self._s.log.emit(f"  Plutonium update check skipped: {ex}")
+                        self._s.pulse_start.emit("Waiting for Plutonium update")
 
-                if is_lcd:
-                    self._s.pulse_start.emit("Waiting for Plutonium update")
+                    self._s.plut_wait.emit()
+                    self._plut_event.wait()
+                    self._s.plut_go.emit()
 
-                self._s.plut_wait.emit()
-                self._plut_event.wait()
-                self._s.plut_go.emit()
+                    if is_lcd:
+                        self._s.pulse_stop.emit()
 
-                if is_lcd:
-                    self._s.pulse_stop.emit()
+                    self._s.log.emit("✓  Plutonium ready.")
+                return None
 
-                self._s.log.emit("✓  Plutonium ready.")
+            try:
+                _plut_reason = _plut_bootstrap()
+            except Exception as ex:   # incl. errors raised while retrying a download
+                _plut_reason = f"Plutonium setup failed: {ex}"
+            if _plut_reason:
+                plut_ok = False
+                self._s.log.emit(f"✗  {_plut_reason} -- skipping the Plutonium games, "
+                                 "continuing with the rest")
+                for _k, _gd, _g in self.selected:
+                    if KEY_CLIENT.get(_k) == "plutonium":
+                        self._mark(_k, "failed", _plut_reason)
 
         # --- Kill Steam
         _kill_steam_once()
@@ -1878,8 +1918,8 @@ class _BaseInstallScreen(QWidget):
             except Exception as ex:
                 self._s.log.emit(f"  CompatToolMapping for Steam appids skipped: {ex}")
 
-        # --- Plutonium games
-        if has_plut:
+        # --- Plutonium games (skipped if the Plutonium login failed)
+        if plut_ok:
             try:
                 if cfg.get_offline_mode():
                     from shortcut import create_launcher_shortcut
@@ -2098,7 +2138,7 @@ class _BaseInstallScreen(QWidget):
                     self._s.log.emit(f"✗  IW-Pad install failed ({_sp_key}): {ex}")
 
         # --- Zombies Declassified (optional DLC5 for BO2 Zombies via Plutonium)
-        if has_plut and "t6zm" in selected_keys:
+        if plut_ok and "t6zm" in selected_keys:
             self._phase("zd")
             try:
                 # Check BO2 Zombies DLC prerequisite
@@ -2222,7 +2262,7 @@ class _BaseInstallScreen(QWidget):
                 on_progress=lambda msg: self._s.log.emit(f"  {msg}")
             )
             self._s.log.emit(f"✓  Neptune controller profiles assigned ({gyro_mode} mode)")
-            if cfg.is_docked():
+            if cfg.uses_external_controller():
                 controller_type = cfg.get_external_controller() or "playstation"
                 assign_external_controller_profiles(
                     controller_type,
@@ -2245,13 +2285,17 @@ class _BaseInstallScreen(QWidget):
         # the enrichment data set by enrich_own_games() earlier and writes
         # the actual VDF entries, downloads artwork, assigns controller
         # configs, and sets GE-Proton compat tool per shortcut.
+        # Plutonium games whose login failed weren't installed: no shortcuts for them
+        def _installable(k):
+            return plut_ok or KEY_CLIENT.get(k) != "plutonium"
+
         if has_own:
             gyro_mode = cfg.get_gyro_mode() or "on"
             self._s.progress.emit(self._ppct(60), "Writing own game shortcuts...")
             try:
                 write_own_shortcuts(
                     own_games=own_games,
-                    selected_keys=list(own_selected.keys()),
+                    selected_keys=[k for k in own_selected.keys() if _installable(k)],
                     gyro_mode=gyro_mode,
                     on_progress=lambda msg: self._s.log.emit(msg),
                 )
@@ -2277,7 +2321,7 @@ class _BaseInstallScreen(QWidget):
                 gyro_mode = cfg.get_gyro_mode() or "on"
                 create_shortcuts(
                     installed_games=steam_installed,
-                    selected_keys=steam_keys + sc_extra,
+                    selected_keys=[k for k in steam_keys if _installable(k)] + sc_extra,
                     gyro_mode=gyro_mode,
                     on_progress=lambda msg: self._s.log.emit(msg),
                     steam_root=self.steam_root,

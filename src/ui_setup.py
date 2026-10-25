@@ -566,8 +566,11 @@ class SetupFlowScreen(QWidget):
         self._show("_name_section")
 
     def _save_player_name(self):
-        name = self._name_input.text().strip()
-        cfg.set_player_name(name if name else "Player")
+        # Characters that break configs or scripts are dropped (see
+        # config.clean_player_name); the box shows what was actually saved
+        name = cfg.clean_player_name(self._name_input.text()) or "Player"
+        self._name_input.setText(name)
+        cfg.set_player_name(name)
         cfg.set_game_source("both")
         if self._needs_primary_controller():
             self._show("_primary_controller_section")
@@ -590,6 +593,10 @@ class SetupFlowScreen(QWidget):
     def _pick_primary_controller(self, ctrl_type):
         cfg.set_external_controller(ctrl_type)
         if self._is_general_pc:
+            # A PC always plays "docked": external controller and display.
+            # Recorded so the controller is applied (and a stale handheld
+            # play mode from an earlier setup doesn't hide it).
+            cfg.set_play_mode("docked")
             # PC: need resolution
             self._res_title_lbl.setText("What resolution is your display?")
             self._show("_resolution_section")

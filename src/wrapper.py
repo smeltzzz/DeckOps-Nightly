@@ -196,31 +196,171 @@ def _localconfigs(steam_root):
         yield uid, vdf_path, content
 
 
+# ── Structural text-VDF reading ──────────────────────────────────────────────
+# localconfig.vdf edits go through a small tokenizer instead of regex
+# searches. WARNING: values like bash substitutions
+# (e.g. ${@/iw3sp.exe/iw3sp_mod.exe}) contain { and } that must NOT be
+# counted as block delimiters, and values can contain escaped quotes (\").
+# Anything that doesn't parse raises ValueError and the edit is skipped
+# rather than guessed at.
+
+def _vdf_skip_ws(text, i, end):
+    while i < end:
+        if text[i].isspace():
+            i += 1
+        elif text.startswith("//", i):
+            nl = text.find("\n", i, end)
+            i = end if nl == -1 else nl + 1
+        else:
+            break
+    return i
+
+
+def _vdf_quoted_end(text, i, end):
+    """text[i] is an opening quote: index just past its closing quote."""
+    i += 1
+    while i < end:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == '"':
+            return i + 1
+        i += 1
+    raise ValueError("unterminated string in VDF")
+
+
+def _vdf_brace_end(text, i, end):
+    """text[i] is '{': index of its matching '}' (quote-aware)."""
+    depth = 0
+    while i < end:
+        c = text[i]
+        if c == '"':
+            i = _vdf_quoted_end(text, i, end)
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise ValueError("unbalanced braces in VDF")
+
+
+def _vdf_children(text, start, end):
+    """
+    Direct children of the block body text[start:end]. Yields
+    (key, key_start, value_start, value_end, is_block): for a string value
+    value_start/value_end span the text between its quotes; for a block
+    they are the offsets of its '{' and '}'.
+    """
+    i = start
+    while True:
+        i = _vdf_skip_ws(text, i, end)
+        if i >= end:
+            return
+        if text[i] != '"':
+            raise ValueError(f"unexpected {text[i]!r} in VDF at offset {i}")
+        k_end = _vdf_quoted_end(text, i, end)
+        key = text[i + 1:k_end - 1]
+        j = _vdf_skip_ws(text, k_end, end)
+        if j < end and text[j] == "{":
+            close = _vdf_brace_end(text, j, end)
+            yield key, i, j, close, True
+            i = close + 1
+        elif j < end and text[j] == '"':
+            v_end = _vdf_quoted_end(text, j, end)
+            yield key, i, j + 1, v_end - 1, False
+            i = v_end
+        else:
+            raise ValueError(f"VDF key {key!r} has no value")
+
+
+def _vdf_child_block(text, block, key):
+    """(open, close) of the direct child block named key (case-insensitive)."""
+    open_, close = block
+    for k, _, vs, ve, is_block in _vdf_children(text, open_ + 1, close):
+        if is_block and k.lower() == key.lower():
+            return vs, ve
+    return None
+
+
+# Where Steam keeps per-game settings (LaunchOptions, UseSteamControllerConfig).
+# DeckOps also writes "<appid>" { } blocks elsewhere in localconfig.vdf (the
+# Deck configurator "apps" block, see set_default_launch_option), so the
+# appid must only ever be looked up inside this path.
+_STEAM_APPS_PATH = ("UserLocalConfigStore", "Software", "Valve", "Steam", "apps")
+
+
 def _app_block(content, appid):
     """
-    Return (open, close) brace offsets of the first "<appid>" { block, or None.
+    Return (open, close) brace offsets of the "<appid>" { block under
+    UserLocalConfigStore/Software/Valve/Steam/apps, or None.
 
-    WARNING: Must skip braces inside quoted strings — VDF values like
-    bash substitutions (e.g. ${@/iw3sp.exe/iw3sp_mod.exe}) contain
-    { and } characters that must NOT be counted as block delimiters.
-    Failure to do this will corrupt localconfig.vdf by cutting blocks
-    short and trampling adjacent keys. _find_block_end handles this.
+    This used to take the first "<appid>" { anywhere in the file, which could
+    be a same-named block in another section (Steam then ignores the edit).
     """
-    m = re.search(r'"' + re.escape(appid) + r'"\s*\{', content, re.IGNORECASE)
-    if not m:
+    try:
+        block = (-1, len(content))      # virtual root around the whole file
+        for key in _STEAM_APPS_PATH + (str(appid),):
+            block = _vdf_child_block(content, block, key)
+            if not block:
+                return None
+        return block
+    except ValueError as ex:
+        _log.warning("localconfig.vdf not parsed, edit skipped: %s", ex)
         return None
-    close = _find_block_end(content, m.end() - 1)
-    return None if close == -1 else (m.end() - 1, close)
 
 
-def _split_flat(inner):
+def _flat_values(content, block, key):
     """
-    Split an app block body at its first sub-block: (flat keys, sub-blocks).
-    Only the flat part is edited; keys of the same name inside cloud
-    sub-blocks are never touched.
+    [(key_start, value_start, value_end)] for every direct "key" "value"
+    child of block -- anywhere among the app's own keys, before or after its
+    sub-blocks. Keys of the same name inside sub-blocks (cloud) are never
+    included. (The old _split_flat only looked before the first sub-block,
+    so a LaunchOptions Steam had written after "cloud" { } was missed and a
+    duplicate added.) Raises ValueError if the block doesn't parse.
     """
-    sub = re.search(r'"[^"]+"\s*\{', inner)
-    return (inner[:sub.start()], inner[sub.start():]) if sub else (inner, "")
+    open_, close = block
+    return [(ks, vs, ve) for k, ks, vs, ve, is_block
+            in _vdf_children(content, open_ + 1, close)
+            if not is_block and k.lower() == key.lower()]
+
+
+def _set_flat_value(content, found, value):
+    """Set the first of found (from _flat_values) to value and remove the
+    rest -- duplicates left by older DeckOps versions."""
+    for ks, vs, ve in reversed(found[1:]):
+        line_start = content.rfind("\n", 0, ks) + 1
+        line_end = content.find("\n", ve)
+        line_end = len(content) if line_end == -1 else line_end
+        if not content[line_start:ks].strip() and not content[ve + 1:line_end].strip():
+            content = content[:line_start] + content[line_end + 1:]   # whole line
+        else:
+            content = content[:ks] + content[ve + 1:]
+    _, vs, ve = found[0]
+    return content[:vs] + value + content[ve:]
+
+
+def _insert_flat(content, block, key, value):
+    """Add "key" "value" as the last direct child of block, indented like
+    its siblings."""
+    open_, close = block
+    kids = list(_vdf_children(content, open_ + 1, close))
+    if kids:
+        ks = kids[0][1]
+        indent = content[content.rfind("\n", 0, ks) + 1:ks]
+    else:
+        brace_line = content[content.rfind("\n", 0, open_) + 1:open_]
+        indent = brace_line[:len(brace_line) - len(brace_line.lstrip())] + "\t"
+    if indent.strip():
+        indent = "\t"
+    line = f'{indent}"{key}"\t\t"{value}"\n'
+    line_start = content.rfind("\n", 0, close) + 1
+    if not content[line_start:close].strip():      # '}' on its own line
+        return content[:line_start] + line + content[line_start:]
+    return content[:close] + "\n" + line + content[close:]
 
 
 def _value_pattern(key):
@@ -356,40 +496,31 @@ def set_launch_options(steam_root, appid, options):
     appid = str(appid)
     # Escape double quotes so the value is valid inside a VDF quoted string
     vdf_options = options.replace('"', '\\"')
-    launch_pattern = _value_pattern("LaunchOptions")
 
     for uid, vdf_path, content in _localconfigs(steam_root):
-        # Brace parsing must be quote-aware -- see the WARNING in _app_block.
         block = _app_block(content, appid)
         if not block:
             continue
-        app_open, app_close = block
 
-        # Always write LaunchOptions directly in the flat app block.
+        # Always write LaunchOptions as a direct key of the app block.
         # Steam reads LaunchOptions from here — the cloud sub-block value
         # is NOT shown in Steam properties and should never be written to.
-        flat, rest = _split_flat(content[app_open + 1:app_close])
-        launch_match = launch_pattern.search(flat)
+        try:
+            found = _flat_values(content, block, "LaunchOptions")
+            if found:
+                existing = content[found[0][1]:found[0][2]]
+                if vdf_options in existing and len(found) == 1:
+                    continue
+                new_options = existing if vdf_options in existing else \
+                    (existing.strip() + " " + vdf_options).strip()
+                content = _set_flat_value(content, found, new_options)
+            else:
+                content = _insert_flat(content, block, "LaunchOptions", vdf_options)
+        except ValueError as ex:
+            _log.warning("LaunchOptions not set for %s (uid %s): %s", appid, uid, ex)
+            continue
 
-        if launch_match:
-            existing = launch_match.group(2)
-            if vdf_options in existing:
-                continue
-            new_options = (existing.strip() + " " + vdf_options).strip()
-            flat = launch_pattern.sub(
-                lambda m: m.group(1) + new_options + m.group(3), flat, count=1
-            )
-        else:
-            # Insert before the first sub-block, or at end if no sub-blocks.
-            # Derive indent from existing flat keys so the entry aligns correctly
-            # regardless of how deeply nested this appid block is in the file.
-            # No flat keys: one tab, which is what the old key-line lookup produced.
-            indent_match = re.search(r'\n(\t+)"', flat)
-            indent = indent_match.group(1) if indent_match else '\t'
-            flat += f'{indent}"LaunchOptions"\t\t"{vdf_options}"\n'
-
-        _write_and_validate_vdf(vdf_path, content[:app_open + 1] + flat + rest + content[app_close:],
-                                errors="replace")
+        _write_and_validate_vdf(vdf_path, content, errors="replace")
         _record_localconfig(uid, appid, "LaunchOptions", vdf_options)
 
 
@@ -402,24 +533,24 @@ def clear_launch_options(steam_root, appid):
     Must be called while Steam is closed.
     """
     appid = str(appid)
-    launch_pattern = _value_pattern("LaunchOptions")
 
     for uid, vdf_path, content in _localconfigs(steam_root):
         block = _app_block(content, appid)
         if not block:
             continue
-        app_open, app_close = block
 
-        # Only touch LaunchOptions in the flat block, not inside sub-blocks.
-        flat, rest = _split_flat(content[app_open + 1:app_close])
-        launch_match = launch_pattern.search(flat)
-        if not launch_match or not launch_match.group(2).strip():
+        # Only the app's own LaunchOptions (any position), never sub-blocks.
+        # Duplicates from older versions are merged into one empty key.
+        try:
+            found = _flat_values(content, block, "LaunchOptions")
+        except ValueError as ex:
+            _log.warning("LaunchOptions not cleared for %s (uid %s): %s", appid, uid, ex)
+            continue
+        if not found or (len(found) == 1 and not content[found[0][1]:found[0][2]].strip()):
             continue
 
-        # Clear the value to empty string
-        flat = launch_pattern.sub(r'\g<1>\g<3>', flat, count=1)
-        _write_and_validate_vdf(vdf_path, content[:app_open + 1] + flat + rest + content[app_close:],
-                                errors="replace")
+        content = _set_flat_value(content, found, "")
+        _write_and_validate_vdf(vdf_path, content, errors="replace")
         _record_localconfig(uid, appid, "LaunchOptions", "")
 
 
@@ -557,7 +688,6 @@ def set_steam_input_enabled(steam_root, appids=None):
         appids = DEFAULT_APPIDS
 
     appids = [str(a) for a in appids]
-    si_pattern = _value_pattern("UseSteamControllerConfig")
 
     for uid, vdf_path, content in _localconfigs(steam_root):
         modified_appids = []
@@ -565,22 +695,19 @@ def set_steam_input_enabled(steam_root, appids=None):
             block = _app_block(content, appid)
             if not block:
                 continue
-            app_open, app_close = block
 
-            # Only patch the flat section, not inside any sub-blocks
-            flat, rest = _split_flat(content[app_open + 1:app_close])
-            si_match = si_pattern.search(flat)
-
-            if si_match:
-                if si_match.group(2) == "1":
-                    continue  # already enabled
-                flat = si_pattern.sub(lambda m: m.group(1) + "1" + m.group(3), flat, count=1)
-            else:
-                indent_match = re.search(r'\n(\t+)"', flat)
-                indent = indent_match.group(1) if indent_match else '\t\t\t\t\t\t'
-                flat += f'{indent}"UseSteamControllerConfig"\t\t"1"\n'
-
-            content = content[:app_open + 1] + flat + rest + content[app_close:]
+            # Only the app's own key (any position), never inside sub-blocks
+            try:
+                found = _flat_values(content, block, "UseSteamControllerConfig")
+                if found:
+                    if len(found) == 1 and content[found[0][1]:found[0][2]] == "1":
+                        continue  # already enabled
+                    content = _set_flat_value(content, found, "1")
+                else:
+                    content = _insert_flat(content, block, "UseSteamControllerConfig", "1")
+            except ValueError as ex:
+                _log.warning("Steam Input not enabled for %s (uid %s): %s", appid, uid, ex)
+                continue
             modified_appids.append(appid)
 
         if modified_appids:

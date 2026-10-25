@@ -244,6 +244,24 @@ def parse_library_folders(steam_root):
     return dirs
 
 
+# appmanifest StateFlags bits (Steam's EAppState)
+_STATE_FULLY_INSTALLED = 4
+_STATE_UNINSTALLING = 2048
+
+
+def _is_installed_state(state_flags) -> bool:
+    """True if an appmanifest StateFlags value means the game is installed.
+
+    StateFlags is a bitfield, so test the fully-installed bit instead of
+    comparing to "4": an installed game with an update pending, paused or
+    running has other bits set too (6, 1030, 1542, ...)."""
+    try:
+        flags = int(state_flags)
+    except (TypeError, ValueError):
+        return False
+    return bool(flags & _STATE_FULLY_INSTALLED) and not flags & _STATE_UNINSTALLING
+
+
 def find_installed_games(library_folders, steam_root=None):
     """
     Scans all Steam library folders and returns a dict of installed DeckOps-supported games.
@@ -281,8 +299,13 @@ def find_installed_games(library_folders, steam_root=None):
             if not install_name:
                 continue
 
-            # StateFlags 4 = fully installed. Skip stale/partial manifests.
-            if state_flags != "4":
+            # StateFlags is a bitfield. Bit 4 = fully installed; other bits ride
+            # along with it (2 = update required, 512 = update paused,
+            # 1024 = update started, ...), so "6" or "1030" is still an
+            # installed game. Comparing to exactly "4" hid every game with a
+            # pending or paused update. Skip stale/partial manifests (no bit 4)
+            # and games being uninstalled (2048).
+            if not _is_installed_state(state_flags):
                 continue
 
             install_dir = os.path.join(steamapps_dir, "common", install_name)

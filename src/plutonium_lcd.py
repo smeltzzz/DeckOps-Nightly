@@ -1302,8 +1302,8 @@ def install_plutonium_lcd(game: dict, game_key: str,
     # 5b. Set Heroic launch options on the Steam library entry so the
     #     game launches online through Heroic. The -lan wrapper from
     #     step 5 stays in place for offline mode via the Plutonium
-    #     launcher. t4mp is excluded (shares appid with t4sp) and gets
-    #     a non-Steam shortcut in shortcut.py instead.
+    #     launcher. t4sp and t4mp share appid 10090 and so one launch
+    #     option; cache_cleanup.py picks SP or MP from the menu entry.
     if source == "steam" and steam_root:
         prog(80, "Setting HGL launch options...")
         _set_heroic_steam_launch_options(
@@ -1375,12 +1375,20 @@ def _set_heroic_steam_launch_options(game_key: str, steam_root: str,
     venv_python = VENV_PYTHON
 
     launch_opts = (
-        f'{venv_python} {cleanup_script} {game_key} steam '
+        f'"{venv_python}" "{cleanup_script}" {game_key} steam '
         f'%command%'
     )
 
     try:
-        from wrapper import set_launch_options, clear_compat_tool, set_compat_tool
+        from wrapper import (set_launch_options, clear_launch_options,
+                             clear_compat_tool, set_compat_tool)
+        # set_launch_options appends to whatever is already there, so clear
+        # first (same as plutonium._setup_steam_menu on OLED). Without this,
+        # WaW SP and MP -- one appid, one launch option -- each append their
+        # own cache_cleanup.py command and the option ends up with two
+        # %command% blocks. Last write wins, which is fine: cache_cleanup.py
+        # takes the real game key from the launch menu entry that was picked.
+        clear_launch_options(steam_root, appid)
         set_launch_options(steam_root, appid, launch_opts)
         prog(f"  HGL launch options set for appid {appid}")
         # Steam only resolves %command% when a compat tool is set, and plain

@@ -14,14 +14,22 @@ warn()    { printf "${YELLOW}${BOLD}[ WARN ]${CLEAR} %s\n" "$1"; }
 skip()    { printf "         %s\n" "$1"; }
 
 # ── Branch identity ──────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
+# Only ever load THIS branch's identity -- never the other branch's install
+# dir (see install.sh). BASH_SOURCE is empty under `curl | bash`.
+EXPECTED_BRANCH="nightly"
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+BRANCH=""
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
     source "$SCRIPT_DIR/deckops_identity.sh"
 elif [ -f "$HOME/DeckOps-Nightly/deckops_identity.sh" ]; then
     source "$HOME/DeckOps-Nightly/deckops_identity.sh"
-elif [ -f "$HOME/DeckOps/deckops_identity.sh" ]; then
-    source "$HOME/DeckOps/deckops_identity.sh"
-else
+fi
+if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then
+    GITHUB_USER="smeltzzz"
+    GITHUB_REPO="DeckOps-Nightly"
     INSTALL_DIR_NAME="DeckOps-Nightly"
     INSTALL_DIR="$HOME/DeckOps-Nightly"
     VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3"
@@ -148,8 +156,12 @@ restore_exe() {
     local exe_path="$install_dir/$exe_name"
     local bak_path="$exe_path.bak"
     local old_path="$exe_path.old"
+    # Stock copy kept before AlterWare's CDN build replaced it (alterware.py)
+    local orig_path="$exe_path.deckops_orig"
 
-    if [ -f "$bak_path" ]; then
+    if [ -f "$orig_path" ]; then
+        mv -f "$orig_path" "$exe_path" && success "Restored $exe_name (stock copy)" || warn "Failed to restore $exe_name"
+    elif [ -f "$bak_path" ]; then
         mv "$bak_path" "$exe_path" && success "Restored $exe_name (from .bak)" || warn "Failed to restore $exe_name"
     elif [ -f "$old_path" ]; then
         mv "$old_path" "$exe_path" && success "Restored $exe_name (from .old)" || warn "Failed to restore $exe_name"
@@ -157,6 +169,53 @@ restore_exe() {
         skip "$exe_name -- no backup found (may already be original)"
     else
         skip "$exe_name -- not found"
+    fi
+}
+
+# CoD4's Miles audio DLL (mss32.dll) is replaced by both CoD4 clients:
+#   - CoD4x: setup.exe drops a chain-loader mss32.dll and keeps the stock
+#     one as miles32.dll (cod4x.py). Moving miles32.dll back restores it.
+#   - CoD4R: overwrites iw3mp.exe, mss32.dll and miles32.dll with its own
+#     builds and keeps no backup (cod4r.py), so only a Steam file
+#     verification can bring the stock files back.
+# miles32.dll is not a stock CoD4 file, so it never needs to survive.
+# Must run before deckops_cod4x.json / deckops_cod4r.json are deleted.
+# Sets COD4_NEEDS_VERIFY=1 when the stock files can't be restored here.
+COD4_NEEDS_VERIFY=0
+restore_cod4_audio() {
+    local d="$1"
+    local mss="$d/mss32.dll"
+    local miles="$d/miles32.dll"
+
+    if [ -f "$d/deckops_cod4r.json" ]; then
+        # miles32.dll is CoD4R's patched build here, not the stock backup.
+        [ -f "$miles" ] && rm -f "$miles" && success "Removed miles32.dll (CoD4R)"
+        # Newer installs keep the stock files as .deckops_orig (cod4x.keep_stock_files)
+        if [ -f "$d/iw3mp.exe.deckops_orig" ] && [ -f "$d/mss32.dll.deckops_orig" ]; then
+            mv -f "$d/iw3mp.exe.deckops_orig" "$d/iw3mp.exe" && \
+            mv -f "$d/mss32.dll.deckops_orig" "$d/mss32.dll" && \
+                success "Restored the stock iw3mp.exe and mss32.dll" || \
+                { warn "Failed to restore iw3mp.exe/mss32.dll -- verify Call of Duty 4 in Steam"; COD4_NEEDS_VERIFY=1; }
+        else
+            warn "CoD4R replaced iw3mp.exe and mss32.dll without a backup."
+            warn "Verify Call of Duty 4 in Steam to restore them."
+            COD4_NEEDS_VERIFY=1
+        fi
+    elif [ -f "$miles" ]; then
+        if [ -f "$mss" ] && cmp -s "$mss" "$miles"; then
+            # Chain-loader never landed; mss32.dll is already the original.
+            rm -f "$miles" && success "Removed duplicate miles32.dll"
+        elif mv -f "$miles" "$mss"; then
+            success "Restored original mss32.dll (from miles32.dll)"
+        else
+            warn "Failed to restore mss32.dll -- verify Call of Duty 4 in Steam"
+            COD4_NEEDS_VERIFY=1
+        fi
+    elif [ -f "$d/deckops_cod4x.json" ]; then
+        # CoD4x was installed but its backup is gone: mss32.dll may still
+        # be the chain-loader, which can't load anything once removed.
+        warn "No miles32.dll backup found -- verify Call of Duty 4 in Steam"
+        COD4_NEEDS_VERIFY=1
     fi
 }
 
@@ -380,11 +439,13 @@ if [ -n "$STEAM_ROOT" ]; then
 
     cod4_dir=$(find_install_dir 7940) || true
     if [ -n "$cod4_dir" ]; then
+        # Before the metadata below is deleted -- it tells CoD4x and CoD4R apart.
+        restore_cod4_audio "$cod4_dir"
         for f in "cod4x_021.dll" "cod4x_loader.exe" "cod4x.exe" "deckops_cod4x.json" "servercache.dat"; do
             [ -f "$cod4_dir/$f" ] && rm -f "$cod4_dir/$f" && success "Removed $f" || skip "$f not found"
         done
-        # CoD4R files
-        for f in "Cod4R-DedRun.exe" "CoD4R-Launcher.exe" "miles32.dll" "deckops_cod4r.json" "pbgame.htm" "eula.txt"; do
+        # CoD4R files (miles32.dll is handled by restore_cod4_audio)
+        for f in "Cod4R-DedRun.exe" "CoD4R-Launcher.exe" "deckops_cod4r.json" "pbgame.htm" "eula.txt"; do
             [ -f "$cod4_dir/$f" ] && rm -f "$cod4_dir/$f" && success "Removed $f" || skip "$f not found"
         done
         for f in "jcod4r_00.iwd" "xcommon_glyphs.iwd" "xcommon_cod4qol.iwd" "xcommon_cod4r_weapons.iwd"; do
@@ -530,7 +591,7 @@ info "Removing mod client files from non-Steam (My Own) game folders..."
 # library. We find them by scanning shortcuts.vdf for known exe names and
 # cleaning up the same files we would for Steam installs.
 python3 - << 'PYEOF'
-import os, re, shutil
+import os, re, shutil, filecmp
 
 STEAM_DIR    = os.path.expanduser("~/.local/share/Steam")
 USERDATA_DIR = os.path.join(STEAM_DIR, "userdata")
@@ -565,7 +626,7 @@ OWN_CLEANUP = {
     "iw3mp.exe": {
         "files": ["cod4x_021.dll", "cod4x_loader.exe", "cod4x.exe",
                   "deckops_cod4x.json", "servercache.dat",
-                  "Cod4R-DedRun.exe", "CoD4R-Launcher.exe", "miles32.dll",
+                  "Cod4R-DedRun.exe", "CoD4R-Launcher.exe",
                   "deckops_cod4r.json",
                   "pbgame.htm", "eula.txt"],
         "dirs":  ["userraw", "Mods/mp_bots"],
@@ -575,6 +636,8 @@ OWN_CLEANUP = {
             "zone/english": ["cod4r_patchv2.ff", "cod4r_controls.ff",
                              "cod4r_ambfix.ff", "qol.ff"],
         },
+        # miles32.dll is handled by restore_cod4_audio() below
+        "restore_cod4_audio": True,
     },
     "iw3sp.exe": {
         "files": ["iw3sp_mod.exe", "iw3sp_mod.dll", "deckops_iw3sp.json"],
@@ -610,11 +673,14 @@ OWN_CLEANUP = {
         "files": ["iw6-mod.exe", "alterware-launcher.json", "awcache.json",
                   "deckops_alterware.json", "data/open_source_software_disclosure.txt"],
         "dirs":  ["data/dw", "data/maps", "data/scripts", "data/ui_scripts", "data/sound"],
+        # Stock copies kept before AlterWare's CDN build replaced them (alterware.py)
+        "restore_orig": ["iw6mp64_ship.exe"],
     },
     "iw6mp64_ship.exe": {
         "files": ["iw6-mod.exe", "alterware-launcher.json", "awcache.json",
                   "deckops_alterware.json", "data/open_source_software_disclosure.txt"],
         "dirs":  ["data/dw", "data/maps", "data/scripts", "data/ui_scripts", "data/sound"],
+        "restore_orig": ["iw6mp64_ship.exe"],
     },
     "s1-mod.exe": {
         "files": ["s1-mod.exe", "alterware-launcher.json", "awcache.json",
@@ -655,6 +721,39 @@ for _wrapper in PLUT_WRAPPER_EXES:
 # Own MW3: Offline Mode's server config in admin/ (the .dsr recipes may be the user's own)
 for _mw3 in ("iw5mp.exe", "iw5plutmp.exe"):
     OWN_CLEANUP.setdefault(_mw3, {"files": [], "dirs": []})["files"].append("admin/deckops_lan.cfg")
+
+def restore_cod4_audio(install_dir):
+    """Mirror of the bash restore_cod4_audio(). CoD4x keeps the stock
+    mss32.dll as miles32.dll; CoD4R overwrites iw3mp.exe/mss32.dll/
+    miles32.dll with no backup. Must run before the deckops_cod4*.json
+    metadata is removed."""
+    mss = os.path.join(install_dir, "mss32.dll")
+    miles = os.path.join(install_dir, "miles32.dll")
+    try:
+        if os.path.exists(os.path.join(install_dir, "deckops_cod4r.json")):
+            if os.path.exists(miles):
+                os.remove(miles)
+                print("    Removed miles32.dll (CoD4R)")
+            origs = [os.path.join(install_dir, n + ".deckops_orig") for n in ("iw3mp.exe", "mss32.dll")]
+            if all(os.path.exists(p) for p in origs):
+                for p in origs:
+                    os.replace(p, p[:-len(".deckops_orig")])
+                print("    Restored the stock iw3mp.exe and mss32.dll")
+            else:
+                print("    WARNING: CoD4R replaced iw3mp.exe and mss32.dll without a backup.")
+                print("    Restore them from your original CoD4 game files.")
+        elif os.path.exists(miles):
+            if os.path.exists(mss) and filecmp.cmp(mss, miles, shallow=False):
+                os.remove(miles)
+                print("    Removed duplicate miles32.dll")
+            else:
+                os.replace(miles, mss)
+                print("    Restored original mss32.dll (from miles32.dll)")
+        elif os.path.exists(os.path.join(install_dir, "deckops_cod4x.json")):
+            print("    WARNING: no miles32.dll backup found -- mss32.dll may still be")
+            print("    the CoD4x chain-loader. Restore it from your original game files.")
+    except Exception as ex:
+        print(f"    Failed to restore mss32.dll: {ex}")
 
 if not os.path.isdir(USERDATA_DIR):
     print("  No userdata found, skipping.")
@@ -723,6 +822,18 @@ for uid in os.listdir(USERDATA_DIR):
                     except Exception as ex:
                         print(f"    Failed to remove t7x/: {ex}")
             continue
+
+        if cleanup.get("restore_cod4_audio"):
+            restore_cod4_audio(install_dir)
+
+        for fname in cleanup.get("restore_orig", []):
+            fpath = os.path.join(install_dir, fname)
+            if os.path.exists(fpath + ".deckops_orig"):
+                try:
+                    os.replace(fpath + ".deckops_orig", fpath)
+                    print(f"    Restored stock {fname}")
+                except Exception as ex:
+                    print(f"    Failed to restore {fname}: {ex}")
 
         for fname in cleanup["files"]:
             fpath = os.path.join(install_dir, fname)
@@ -1906,6 +2017,24 @@ for uid in os.listdir(userdata):
 PYEOF
 }
 
+# Snapshot every shortcuts.vdf BEFORE removing anything. The artwork,
+# controller-config and LCD appid scans further down work out which appids
+# to clean by reading DeckOps' entries out of shortcuts.vdf -- entries that
+# remove_steam_shortcuts is about to delete. They read this snapshot
+# (via $SHORTCUTS_SNAPSHOT/<uid>.vdf) instead of the live file.
+SHORTCUTS_SNAPSHOT="$(mktemp -d)"
+export SHORTCUTS_SNAPSHOT
+trap 'rm -rf "$SHORTCUTS_SNAPSHOT"' EXIT
+for _root in "$HOME/.local/share/Steam" "$STEAM_ROOT"; do
+    [ -n "$_root" ] && [ -d "$_root/userdata" ] || continue
+    for _vdf in "$_root"/userdata/*/config/shortcuts.vdf; do
+        [ -f "$_vdf" ] || continue
+        _uid="$(basename "$(dirname "$(dirname "$_vdf")")")"
+        # First root wins; both roots are usually the same dir via symlink.
+        [ -f "$SHORTCUTS_SNAPSHOT/$_uid.vdf" ] || cp -p "$_vdf" "$SHORTCUTS_SNAPSHOT/$_uid.vdf"
+    done
+done
+
 remove_steam_shortcuts && success "Steam shortcuts cleaned up." || warn "Could not clean Steam shortcuts — remove manually if needed."
 echo ""
 
@@ -2010,10 +2139,17 @@ OWN_EXE_MAP = {
     "t7x.exe":        "Call of Duty: Black Ops 3 T7x",
 }
 
+def shortcuts_vdf(uid):
+    """Pre-removal snapshot taken before remove_steam_shortcuts, else live file."""
+    snap = os.path.join(os.environ.get("SHORTCUTS_SNAPSHOT", ""), uid + ".vdf")
+    if os.environ.get("SHORTCUTS_SNAPSHOT") and os.path.exists(snap):
+        return snap
+    return os.path.join(userdata, uid, "config", "shortcuts.vdf")
+
 for uid in os.listdir(userdata):
     if not uid.isdigit() or int(uid) < 10000:
         continue
-    vdf_path = os.path.join(userdata, uid, "config", "shortcuts.vdf")
+    vdf_path = shortcuts_vdf(uid)
     if not os.path.exists(vdf_path):
         continue
     try:
@@ -2328,10 +2464,17 @@ OWN_EXE_MAP = {
     "t7x.exe":        "Call of Duty: Black Ops 3 T7x",
 }
 
+def shortcuts_vdf(uid):
+    """Pre-removal snapshot taken before remove_steam_shortcuts, else live file."""
+    snap = os.path.join(os.environ.get("SHORTCUTS_SNAPSHOT", ""), uid + ".vdf")
+    if os.environ.get("SHORTCUTS_SNAPSHOT") and os.path.exists(snap):
+        return snap
+    return os.path.join(USERDATA, uid, "config", "shortcuts.vdf")
+
 for uid in os.listdir(USERDATA):
     if not uid.isdigit() or int(uid) < 10000:
         continue
-    vdf_path = os.path.join(USERDATA, uid, "config", "shortcuts.vdf")
+    vdf_path = shortcuts_vdf(uid)
     if not os.path.exists(vdf_path):
         continue
     try:
@@ -2447,12 +2590,19 @@ def calc_shortcut_appid(exe_path, name):
     crc = binascii.crc32(key) & 0xFFFFFFFF
     return str((crc | 0x80000000) & 0xFFFFFFFF)
 
+def shortcuts_vdf(uid):
+    """Pre-removal snapshot taken before remove_steam_shortcuts, else live file."""
+    snap = os.path.join(os.environ.get("SHORTCUTS_SNAPSHOT", ""), uid + ".vdf")
+    if os.environ.get("SHORTCUTS_SNAPSHOT") and os.path.exists(snap):
+        return snap
+    return os.path.join(userdata, uid, "config", "shortcuts.vdf")
+
 found = set()
 if os.path.isdir(userdata):
     for uid in os.listdir(userdata):
         if not uid.isdigit() or int(uid) < 10000:
             continue
-        vdf = os.path.join(userdata, uid, "config", "shortcuts.vdf")
+        vdf = shortcuts_vdf(uid)
         if not os.path.exists(vdf):
             continue
         try:
@@ -2836,13 +2986,21 @@ echo "  All IW3SP-MOD and IW4x client files removed."
 echo "  All DeckOps controller templates and profiles removed."
 echo ""
 
+COD4_VERIFY_TEXT=""
+if [ "$COD4_NEEDS_VERIFY" = "1" ]; then
+    warn "Call of Duty 4 needs a file check to restore its original exe/DLL:"
+    warn "  Steam > Call of Duty 4 > Properties > Installed Files > Verify integrity"
+    echo ""
+    COD4_VERIFY_TEXT="\n\nCall of Duty 4: in Steam, open Properties > Installed Files > Verify integrity of game files to restore its original files."
+fi
+
 info "Uninstall complete."
 echo ""
 
 # Show summary dialog in background while countdown runs in terminal
 zenity --info \
     --title="$APP_TITLE Uninstaller" \
-    --text="DeckOps fully uninstalled.\n\nYour Steam games are untouched.\nAll Plutonium data removed from Wine prefixes.\nAll LCD HGL state and shortcuts removed.\nAll IW3SP-MOD and IW4x client files removed.\nAll DeckOps controller templates and profiles removed.\n\nPlease restart Steam for changes to take effect." \
+    --text="DeckOps fully uninstalled.\n\nYour Steam games are untouched.\nAll Plutonium data removed from Wine prefixes.\nAll LCD HGL state and shortcuts removed.\nAll IW3SP-MOD and IW4x client files removed.\nAll DeckOps controller templates and profiles removed.${COD4_VERIFY_TEXT}\n\nPlease restart Steam for changes to take effect." \
     --timeout=12 \
     2>/dev/null &
 

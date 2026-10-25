@@ -94,9 +94,20 @@ def _get_latest_release():
     return version, tarball_url, checksum_url, dir_name
 
 
+def _is_complete(tool_dir: str) -> bool:
+    """True if tool_dir holds a usable GE-Proton: the proton script, the
+    compatibilitytool.vdf Steam registers it by, and the default prefix
+    DeckOps clones. A folder left by an interrupted extraction fails this."""
+    return (os.path.isfile(os.path.join(tool_dir, "proton"))
+            and os.path.isfile(os.path.join(tool_dir, "compatibilitytool.vdf"))
+            and os.path.isdir(os.path.join(tool_dir, "files", "share", "default_pfx")))
+
+
 def _is_installed(version):
-    """Returns True if this GE-Proton version is already extracted."""
-    return os.path.isdir(os.path.join(COMPAT_DIR, version))
+    """Returns True if this GE-Proton version is fully extracted. Checking
+    only that the folder exists treated a half-extracted one (disk full,
+    killed mid-install) as up to date forever."""
+    return _is_complete(os.path.join(COMPAT_DIR, version))
 
 
 def _get_local_version() -> str | None:
@@ -152,15 +163,14 @@ def install_ge_proton(on_progress=None):
 
     version, tarball_url, checksum_url, dir_name = _get_latest_release()
 
-    if local_version == dir_name:
-        prog(100, f"GE-Proton {dir_name} is up to date.")
-        return dir_name
-
     if _is_installed(dir_name):
         prog(100, f"GE-Proton {dir_name} is up to date.")
         return dir_name
 
-    prog(5, f"New version available: {dir_name}")
+    if local_version == dir_name or os.path.isdir(os.path.join(COMPAT_DIR, dir_name)):
+        prog(5, f"GE-Proton {dir_name} is incomplete (interrupted install?) -- reinstalling")
+    else:
+        prog(5, f"New version available: {dir_name}")
     os.makedirs(COMPAT_DIR, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="deckops_ge_") as tmp:
@@ -178,22 +188,87 @@ def install_ge_proton(on_progress=None):
         download(tarball_url, tarball_path, on_progress=on_progress, label=dir_name,
                  digest=digest)
 
-        # Use system tar for speed and memory efficiency — Python's tarfile
-        # module is noticeably slower and more memory-hungry when extracting
-        # large archives like GE-Proton.
         prog(87, f"Extracting {dir_name}...")
-        import subprocess
-        result = subprocess.run(
-            ["tar", "-xzf", tarball_path, "-C", COMPAT_DIR],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            # Fall back to Python tarfile if tar isn't available
-            with tarfile.open(tarball_path, "r:gz") as tar:
-                tar.extractall(COMPAT_DIR)
+        _extract_atomically(tarball_path, dir_name)
         prog(100, f"GE-Proton {dir_name} installed.")
 
     return dir_name
+
+
+def _safe_extractall(tar: tarfile.TarFile, dest: str):
+    """extractall that can't write outside dest. Uses tarfile's "data"
+    filter where available (Python 3.12, backported to 3.11.4+), otherwise
+    the same checks by hand: no absolute or ../ member names, no links
+    pointing outside dest, no device files."""
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(dest, filter="data")
+        return
+    root = os.path.realpath(dest)
+    def inside(path):
+        p = os.path.realpath(path)
+        return p == root or p.startswith(root + os.sep)
+    for m in tar.getmembers():
+        target = os.path.join(dest, m.name)
+        if os.path.isabs(m.name) or not inside(target):
+            raise RuntimeError(f"unsafe path in GE-Proton archive: {m.name!r}")
+        if m.issym():      # relative to the link's own folder
+            link_target = os.path.join(os.path.dirname(target), m.linkname)
+        elif m.islnk():    # hard links name another member, relative to dest
+            link_target = os.path.join(dest, m.linkname)
+        else:
+            link_target = None
+        if link_target is not None and (os.path.isabs(m.linkname) or not inside(link_target)):
+            raise RuntimeError(f"unsafe link in GE-Proton archive: {m.name!r} -> {m.linkname!r}")
+        if m.isdev():
+            raise RuntimeError(f"device file in GE-Proton archive: {m.name!r}")
+    tar.extractall(dest)
+
+
+def _extract_atomically(tarball_path: str, dir_name: str):
+    """
+    Extract a GE-Proton tarball so compatibilitytools.d/<dir_name> only ever
+    appears complete: extract into a hidden staging folder on the same
+    filesystem, check the result, then rename it into place. Any failure
+    removes the staging folder and raises, leaving no half-extracted tool
+    behind (which _is_installed used to accept as installed for good).
+    """
+    import subprocess
+
+    staging = tempfile.mkdtemp(prefix=".deckops_extract_", dir=COMPAT_DIR)
+    try:
+        # System tar first: much faster and lighter than tarfile on a
+        # multi-GB archive. Any failure falls back to the safe tarfile path.
+        ok = False
+        try:
+            r = subprocess.run(["tar", "-xzf", tarball_path, "-C", staging],
+                               capture_output=True, text=True)
+            ok = r.returncode == 0
+            if not ok:
+                _log.warning("tar failed (%s): %s", r.returncode, r.stderr.strip()[-500:])
+        except OSError as ex:          # tar not installed
+            _log.warning("tar unavailable: %s", ex)
+        if not ok:
+            shutil.rmtree(staging, ignore_errors=True)
+            os.makedirs(staging)
+            with tarfile.open(tarball_path, "r:gz") as tar:
+                _safe_extractall(tar, staging)
+
+        extracted = os.path.join(staging, dir_name)
+        if not _is_complete(extracted):
+            found = ", ".join(sorted(os.listdir(staging))) or "nothing"
+            raise RuntimeError(
+                f"GE-Proton archive did not contain a complete {dir_name}/ (found: {found})")
+
+        final = os.path.join(COMPAT_DIR, dir_name)
+        if os.path.lexists(final):
+            # Only reached when it failed _is_installed: a broken leftover
+            if os.path.isdir(final) and not os.path.islink(final):
+                shutil.rmtree(final)
+            else:
+                os.remove(final)
+        os.rename(extracted, final)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 # ── CompatToolMapping ─────────────────────────────────────────────────────────
@@ -641,10 +716,21 @@ def _clone_with_symlinks(source_pfx_dir: str, dest_prefix_path: str,
         return False
 
 
+SD_PREFIX_ASIDE_SUFFIX = ".deckops_old"
+
+
 def _cleanup_sd_card_prefixes(appids: list[str], on_progress=None):
     """
-    Delete compatdata prefixes for managed appids from SD card locations.
-    Prefixes now live on NVMe for performance. SD card copies are stale.
+    Move SD card compatdata prefixes for the given appids out of the way.
+    Prefixes now live on NVMe for performance, so the SD card copies are no
+    longer used.
+
+    They are renamed to <appid>.deckops_old (an instant same-card rename),
+    never deleted: a prefix can hold the only copy of a game's saves and
+    settings (drive_c/users/steamuser, Plutonium's AppData). This used to
+    rmtree the SD prefix of all 17 managed games on every install, including
+    games that weren't part of the run, with no backup or prompt.
+    Returns the list of set-aside paths.
     """
     import glob
 
@@ -657,23 +743,35 @@ def _cleanup_sd_card_prefixes(appids: list[str], on_progress=None):
         "/run/media/mmcblk0p1/SteamLibrary/steamapps/compatdata",
     ]
 
-    cleaned = 0
+    set_aside = []
+    seen = set()
     for pattern in sd_patterns:
         for compat_dir in glob.glob(pattern):
             for appid in appids:
                 prefix_dir = os.path.join(compat_dir, str(appid))
-                if os.path.isdir(prefix_dir):
-                    try:
-                        shutil.rmtree(prefix_dir)
-                        prog(f"  ✓ Removed SD card prefix for {appid}")
-                        cleaned += 1
-                    except Exception as ex:
-                        prog(f"  ⚠ Failed to remove SD card prefix {appid}: {ex}")
+                real = os.path.realpath(prefix_dir)
+                # Symlinks are left alone: someone pointed it somewhere on purpose
+                if real in seen or os.path.islink(prefix_dir) or not os.path.isdir(prefix_dir):
+                    continue
+                seen.add(real)
+                dest = prefix_dir + SD_PREFIX_ASIDE_SUFFIX
+                n = 1
+                while os.path.lexists(dest):
+                    n += 1
+                    dest = f"{prefix_dir}{SD_PREFIX_ASIDE_SUFFIX}{n}"
+                try:
+                    os.rename(prefix_dir, dest)
+                    set_aside.append(dest)
+                    prog(f"  ✓ SD card prefix for {appid} moved aside (not deleted): {dest}")
+                except OSError as ex:
+                    prog(f"  ⚠ Could not move SD card prefix {appid} aside, left in place: {ex}")
 
-    if cleaned > 0:
-        prog(f"  ✓ Cleaned {cleaned} SD card prefix(es)")
+    if set_aside:
+        prog(f"  ℹ {len(set_aside)} old SD card prefix(es) kept as *{SD_PREFIX_ASIDE_SUFFIX} -- "
+             f"copy any saves you need out of them, then delete them to free space")
     else:
         prog("  No SD card prefixes to clean up")
+    return set_aside
 
 
 def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str, str]],
@@ -683,13 +781,14 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
     Initialize and install dependencies for a list of game prefixes.
 
     All prefixes are created on NVMe for performance. SD card prefixes
-    for managed appids are deleted. Each prefix uses symlinked system32
+    of the managed games in this run are renamed to <appid>.deckops_old
+    (kept, not deleted). Each prefix uses symlinked system32
     and syswow64 directories pointing to a shared DLL copy, reducing
     disk usage from ~8GB to ~1.9GB.
 
     Flow:
       1. Set up shared DLL directory from GE-Proton's default_pfx (one-time)
-      2. Clean up any SD card prefixes for managed appids
+      2. Move this run's SD card prefixes aside (<appid>.deckops_old)
       3. Override all prefix paths to NVMe
       4. Pick first prefix as donor -- initialize via Proton if new
       5. Clone donor to remaining prefixes using symlinked DLL dirs
@@ -719,12 +818,14 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
     else:
         shared_available = True
 
-    # ── Step 2: Clean up SD card prefixes ─────────────────────────────────
-    prog("  Cleaning up SD card prefixes...")
-    _cleanup_sd_card_prefixes(
-        [str(a) for a in MANAGED_APPIDS],
-        on_progress=on_progress,
-    )
+    # ── Step 2: Move this run's SD card prefixes aside ────────────────────
+    # Only the managed games being set up now -- never every managed appid.
+    managed = {str(a) for a in MANAGED_APPIDS}
+    run_appids = sorted({os.path.basename(os.path.normpath(p))
+                         for _, p in prefix_paths if p} & managed)
+    if run_appids:
+        prog("  Checking for old SD card prefixes...")
+        _cleanup_sd_card_prefixes(run_appids, on_progress=on_progress)
 
     # ── Step 3: Deduplicate and override paths to NVMe ────────────────────
     seen_paths = {}

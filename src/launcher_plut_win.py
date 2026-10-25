@@ -53,7 +53,7 @@ from PyQt5.QtCore import (
 # ── Branch identity (mirrors identity.py -- keep in sync) ─────────────────────
 _BRANCH = "nightly"  # "nightly" or "stable"
 _INSTALL_DIR_NAME = "DeckOps-Nightly" if _BRANCH == "nightly" else "DeckOps"
-_GITHUB_USER = "GalvarinoDev"
+_GITHUB_USER = "smeltzzz"
 _GITHUB_REPO = "DeckOps-Nightly" if _BRANCH == "nightly" else "DeckOps"
 _GITHUB_RAW = f"https://raw.githubusercontent.com/{_GITHUB_USER}/{_GITHUB_REPO}/refs/heads/main"
 

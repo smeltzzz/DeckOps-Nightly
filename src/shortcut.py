@@ -451,28 +451,54 @@ def _read_existing_shortcuts(path: str) -> list:
     return existing
 
 
+class ShortcutsReadError(OSError):
+    """shortcuts.vdf exists but couldn't be read or isn't in the expected
+    format. Callers must skip that user rather than write: writing would
+    replace the file with only DeckOps' entries and wipe the user's own
+    non-Steam shortcuts."""
+
+
 def _read_shortcuts_raw(path: str) -> bytes:
-    """Read the raw shortcuts.vdf content, stripping header/footer."""
+    """Read the raw shortcuts.vdf content, stripping header/footer.
+
+    Returns b'' only when there are genuinely no entries (no file, an empty
+    file, or an empty shortcuts map). Raises ShortcutsReadError when the
+    file can't be read or doesn't look like a shortcuts.vdf -- this used to
+    return b'' too, and the next write then dropped every existing entry."""
     if not os.path.exists(path):
         return b''
-    
+
     try:
         with open(path, 'rb') as f:
             data = f.read()
-    except Exception:
-        _log.debug("shortcuts.vdf read failed", exc_info=True)
+    except OSError as ex:
+        raise ShortcutsReadError(f"could not read {path}: {ex}") from ex
+
+    if not data:
         return b''
-    
-    # Strip header (b'\x00shortcuts\x00') and footer (b'\x08\x08')
+
+    # Header b'\x00shortcuts\x00' (Steam writes lowercase; accept any case so
+    # a file from another tool isn't given a second header) and footer
+    # b'\x08\x08'. A missing footer means a truncated or foreign file:
+    # trimming it anyway could cut the last entry's own terminator.
     header = b'\x00shortcuts\x00'
-    if data.startswith(header):
-        data = data[len(header):]
-    if data.endswith(b'\x08\x08'):
-        data = data[:-2]
-    elif data.endswith(b'\x08'):
-        data = data[:-1]
-    
-    return data
+    if data[:len(header)].lower() != header or not data.endswith(b'\x08\x08') \
+            or len(data) < len(header) + 2:
+        raise ShortcutsReadError(f"{path} is not a valid shortcuts.vdf (truncated or unknown format)")
+
+    return data[len(header):-2]
+
+
+def _read_shortcuts_or_skip(path: str, uid, prog):
+    """_read_shortcuts_raw for the per-user write loops: None (after telling
+    the user) when this user's shortcuts.vdf must not be rewritten."""
+    try:
+        return _read_shortcuts_raw(path)
+    except ShortcutsReadError as ex:
+        _log.warning("shortcuts.vdf skipped for uid %s: %s", uid, ex)
+        prog(f"  ⚠ Skipped Steam user {uid}: shortcuts.vdf couldn't be read safely, "
+             f"left untouched ({ex})")
+        return None
 
 
 def _split_entries(body: bytes) -> list:
@@ -754,42 +780,31 @@ def get_shortcut_appid(name: str) -> int | None:
     shortcuts.vdf is the one Steam actually uses for the prefix, artwork,
     and controller config — even if the exe path has changed since creation.
     """
-    uids = _find_all_steam_uids()
-    name_bytes = name.encode("utf-8")
+    # Match the whole AppName field, never a bare substring: several DeckOps
+    # titles are prefixes of others ("Call of Duty: Black Ops" vs "... Black
+    # Ops II - Multiplayer", "Call of Duty: World at War" vs "... - Multiplayer"),
+    # and a name can also appear inside Exe/StartDir/LaunchOptions. The old
+    # data.find() lookup took the first such hit and could return another
+    # shortcut's appid, or give up on the user whose file held the real entry.
+    # Key case varies between Steam versions (AppName / appname); the title must match exactly
+    name_field = re.compile(rb'\x01(?i:appname)\x00' + re.escape(name.encode("utf-8")) + rb'\x00')
+    appid_field = re.compile(rb'\x02(?i:appid)\x00(.{4})', re.DOTALL)
 
-    for uid in uids:
+    for uid in _find_all_steam_uids():
         shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
-        if not os.path.exists(shortcuts_path):
-            continue
-
         try:
-            with open(shortcuts_path, "rb") as f:
-                data = f.read()
-        except Exception:
-            _log.debug("shortcuts.vdf read failed", exc_info=True)
+            body = _read_shortcuts_raw(shortcuts_path)
+        except ShortcutsReadError:
+            _log.debug("shortcuts.vdf unreadable for uid %s", uid, exc_info=True)
             continue
 
-        idx = data.find(name_bytes)
-        if idx == -1:
-            continue
-
-        # The appid int32 field is before the AppName field.
-        # Search backward from the name for the appid marker.
-        # Binary VDF: \x02appid\x00<4 bytes signed int32>
-        search_start = max(0, idx - 80)
-        chunk = data[search_start:idx]
-        marker = b'\x02appid\x00'
-        marker_pos = chunk.rfind(marker)
-        if marker_pos == -1:
-            continue
-
-        appid_offset = marker_pos + len(marker)
-        if appid_offset + 4 > len(chunk):
-            continue
-
-        signed = struct.unpack_from("<i", chunk, appid_offset)[0]
-        unsigned = signed if signed >= 0 else signed + 2**32
-        return unsigned
+        for entry in _split_entries(body):
+            if not name_field.search(entry):
+                continue
+            # The appid is in the same entry (usually its first field)
+            m = appid_field.search(entry)
+            if m:
+                return struct.unpack("<I", m.group(1))[0]
 
     return None
 
@@ -910,8 +925,10 @@ def add_shortcut(
         shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
         grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
 
+        existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
+        if existing_raw is None:
+            continue
         existing_names = _read_existing_shortcuts(shortcuts_path)
-        existing_raw = _read_shortcuts_raw(shortcuts_path)
 
         # If a shortcut with this name already exists, strip its entry from
         # the raw body so we can write a fresh one with current Exe /
@@ -997,8 +1014,8 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
         shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
         grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
 
-        body = _read_shortcuts_raw(shortcuts_path)
-        if not _split_entries(body):
+        body = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
+        if not body or not _split_entries(body):
             continue
 
         new_body, stripped = _strip_entries_by_name(body, {name})
@@ -1081,7 +1098,8 @@ def cleanup_orphan_shortcuts(on_progress=None):
         shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
         grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
 
-        entries = _split_entries(_read_shortcuts_raw(shortcuts_path))
+        body = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
+        entries = _split_entries(body) if body else []
         if not entries:
             continue
 
@@ -1176,7 +1194,9 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
         shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
         grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
         
-        existing_raw = _read_shortcuts_raw(shortcuts_path)
+        existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
+        if existing_raw is None:
+            continue
 
         # Strip any existing entries whose AppName matches a shortcut we're
         # about to write. Without this, reinstalls leave stale Exe /
@@ -1406,6 +1426,13 @@ _OWN_MOD_EXES = {"iw4mp": "iw4x.exe", "cod4sp": "iw3sp_mod.exe", "t7x": "t7x.exe
 def own_shortcut_exe(key: str, game: dict) -> str:
     mod, d = _OWN_MOD_EXES.get(key), game.get("install_dir")
     return os.path.join(d, mod) if mod and d else game.get("exe_path", "")
+
+
+def own_shortcut_appid(key: str, game: dict) -> int:
+    """The shortcut appid of an own-copy game, as enrich_own_games computes
+    it (quoted exe path + canonical name). Its prefix is
+    compatdata/<this appid>, not the Steam appid's."""
+    return _calc_shortcut_appid(f'"{game["exe_path"]}"', OWN_SHORTCUTS[key]["name"])
 
 
 def own_plut_prefix(key: str, game: dict) -> str:
@@ -1643,7 +1670,9 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
         shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
         grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
 
-        existing_raw = _read_shortcuts_raw(shortcuts_path)
+        existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
+        if existing_raw is None:
+            continue
 
         # Strip any existing entries whose AppName matches a shortcut we're
         # about to write so reinstalls replace stale entries cleanly.
@@ -1891,8 +1920,10 @@ def create_launcher_shortcut(on_progress=None):
         shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
         grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
 
+        existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
+        if existing_raw is None:
+            continue
         existing_names = _read_existing_shortcuts(shortcuts_path)
-        existing_raw = _read_shortcuts_raw(shortcuts_path)
 
         # ── Migration ────────────────────────────────────────────────────
         # Remove stale launcher shortcuts from prior versions so users

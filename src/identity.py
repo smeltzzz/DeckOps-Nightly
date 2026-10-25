@@ -22,7 +22,7 @@ BRANCH = "nightly"  # "nightly" or "stable"
 
 # ── Everything below is derived ──────────────────────────────────────────────
 
-GITHUB_USER = "GalvarinoDev"
+GITHUB_USER = "smeltzzz"
 
 GITHUB_REPO = "DeckOps-Nightly" if BRANCH == "nightly" else "DeckOps"
 
@@ -67,7 +67,7 @@ def asset_url(path: str) -> str:
     Usage:
         from identity import asset_url
         url = asset_url("assets/images/icon.png")
-        # → https://raw.githubusercontent.com/GalvarinoDev/DeckOps/refs/heads/main/assets/images/icon.png
+        # → https://raw.githubusercontent.com/smeltzzz/DeckOps-Nightly/refs/heads/main/assets/images/icon.png
     """
     return f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/refs/heads/main/{path}"
 
@@ -78,6 +78,6 @@ def api_url(endpoint: str) -> str:
     Usage:
         from identity import api_url
         url = api_url("commits/main")
-        # → https://api.github.com/repos/GalvarinoDev/DeckOps/commits/main
+        # → https://api.github.com/repos/smeltzzz/DeckOps-Nightly/commits/main
     """
     return f"{GITHUB_API}/{endpoint}"

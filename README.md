@@ -67,7 +67,7 @@ Plutonium Offline uses a separate instance of Plutonium. It does not interact wi
 
 1. Press the Steam button → **Power** → **Switch to Desktop**.
 2. Open a browser and go to this GitHub page.
-3. Download the **[DeckOps Nightly file](https://github.com/GalvarinoDev/DeckOps-Nightly/releases/download/v1/DeckOps-Nightly.desktop)**.
+3. Download the **[DeckOps Nightly file](https://github.com/smeltzzz/DeckOps-Nightly/releases/download/v1/DeckOps-Nightly.desktop)**.
 4. Right-click the file → **Properties** → **Permissions** → tick **"Is executable"** → OK.
 5. Double-click it.
    - **First time:** DeckOps installs and launches automatically.

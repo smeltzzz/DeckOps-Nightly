@@ -353,7 +353,10 @@ def _cod4_profile_name(player_name):
     """CoD4 profile folder name as the game finds it on disk. Wine drops
     trailing dots and spaces from Windows path names, so a Steam name like
     "casimiro." makes the game use profiles/casimiro."""
-    return (player_name or "").replace('"', '').rstrip(". ") or "Player"
+    # Cleaned first: a "/" in the name made a nested path, other characters
+    # aren't allowed in Windows folder names
+    from config import clean_player_name
+    return clean_player_name(player_name).rstrip(". ") or "Player"
 
 
 def _dest_from_install(game_key, install_dir, player_name=None):
@@ -404,10 +407,15 @@ def _replace_player_name(filepath, player_name):
 
         import re as _re
         pattern = r'seta name ".*?"'
-        safe_name = player_name.replace('"', '')
+        from config import clean_player_name
+        safe_name = clean_player_name(player_name)
+        if not safe_name:
+            return
         replacement = f'seta name "{safe_name}"'
 
-        new_content = _re.sub(pattern, replacement, content)
+        # A function, so the name is used literally: as a replacement
+        # string, "\1" or "\g" in a name raised re.error (not caught here)
+        new_content = _re.sub(pattern, lambda m: replacement, content)
         if new_content == content:
             return
 
@@ -437,7 +445,8 @@ def _write_cod4_active_txt(profiles_dir, player_name):
     try:
         os.makedirs(profiles_dir, exist_ok=True)
         active_path = os.path.join(profiles_dir, "active.txt")
-        safe_name = player_name.replace('"', '')
+        from config import clean_player_name
+        safe_name = clean_player_name(player_name) or "Player"
         with open(active_path, "w", encoding="utf-8") as f:
             f.write(safe_name)
     except (IOError, OSError):
@@ -816,7 +825,8 @@ def _rename_in_lan_scripts(player_name, installed_games, prog):
     import config as cfg
     from plutonium_lcd import PLUT_GAME_EXES
 
-    new = '+name "' + player_name.replace('"', '') + '"'
+    from plutonium import bash_name_arg
+    new = bash_name_arg(player_name)
     updated = 0
     for key, entry in cfg.get_setup_games().items():
         lan = entry.get("lan_wrapper_path")

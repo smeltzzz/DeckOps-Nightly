@@ -1,16 +1,22 @@
 #!/bin/bash
 # launcher.sh — DeckOps entry point
 
-# Source deckops_identity.sh if available, otherwise fallback
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
+# Source deckops_identity.sh if available, otherwise fallback.
+# Only ever load THIS branch's identity -- never the other branch's install
+# dir, or the nightly launcher would manage/install stable (see install.sh).
+EXPECTED_BRANCH="nightly"
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+BRANCH=""
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
     source "$SCRIPT_DIR/deckops_identity.sh"
 elif [ -f "$HOME/DeckOps-Nightly/deckops_identity.sh" ]; then
     source "$HOME/DeckOps-Nightly/deckops_identity.sh"
-elif [ -f "$HOME/DeckOps/deckops_identity.sh" ]; then
-    source "$HOME/DeckOps/deckops_identity.sh"
-else
-    GITHUB_USER="GalvarinoDev"
+fi
+if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then
+    GITHUB_USER="smeltzzz"
     GITHUB_REPO="DeckOps-Nightly"
     INSTALL_DIR="$HOME/DeckOps-Nightly"
     VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3"

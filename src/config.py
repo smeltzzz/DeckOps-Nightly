@@ -21,7 +21,9 @@ from datetime import datetime
 
 from identity import CONFIG_PATH
 from log import get_logger
-from steam_common import write_json
+from steam_common import write_json, PROJECT_ROOT
+
+_CONFIGS_ROOT = os.path.join(PROJECT_ROOT, "assets", "configs")
 
 _log = get_logger(__name__)
 
@@ -35,8 +37,8 @@ DEFAULTS = {
                                   # "legion_go", "legion_go_2", "legion_go_s", "2btn", "generic", "steam_machine"
     "gyro_mode":  None,          # "on", "off", "hold", or "toggle"
     "play_mode":  None,          # "handheld" or "docked"
-    "external_controller": None, # "playstation", "xbox", "steamcontroller", or "other" -- only used when play_mode is "docked"
-    "docked_resolution": None,   # "1280x720", "1280x800", "1920x1080", "1920x1200", or "own" -- only used when play_mode is "docked"
+    "external_controller": None, # "playstation", "xbox", "steamcontroller", or "other" -- used when docked, on Bazzite and on PC (uses_external_controller)
+    "docked_resolution": None,   # "1280x720", "1280x800", "1920x1080", "1920x1200", or "own" -- picks Other/<res> configs when docked and on PC (get_model_config_dir)
                                  # NOTE: this will also be used for future Bazzite, Steam Box, and other handheld support on SteamOS
     "ge_proton_version": None,   # e.g. "GE-Proton10-32"
     "steam_root": None,
@@ -237,13 +239,34 @@ def get_model_config_dir() -> str:
     Other         -> 'Other/<resolution>'  (e.g. 'Other/1920x1200')
     Steam Machine -> 'Other/<resolution>'  (user-picked, same assets as Other)
 
+    Docked        -> 'Other/<docked_resolution>'  (the display picked in setup)
+    PC            -> 'Other/<docked_resolution>'  (older PC setups: no play_mode)
+
+    "own" (My Own: set it in-game) maps to Other/own, which has no resolution
+    lines. The resolution picked in setup used to be stored and never read:
+    a PC always got 1920x1200 and a docked Deck its handheld configs.
+    A folder that doesn't exist falls back (Steam Machine 1280x800 / My Own
+    pointed at missing folders, so every config was skipped).
+
     Falls back to 'OLED' if deck_model is unset.
     """
-    model = load().get("deck_model") or "oled"
+    c = load()
+    model = c.get("deck_model") or "oled"
+    default = "OLED" if model == "oled" else "LCD"
     if model in ("other", "steam_machine"):
-        device = load().get("other_device") or "1920x1200"
-        return f"Other/{device}"
-    return "OLED" if model == "oled" else "LCD"
+        default = f"Other/{c.get('other_device') or '1920x1200'}"
+    picked = c.get("docked_resolution")
+    if picked and (c.get("play_mode") == "docked"
+                   or (model == "other" and not c.get("other_device") and c.get("play_mode") is None)):
+        want = f"Other/{picked}"
+    else:
+        want = default
+    for d in (want, default, "Other/1920x1200"):
+        if os.path.isdir(os.path.join(_CONFIGS_ROOT, *d.split("/"))):
+            if d != want:
+                _log.warning("config assets for %s missing, using %s", want, d)
+            return d
+    return want
 
 
 def get_gyro_mode() -> str | None:
@@ -279,6 +302,22 @@ def set_play_mode(mode: str):
 
 def is_docked() -> bool:
     return load().get("play_mode") == "docked"
+
+
+def uses_external_controller() -> bool:
+    """
+    Whether the controller picked in setup (external_controller) gets its
+    profiles assigned. Docked, and also Bazzite (Neptune templates don't
+    work there, setup asks for the controller in every mode) and PC (setup
+    always asks; older PC setups left play_mode unset, which is recognised
+    by a controller chosen with no play mode). Only checking is_docked()
+    left the chosen controller unused on Bazzite handheld and on PC.
+    """
+    c = load()
+    if c.get("play_mode") == "docked" or c.get("os_type") == "bazzite":
+        return True
+    return (c.get("deck_model") == "other" and c.get("play_mode") is None
+            and bool(c.get("external_controller")))
 
 
 def get_external_controller() -> str | None:
@@ -331,14 +370,35 @@ def set_ge_proton_version(version: str):
     _set("ge_proton_version", version)
 
 
+PLAYER_NAME_MAX = 32
+
+# The name ends up inside "..." in game cfgs (seta name), in bash scripts
+# (+name "..."), in CoD4's profile folder name and in active.txt. These
+# characters break one of those: quotes end the value, $ and ` run commands
+# in the bash scripts, \ escapes, ; splits cfg commands, / and the rest are
+# not allowed in a (Windows) folder name.
+_NAME_BAD = set('"\\/$`;<>:|?*')
+
+
+def clean_player_name(name) -> str:
+    """The name with unsafe and control characters removed and whitespace
+    collapsed, at most PLAYER_NAME_MAX long. "" if nothing usable is left."""
+    if not isinstance(name, str):
+        return ""
+    kept = "".join(" " if c.isspace() else c for c in name
+                   if c.isspace() or (c.isprintable() and c not in _NAME_BAD))
+    return " ".join(kept.split())[:PLAYER_NAME_MAX].strip()
+
+
 def get_player_name() -> str | None:
-    """Returns the player's chosen in-game name, or None if not yet set."""
-    return load().get("player_name")
+    """Returns the player's chosen in-game name, or None if not yet set.
+    Cleaned on read too, for names saved before clean_player_name existed."""
+    return clean_player_name(load().get("player_name")) or None
 
 
 def set_player_name(name: str):
-    """Save the player's chosen in-game name."""
-    _set("player_name", name.strip() if name else None)
+    """Save the player's chosen in-game name (cleaned; unusable -> None)."""
+    _set("player_name", clean_player_name(name) or None)
 
 
 def get_steam_display_name(steam_root: str | None = None) -> str | None:

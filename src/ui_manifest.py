@@ -107,7 +107,8 @@ class ManifestModsScreen(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
-        if self._busy: return
+        # Window restored (not a screen change): keep the user's picks
+        if self._busy or e.spontaneous(): return
         self._show_pick(); self._set_enabled(False)
         self.status.setText("Looking for mod manifests...")
         self._sigs = _Sigs(); self._sigs.done.connect(self._on_scanned)

@@ -308,6 +308,126 @@ def _copytree_safe(src: str, dst: str, group: str, prog):
         return False
 
 
+# Re-downloadable content inside the backed-up parts, per Plutonium game:
+# storage/t6/mods/dlc5 is the ~9 GB Zombies Declassified pack, which
+# DeckOps installs again from its CDN.
+_PLUT_SKIP = {"t6": {"mods": ("dlc5",)}}
+
+# Room left free on the drive after a backup
+_SPACE_MARGIN = 200 << 20
+
+
+def _skip_top(src: str, names: tuple):
+    """copytree ignore= that drops `names` directly inside src only."""
+    top = os.path.realpath(src)
+    return lambda d, entries: [e for e in entries if e in names] if os.path.realpath(d) == top else []
+
+
+def _tree_size(path: str, skip: tuple = ()) -> int:
+    total = 0
+    top = os.path.realpath(path)
+    for dirpath, dirnames, filenames in os.walk(path):
+        if skip and os.path.realpath(dirpath) == top:
+            dirnames[:] = [d for d in dirnames if d not in skip]
+        for f in filenames:
+            try:
+                total += os.lstat(os.path.join(dirpath, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def _copy_part(src: str, dst: str, group: str, prog, skip: tuple = ()) -> bool:
+    if not skip:
+        return _copytree_safe(src, dst, group, prog)
+    try:
+        shutil.copytree(src, dst, dirs_exist_ok=True, ignore=_skip_top(src, skip))
+        return True
+    except (OSError, shutil.Error) as ex:
+        _log.warning("save backup copy failed for %s: %s", group, ex)
+        prog(f"  ⚠ {group}: copy failed: {ex}")
+        return False
+
+
+def _has_room(need: int, group: str, prog) -> bool:
+    try:
+        free = shutil.disk_usage(BACKUP_ROOT).free
+    except OSError:
+        return True
+    if need + _SPACE_MARGIN <= free:
+        return True
+    _log.warning("save backup: %s needs %d bytes, %d free", group, need, free)
+    prog(f"  ⚠ {group}: not enough free space ({need >> 20} MB needed, "
+         f"{free >> 20} MB free), skipped; the previous backup is kept")
+    return False
+
+
+def _staging(group: str) -> str:
+    # Dot-prefixed, so it's never mistaken for a group folder
+    p = os.path.join(BACKUP_ROOT, f".{group}.new")
+    shutil.rmtree(p, ignore_errors=True)      # left over from an interrupted run
+    return p
+
+
+def _commit(staging: str, dst: str, group: str) -> bool:
+    """Swap a finished backup in. The old one is only deleted after the new
+    one is in place (it used to be deleted before the copy even started)."""
+    old = os.path.join(BACKUP_ROOT, f".{group}.old")
+    shutil.rmtree(old, ignore_errors=True)
+    try:
+        if os.path.isdir(dst):
+            os.replace(dst, old)
+        try:
+            os.replace(staging, dst)
+        except OSError:
+            if os.path.isdir(old) and not os.path.exists(dst):
+                os.replace(old, dst)
+            raise
+    except OSError as ex:
+        _log.warning("save backup: could not replace %s: %s", dst, ex)
+        shutil.rmtree(staging, ignore_errors=True)
+        return False
+    shutil.rmtree(old, ignore_errors=True)
+    return True
+
+
+def _finish_group(staging: str, dst: str, group: str, ok: list, prog) -> bool:
+    """Commit when every copy worked, or when there's no older backup to
+    lose. A partial copy never replaces a complete older backup."""
+    if any(ok) and (all(ok) or not os.path.isdir(dst)):
+        return _commit(staging, dst, group)
+    shutil.rmtree(staging, ignore_errors=True)
+    if any(ok):
+        prog(f"  ⚠ {group}: backup incomplete, the previous backup is kept")
+    return False
+
+
+def _write_meta(groups: dict):
+    """Merge into backup_info.json. Groups backed up by an earlier run (a
+    game no longer installed) stay listed while their folder exists; the
+    list used to be overwritten, which made those backups unrestorable."""
+    meta_path = os.path.join(BACKUP_ROOT, "backup_info.json")
+    try:
+        with open(meta_path) as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = {}
+    now = datetime.now().isoformat()
+    times = dict(old.get("group_times") or {})
+    names = [g for g in old.get("groups", []) if isinstance(g, str)
+             and g in SAVE_GROUPS and os.path.isdir(os.path.join(BACKUP_ROOT, g))]
+    for g in groups:
+        times[g] = now
+        if g not in names:
+            names.append(g)
+    meta = {"backed_up_at": now, "groups": names,
+            "group_times": {g: times[g] for g in names if g in times}}
+    tmp = meta_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(meta, f, indent=2)
+    os.replace(tmp, meta_path)
+
+
 def _keep_pre_restore(path: str):
     """Copy the current save dir to <path>.pre-restore before a restore
     overwrites it, so stats earned since the backup aren't lost for good."""
@@ -347,6 +467,11 @@ def backup_saves(steam_root: str = None, on_progress=None,
 
     backed_up = {}
     on_progress("Backing up save data...")
+    try:
+        os.makedirs(BACKUP_ROOT, exist_ok=True)     # also lets _has_room measure the drive
+    except OSError as ex:
+        on_progress(f"  ⚠ cannot create {BACKUP_ROOT}: {ex}")
+        return {}
 
     for group_name, group in SAVE_GROUPS.items():
         keys = group["keys"]
@@ -368,11 +493,14 @@ def backup_saves(steam_root: str = None, on_progress=None,
             if not parts:
                 _log.debug("save backup: %s — no players/ or mods/ found", group_name)
                 continue
-            if os.path.isdir(dst):
-                shutil.rmtree(dst, ignore_errors=True)
-            ok = [_copytree_safe(s, os.path.join(dst, tag, p), group_name, on_progress)
+            skips = _PLUT_SKIP.get(group["plut_store"], {})
+            need = sum(_tree_size(s, skips.get(p, ())) for (tag, p), s in parts.items())
+            if not _has_room(need, group_name, on_progress):
+                continue
+            stage = _staging(group_name)
+            ok = [_copy_part(s, os.path.join(stage, tag, p), group_name, on_progress, skips.get(p, ()))
                   for (tag, p), s in parts.items()]
-            if any(ok):
+            if _finish_group(stage, dst, group_name, ok, on_progress):
                 backed_up[group_name] = dst
                 on_progress(f"  ✓ {group_name}: backed up players/ and mods/ "
                             f"from {len(storages)} prefix(es), other Plutonium files skipped")
@@ -400,27 +528,22 @@ def backup_saves(steam_root: str = None, on_progress=None,
             continue
 
         dst = os.path.join(BACKUP_ROOT, group_name)
-        # Clear old backup for this group
-        if os.path.isdir(dst):
-            shutil.rmtree(dst, ignore_errors=True)
-
-        if _copytree_safe(src, dst, group_name, on_progress):
+        if not _has_room(_tree_size(src), group_name, on_progress):
+            continue
+        stage = _staging(group_name)
+        ok = [_copytree_safe(src, stage, group_name, on_progress)]
+        if _finish_group(stage, dst, group_name, ok, on_progress):
             backed_up[group_name] = dst
             on_progress(f"  ✓ {group_name}: backed up")
             _log.info("save backup: %s -> %s", src, dst)
 
     # Write metadata
     if backed_up:
-        meta = {
-            "backed_up_at": datetime.now().isoformat(),
-            "groups": list(backed_up.keys()),
-        }
         try:
-            meta_path = os.path.join(BACKUP_ROOT, "backup_info.json")
-            with open(meta_path, "w") as f:
-                json.dump(meta, f, indent=2)
-        except OSError:
-            pass
+            _write_meta(backed_up)
+        except OSError as ex:
+            _log.warning("save backup: could not write backup_info.json: %s", ex)
+            on_progress(f"  ⚠ could not record the backup list: {ex}")
         on_progress(f"Save backup complete — {len(backed_up)} group(s) saved.")
     else:
         on_progress("No save data found to back up.")

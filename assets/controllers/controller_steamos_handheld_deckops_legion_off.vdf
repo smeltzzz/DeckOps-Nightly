@@ -458,7 +458,7 @@
 					{
 						"bindings"
 						{
-							"binding"		"xinput_button A, Overlay On/Off, , "
+							"binding"		"key_press INSERT, Overlay On/Off, , "
 						}
 					}
 				}
@@ -490,7 +490,7 @@
 					{
 						"bindings"
 						{
-							"binding"		"xinput_button X, Stand/Jump, , "
+							"binding"		"xinput_button A, Stand/Jump, , "
 						}
 					}
 				}

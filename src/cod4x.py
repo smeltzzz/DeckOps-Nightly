@@ -44,6 +44,91 @@ _SETUP_EXE_URL = "https://cod4x.ovh/uploads/short-url/2V3RsE0Pp5Jakc1VE9Yuh5yb4l
 
 METADATA_FILE = "deckops_cod4x.json"
 
+# ── Switching between CoD4x and CoD4R ────────────────────────────────────────
+# Both clients replace stock CoD4 files in the game folder:
+#   CoD4x: mss32.dll becomes its chain-loader; the stock one is kept as
+#          miles32.dll by setup.exe.
+#   CoD4R: iw3mp.exe, mss32.dll and miles32.dll are overwritten with its own
+#          builds (cod4r.py); DeckOps keeps the stock iw3mp.exe / mss32.dll as
+#          <name>.deckops_orig before the first CoD4R install.
+# Installing one over the other used to leave both clients' files mixed
+# together (and CoD4x's checks then passed on CoD4R's files), so each
+# install first undoes the other client here.
+COD4R_METADATA_FILE = "deckops_cod4r.json"
+ORIG_SUFFIX = ".deckops_orig"
+STOCK_FILES = ("iw3mp.exe", "mss32.dll")
+_COD4X_FILES = ("cod4x_021.dll", "cod4x_loader.exe", "cod4x.exe", METADATA_FILE)
+_COD4R_FILES = ("Cod4R-DedRun.exe", "CoD4R-Launcher.exe", "miles32.dll", COD4R_METADATA_FILE,
+                os.path.join("main", "jcod4r_00.iwd"), os.path.join("main", "xcommon_glyphs.iwd"),
+                os.path.join("main", "xcommon_cod4qol.iwd"), os.path.join("main", "xcommon_cod4r_weapons.iwd"),
+                os.path.join("zone", "english", "cod4r_patchv2.ff"),
+                os.path.join("zone", "english", "cod4r_controls.ff"),
+                os.path.join("zone", "english", "cod4r_ambfix.ff"),
+                os.path.join("zone", "english", "qol.ff"))
+# userraw/ (CoD4R player identity key) and Mods/mp_bots are left: harmless
+# when CoD4R isn't running, and the key is needed again if the user switches back.
+
+
+def _remove_files(install_dir: str, rels, log):
+    for rel in rels:
+        p = os.path.join(install_dir, rel)
+        if os.path.isfile(p):
+            os.remove(p)
+            log(f"  Removed {rel}")
+
+
+def undo_cod4x(install_dir: str, log=lambda m: None):
+    """Remove CoD4x from the game folder, putting the stock mss32.dll back
+    from miles32.dll. Only when CoD4R isn't also recorded there: then
+    miles32.dll is CoD4R's build, not the stock backup."""
+    if not os.path.exists(os.path.join(install_dir, METADATA_FILE)):
+        return
+    if not os.path.exists(os.path.join(install_dir, COD4R_METADATA_FILE)):
+        mss = os.path.join(install_dir, "mss32.dll")
+        miles = os.path.join(install_dir, "miles32.dll")
+        if os.path.isfile(miles):
+            import filecmp
+            if os.path.isfile(mss) and filecmp.cmp(mss, miles, shallow=False):
+                os.remove(miles)
+            else:
+                os.replace(miles, mss)
+                log("  Restored the stock mss32.dll (CoD4x's miles32.dll backup)")
+    _remove_files(install_dir, _COD4X_FILES, log)
+
+
+def keep_stock_files(install_dir: str, log=lambda m: None):
+    """Before CoD4R overwrites them: keep the stock iw3mp.exe and mss32.dll
+    as <name>.deckops_orig. Only once, and never from a folder CoD4R already
+    replaced (deckops_cod4r.json without backups = install from before this
+    was added: the stock files are already gone)."""
+    if os.path.exists(os.path.join(install_dir, COD4R_METADATA_FILE)):
+        return
+    for name in STOCK_FILES:
+        src = os.path.join(install_dir, name)
+        dst = src + ORIG_SUFFIX
+        if os.path.isfile(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst + ".tmp")
+            os.replace(dst + ".tmp", dst)
+            log(f"  Kept the stock {name} as {name}{ORIG_SUFFIX}")
+
+
+def undo_cod4r(install_dir: str, log=lambda m: None) -> bool:
+    """Remove CoD4R from the game folder and put the stock iw3mp.exe and
+    mss32.dll back from their .deckops_orig copies. Returns False (and
+    changes nothing) when those copies don't exist -- CoD4R installed before
+    DeckOps kept them -- so the caller can stop instead of building on
+    CoD4R's binaries."""
+    if not os.path.exists(os.path.join(install_dir, COD4R_METADATA_FILE)):
+        return True
+    origs = [os.path.join(install_dir, n + ORIG_SUFFIX) for n in STOCK_FILES]
+    if not all(os.path.isfile(p) for p in origs):
+        return False
+    for name, orig in zip(STOCK_FILES, origs):
+        os.replace(orig, os.path.join(install_dir, name))
+        log(f"  Restored the stock {name}")
+    _remove_files(install_dir, _COD4R_FILES, log)
+    return True
+
 # ── Archive.org fallback ─────────────────────────────────────────────────────
 # If the setup.exe download from cod4x.ovh times out (60 s), fall back to
 # this archived copy of the official 21.3 installer and continue the normal
@@ -549,6 +634,19 @@ def install_cod4x(game: dict, steam_root: str, proton_path: str,
     compatdata_path = _nvme_compatdata(str(appid))
     log(f"  Prefix path: {compatdata_path}")
 
+    # ── Step 0: Switching from CoD4R ─────────────────────────────────────
+    # CoD4x needs the stock iw3mp.exe and mss32.dll (setup.exe keeps the
+    # stock mss32.dll as miles32.dll and chain-loads it). On top of CoD4R's
+    # builds the result was a broken mix that still passed the checks below.
+    if os.path.exists(os.path.join(install_dir, COD4R_METADATA_FILE)):
+        prog(3, "Removing CoD4R first...")
+        if not undo_cod4r(install_dir, log):
+            raise RuntimeError(
+                "CoD4R replaced iw3mp.exe and mss32.dll and no stock copies were kept, "
+                "so CoD4x can't be installed over it. Restore the original game files first "
+                "(Steam: Call of Duty 4 > Properties > Installed Files > Verify integrity), "
+                "then install CoD4x again.")
+
     # ── Step 1: Write registry keys (pre-setup) ─────────────────────────
     # Write before the setup.exe run so Steam skips first-launch installers.
     prog(5, "Writing registry keys...")
@@ -645,8 +743,10 @@ def install_cod4x(game: dict, steam_root: str, proton_path: str,
     prog(65, "Placing chain-loader...")
     relocated = _relocate_chainloader(compatdata_path, install_dir, on_progress=log)
     if not relocated:
-        log("  ⚠ Chain-loader relocation failed — CoD4x may not work")
+        # Neither the game folder nor the prefix has the chain-loader: setup.exe
+        # didn't install anything. Fail instead of reporting a working CoD4x.
         log("  ℹ Check logs/cod4x_inno_setup.log for details")
+        raise RuntimeError("CoD4x setup.exe did not install its chain-loader (mss32.dll)")
 
     # ── Step 4: Write registry keys (post-setup) ─────────────────────────
     # The Proton run may have created a fresh user.reg, so write keys again

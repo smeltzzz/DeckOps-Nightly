@@ -34,14 +34,15 @@ that changed, so it doubles as the update.
 
 import base64
 import hashlib
+import hmac
 import json
 import os
-import subprocess
 import tempfile
 
 from net import download as _download
 from steam_common import nvme_compatdata as _nvme_compatdata, write_json
 from cod4x import _write_registry_keys  # same appid 7940 keys
+from cod4x import undo_cod4x, keep_stock_files
 
 from log import get_logger
 
@@ -94,21 +95,81 @@ def _get_game_appdata_dir(compatdata_path: str) -> str:
     )
 
 
+def _der_tlv(buf: bytes, pos: int):
+    """One DER element at pos: (tag, value start, value end)."""
+    tag = buf[pos]
+    length = buf[pos + 1]
+    pos += 2
+    if length & 0x80:
+        n = length & 0x7F
+        if not 1 <= n <= 4:
+            raise ValueError("bad DER length")
+        length = int.from_bytes(buf[pos:pos + n], "big")
+        pos += n
+    if pos + length > len(buf):
+        raise ValueError("truncated DER")
+    return tag, pos, pos + length
+
+
+def _rsa_public_key(pem: str):
+    """(n, e) from a PEM SubjectPublicKeyInfo RSA key."""
+    der = base64.b64decode("".join(l for l in pem.splitlines() if l and not l.startswith("-----")))
+    tag, s, _ = _der_tlv(der, 0)                 # SubjectPublicKeyInfo SEQUENCE
+    if tag != 0x30:
+        raise ValueError("not a public key")
+    tag, _, alg_end = _der_tlv(der, s)           # AlgorithmIdentifier
+    tag, bs, be = _der_tlv(der, alg_end)         # BIT STRING
+    if tag != 0x03 or der[bs] != 0:
+        raise ValueError("bad key bit string")
+    rsa = der[bs + 1:be]
+    tag, s, _ = _der_tlv(rsa, 0)                 # RSAPublicKey SEQUENCE
+    tag, ns, ne = _der_tlv(rsa, s)               # INTEGER n
+    tag, es, ee = _der_tlv(rsa, ne)              # INTEGER e
+    return int.from_bytes(rsa[ns:ne], "big"), int.from_bytes(rsa[es:ee], "big")
+
+
+# DER DigestInfo prefixes for SHA-256, with and without the NULL parameters
+_SHA256_DIGESTINFO = (bytes.fromhex("3031300d060960864801650304020105000420"),
+                      bytes.fromhex("302f300b0609608648016503040201" "0420"))
+
+
+def _rsa_sha256_verify(pem: str, data: bytes, sig: bytes) -> bool:
+    """RSASSA-PKCS1-v1_5 / SHA-256 signature check -- what
+    `openssl dgst -sha256 -verify` does, in plain Python so the check can
+    never be skipped for want of an external tool."""
+    n, e = _rsa_public_key(pem)
+    k = (n.bit_length() + 7) // 8
+    if len(sig) != k:
+        return False
+    s = int.from_bytes(sig, "big")
+    if s >= n:
+        return False
+    em = pow(s, e, n).to_bytes(k, "big")
+    digest = hashlib.sha256(data).digest()
+    for prefix in _SHA256_DIGESTINFO:
+        t = prefix + digest
+        expected = b"\x00\x01" + b"\xff" * (k - len(t) - 3) + b"\x00" + t
+        if hmac.compare_digest(em, expected):
+            return True
+    return False
+
+
 def _check_signature(tmp: str, log):
-    key = os.path.join(tmp, "key.pem"); sig = os.path.join(tmp, "sig.bin")
-    with open(key, "w") as f: f.write(_MANIFEST_KEY)
-    with open(os.path.join(tmp, "manifest.json.sig"), "rb") as f: raw = base64.b64decode(f.read())
-    with open(sig, "wb") as f: f.write(raw)
+    """Refuse the manifest unless its signature verifies. The manifest
+    arrives over plain HTTP and decides every file URL and hash -- including
+    iw3mp.exe and the DLLs -- and prelaunch.py runs this before every
+    launch, so a skipped check would let anyone on the network swap the
+    game's binaries. It used to skip silently when openssl was missing."""
     try:
-        r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", key, "-signature", sig,
-                            os.path.join(tmp, "manifest.json")], capture_output=True, text=True)
-    except FileNotFoundError:
-        # Same policy as net.download digests: missing tooling skips the
-        # check rather than blocking the install.
-        log("  openssl not found, CoD4R manifest signature not checked")
-        return
-    if r.returncode != 0:
-        raise RuntimeError(f"CoD4R manifest signature check failed: {(r.stdout + r.stderr).strip()}")
+        with open(os.path.join(tmp, "manifest.json.sig"), "rb") as f:
+            sig = base64.b64decode(f.read().strip(), validate=True)
+        with open(os.path.join(tmp, "manifest.json"), "rb") as f:
+            data = f.read()
+        ok = _rsa_sha256_verify(_MANIFEST_KEY, data, sig)
+    except (ValueError, IndexError) as ex:   # binascii.Error is a ValueError
+        raise RuntimeError(f"CoD4R manifest signature check failed: {ex}") from ex
+    if not ok:
+        raise RuntimeError("CoD4R manifest signature check failed: signature does not match")
     log("  CoD4R manifest signature verified")
 
 
@@ -252,6 +313,14 @@ def install_cod4r(game: dict, steam_root: str, proton_path: str,
     # -- Step 1: Write registry keys -----------------------------------------
     prog(5, "Writing registry keys...")
     _write_registry_keys(compatdata_path, on_progress=log)
+
+    # -- Step 1b: Switching from CoD4x / keep the stock files ----------------
+    # CoD4R overwrites iw3mp.exe, mss32.dll and miles32.dll. With CoD4x
+    # installed, miles32.dll is the only copy of the stock mss32.dll, so
+    # CoD4x is undone first; then the stock files are kept as .deckops_orig
+    # so uninstalling, or switching to CoD4x, can put them back.
+    undo_cod4x(install_dir, log)
+    keep_stock_files(install_dir, log)
 
     # -- Steps 2-3: Fetch the manifest, download changed files ---------------
     prog(10, "Fetching CoD4R manifest...")

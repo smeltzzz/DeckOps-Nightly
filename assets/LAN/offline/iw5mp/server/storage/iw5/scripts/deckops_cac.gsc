@@ -30,6 +30,7 @@
 
 init()
 {
+    botsRestoreSaved();
     dcacCatalog();
     buildStreakData();
     buildNameLookup();
@@ -1579,7 +1580,15 @@ cacName(code)
     return code;
 }
 
-// Bots hold still while anyone has the menu open (Bot Warfare reads bots_play_* live)
+botPlayDvars()
+{
+    return strTok("bots_play_move,bots_play_fire,bots_play_knife,bots_play_nade,bots_play_killstreak", ",");
+}
+
+// Bots hold still while anyone has the menu open (Bot Warfare reads bots_play_* live).
+// bots_play_* are server dvars and outlive the level, but level.* does not: a match/round end or
+// map_restart with the menu open used to leave them at 0 for good. So the originals also go in
+// the dcac_botplay_saved server dvar, which init() puts back on the next level.
 botsPause()
 {
     if (!isDefined(level.dcac_menus)) level.dcac_menus = 0;
@@ -1587,12 +1596,20 @@ botsPause()
     if (level.dcac_menus > 1)
         return;
     level.dcac_botplay = [];
-    dvars = strTok("bots_play_move,bots_play_fire,bots_play_knife,bots_play_nade,bots_play_killstreak", ",");
+    dvars = botPlayDvars();
+    saved = "";
     for (i = 0; i < dvars.size; i++)
     {
-        level.dcac_botplay[dvars[i]] = getDvar(dvars[i]);
+        v = getDvar(dvars[i]);
+        level.dcac_botplay[dvars[i]] = v;
+        // strTok drops empty tokens, so an unset dvar is saved as "-"
+        if (v == "") v = "-";
+        if (i > 0) saved += ",";
+        saved += v;
         setDvar(dvars[i], "0");
     }
+    setDvar("dcac_botplay_saved", saved);
+    level thread botsWatchdog();
 }
 
 botsResume()
@@ -1602,9 +1619,57 @@ botsResume()
     level.dcac_menus--;
     if (level.dcac_menus > 0)
         return;
-    keys = getArrayKeys(level.dcac_botplay);
-    for (i = 0; i < keys.size; i++)
-        setDvar(keys[i], level.dcac_botplay[keys[i]]);
+    botsRestore();
+}
+
+botsRestore()
+{
+    if (isDefined(level.dcac_botplay))
+    {
+        keys = getArrayKeys(level.dcac_botplay);
+        for (i = 0; i < keys.size; i++)
+            setDvar(keys[i], level.dcac_botplay[keys[i]]);
+    }
+    level.dcac_botplay = undefined;
+    level.dcac_menus = 0;
+    setDvar("dcac_botplay_saved", "");
+    level notify("dcac_bots_resumed");
+}
+
+// From init(): the previous level ended with the menu open, so its pause was never undone
+botsRestoreSaved()
+{
+    saved = getDvar("dcac_botplay_saved");
+    if (saved == "")
+        return;
+    vals = strTok(saved, ",");
+    dvars = botPlayDvars();
+    for (i = 0; i < dvars.size && i < vals.size; i++)
+    {
+        if (vals[i] == "-") setDvar(dvars[i], "");
+        else setDvar(dvars[i], vals[i]);
+    }
+    setDvar("dcac_botplay_saved", "");
+}
+
+// A player who disconnects with the menu open never runs cacCleanup (watchDeath ends on
+// disconnect), so recount who really has it open; nobody left means resume
+botsWatchdog()
+{
+    level endon("dcac_bots_resumed");
+    for (;;)
+    {
+        wait 1;
+        open = 0;
+        for (i = 0; i < level.players.size; i++)
+            if (isDefined(level.players[i]) && isDefined(level.players[i].cac_ui))
+                open++;
+        if (open >= level.dcac_menus)
+            continue;
+        level.dcac_menus = open;
+        if (open == 0)
+            botsRestore();
+    }
 }
 
 // Client dvars only go out when they change: a page sends one reliable command per dvar
