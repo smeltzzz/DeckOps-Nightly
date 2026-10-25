@@ -25,6 +25,9 @@ shellcheck --severity=error *.sh assets/LAN/*.sh
   `pyproject.toml`). They must never read or write the real
   `~/DeckOps-Nightly`: point `config.CONFIG_PATH` and similar paths at
   `tmp_path` (see the `cfg` fixture in `tests/test_config.py`).
+- `tests/test_ui_smoke.py` imports every UI module and builds every screen
+  offscreen. It needs PyQt6 (`pip install PyQt6`) and skips itself without it;
+  run it after moving code between `ui_*.py` files.
 - A few tests pin values that must never change (shortcut appids, Heroic app
   names). If one fails, the code is wrong, not the test: existing installs and
   Steam shortcuts depend on those values.
