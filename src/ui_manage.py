@@ -811,6 +811,7 @@ class ManagementScreen(QWidget):
                     uninstall_zd(_st6, lambda p, m: sigs.progress.emit(p, m))
                     sigs.done.emit("Zombies Declassified removed.")
             except Exception as ex:
+                _log.error("Zombies Declassified %s failed", action, exc_info=True)
                 sigs.done.emit(f"Error: {ex}")
         threading.Thread(target=_worker, daemon=True).start()
 

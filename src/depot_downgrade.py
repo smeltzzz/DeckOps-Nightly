@@ -592,7 +592,8 @@ def estimate_space_gb(game_id: str, steam_root: str) -> float:
         for key in detect_installed_dlc(game_id, steam_root):
             depots.append(cfg["dlc"][key])
     except Exception:
-        pass
+        # The space estimate then leaves the installed DLC out.
+        _log.debug("could not detect installed DLC for %s", game_id, exc_info=True)
     return required_space_gb(steam_root, depots, cfg["app_id"])
 
 
@@ -1052,13 +1053,13 @@ def _cleanup_dd_artifacts(install_dir: str):
         try:
             shutil.rmtree(dd_dir, ignore_errors=True)
         except Exception:
-            pass
+            _log.debug("could not remove %s", dd_dir, exc_info=True)
     try:
         for fname in os.listdir(install_dir):
             if fname.endswith(".manifest"):
                 os.remove(os.path.join(install_dir, fname))
     except Exception:
-        pass
+        _log.debug("could not remove leftover .manifest files in %s", install_dir, exc_info=True)
 
 
 def _merge_tree(src: str, dst: str, prog):

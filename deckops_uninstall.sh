@@ -28,8 +28,6 @@ elif [ -f "$HOME/DeckOps-Nightly/deckops_identity.sh" ]; then
     source "$HOME/DeckOps-Nightly/deckops_identity.sh"
 fi
 if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then
-    GITHUB_USER="smeltzzz"
-    GITHUB_REPO="DeckOps-Nightly"
     INSTALL_DIR_NAME="DeckOps-Nightly"
     INSTALL_DIR="$HOME/DeckOps-Nightly"
     VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3"

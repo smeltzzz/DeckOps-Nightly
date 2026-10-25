@@ -22,7 +22,10 @@ import json
 import os
 import shutil
 
+from log import get_logger
 from net import download as _download
+
+_log = get_logger(__name__)
 
 # ── T7X constants ─────────────────────────────────────────────────────────────
 
@@ -146,7 +149,7 @@ def install_t7x(game: dict, on_progress=None):
         if name:
             set_player_name(sibling, name)
     except Exception:
-        pass  # Non-fatal — user can set it later in Settings
+        _log.debug("could not set the T7X player name", exc_info=True)  # Non-fatal — user can set it later in Settings
 
     prog(100, "T7X installation complete!")
     return sibling

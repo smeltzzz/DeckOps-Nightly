@@ -15,8 +15,12 @@ Usage in any module:
     _log.warning("file missing: %s", path)
     _log.error("operation failed", exc_info=True)
 
-Call setup_logging() once from each entry point (main.py,
-launcher_plut_win.py) before any other work.
+Call setup_logging() once from each long-lived entry point (main.py,
+prelaunch.py, cache_cleanup.py) before any other work. Short CLI helpers
+that the uninstaller runs (save_backup.py, manifest_mods.py) skip it: the
+log directory is about to be deleted, and their warnings already reach the
+terminal through Python's default stderr handler. launcher_plut_win.py is a
+standalone Windows exe and writes its own .lan_launch.log instead.
 """
 
 import logging
