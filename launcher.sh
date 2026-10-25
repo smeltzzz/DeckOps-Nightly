@@ -33,10 +33,35 @@ LOCKFILE="$HOME/.deckops_installing"
 VERSION_FILE="$INSTALL_DIR/VERSION"
 UPDATE_DIR="$INSTALL_DIR/.update"
 
+# Download one of this repo's scripts to a file, then run it. `curl | bash`
+# starts running whatever has arrived, so a connection that dropped part way
+# used to run half of the installer or uninstaller. Here curl must finish
+# (-f also turns an HTTP error such as a rate limit into a failure instead of
+# running the error page) before anything executes. It runs from its own
+# empty folder so the identity lookup behaves as it did under `curl | bash`
+# and never picks up a stray deckops_identity.sh from /tmp.
+run_remote_script() {
+    local name="$1" dir rc
+    dir="$(mktemp -d /tmp/deckops_script_XXXXXX)" || return 1
+    if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
+            -o "$dir/$name" "$GITHUB_RAW/$name"; then
+        rm -rf "$dir"
+        echo "DeckOps: could not download $name. Check your internet connection." >&2
+        zenity --error --title="$APP_TITLE" \
+            --text="Could not download $name.\nCheck your internet connection and try again." \
+            2>/dev/null
+        return 1
+    fi
+    bash "$dir/$name"
+    rc=$?
+    rm -rf "$dir"
+    return $rc
+}
+
 # ── Installing or first-time — run install directly ───────────────────────────
 if [ ! -d "$INSTALL_DIR" ] || [ -f "$LOCKFILE" ]; then
     touch "$LOCKFILE"
-    curl -sL "$GITHUB_RAW/install.sh" | bash
+    run_remote_script install.sh
     rm -f "$LOCKFILE"
     exit 0
 fi
@@ -104,7 +129,8 @@ check_for_updates() {
         local TMPZIP
         TMPZIP="$(mktemp /tmp/deckops_update_XXXXXX.zip)"
         # The commit itself, not main: it is the version recorded below
-        curl -sL --max-time 120 \
+        # -f: an HTTP error must fail here, not be saved as the "zip"
+        curl -fsL --max-time 120 \
             "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$REMOTE_SHA.zip" \
             -o "$TMPZIP"
 
@@ -119,7 +145,16 @@ check_for_updates() {
 
         local TMPDIR_EXTRACT
         TMPDIR_EXTRACT="$(mktemp -d /tmp/deckops_extract_XXXXXX)"
-        unzip -qq "$TMPZIP" -d "$TMPDIR_EXTRACT"
+        # A zip that won't open must not fall through to "update complete"
+        # and a new VERSION with nothing installed.
+        if ! unzip -qq "$TMPZIP" -d "$TMPDIR_EXTRACT"; then
+            rm -f "$TMPZIP"
+            rm -rf "$TMPDIR_EXTRACT" "$UPDATE_DIR"
+            zenity --error --title="$APP_TITLE" \
+                --text="Update download failed.\nContinuing with current version." \
+                2>/dev/null
+            return 0
+        fi
         rm -f "$TMPZIP"
 
         local EXTRACTED
@@ -145,10 +180,16 @@ check_for_updates() {
             # branch for minutes after a push, so updating right after one got
             # the old files and still recorded REMOTE_SHA as installed -- those
             # changes were skipped for good. (Same fix as the in-app updater.)
-            local HTTP_CODE
+            #
+            # The status code alone isn't enough: a stream cut off after the
+            # headers still reports 200, and that truncated file used to be
+            # installed and recorded as the new version. curl's own exit
+            # status says whether the whole body arrived.
+            local HTTP_CODE CURL_RC
             HTTP_CODE=$(curl -s --max-time 30 -w '%{http_code}' \
                 "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$REMOTE_SHA/$filepath" \
                 -o "$UPDATE_DIR/$filepath")
+            CURL_RC=$?
 
             if [ "$HTTP_CODE" = "404" ]; then
                 # File was deleted or renamed upstream. The compare API lists
@@ -162,7 +203,7 @@ check_for_updates() {
                 REMOVED_FILES="${REMOVED_FILES}${filepath}
 "
                 continue
-            elif [ "$HTTP_CODE" != "200" ]; then
+            elif [ "$HTTP_CODE" != "200" ] || [ "$CURL_RC" -ne 0 ]; then
                 FAILED=1
                 break
             fi
@@ -276,7 +317,7 @@ case "$choice" in
                 --text="DeckOps needs a one-time update (PyQt6, about 100 MB).\n\nIt downloads in the terminal window and can take several minutes.\n\nDo not close the terminal. DeckOps opens when it is done." \
                 2>/dev/null
             touch "$LOCKFILE"
-            curl -sL "$GITHUB_RAW/install.sh" | bash
+            run_remote_script install.sh
             rm -f "$LOCKFILE"
             exit 0
         fi
@@ -300,7 +341,7 @@ case "$choice" in
         if [ -f "$INSTALL_DIR/deckops_uninstall.sh" ]; then
             bash "$INSTALL_DIR/deckops_uninstall.sh"
         else
-            curl -sL "$GITHUB_RAW/deckops_uninstall.sh" | bash
+            run_remote_script deckops_uninstall.sh
         fi
         exit 0
         ;;

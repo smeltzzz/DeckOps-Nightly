@@ -11,6 +11,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from log import get_logger
@@ -98,11 +99,14 @@ def download(url: str, dest: str, on_progress=None, label: str = "",
     label       — human-readable name shown in progress messages
     timeout     — socket timeout in seconds (default 60)
     headers     — request headers, default BROWSER_UA
-    digest      — optional "algo:hex" (e.g. GitHub's "sha256:..."); a
-                  mismatch discards the part file and counts as a failed try
+    digest      — optional "algo:hex" (e.g. GitHub's "sha256:..."; "gitblob:<sha>"
+                  is a git object id); a mismatch discards the part file and
+                  counts as a failed try
     tries       — attempts before giving up (1 for quick checks that must
                   not hold anything up, e.g. before a game launch)
     """
+    if not digest:
+        _log.debug("downloading %s with no digest to check", url)
     part = dest + ".part"
     # The server's version of the file (ETag / Last-Modified) the .part was
     # started from. A resume sends it as If-Range, so a file that changed on
@@ -226,7 +230,12 @@ def _write_validator(meta: str, resp_headers):
 
 def _check_digest(path: str, digest: str):
     algo, want = digest.split(":", 1)
-    h = hashlib.new(algo)
+    if algo == "gitblob":
+        # A git object id, as GitHub's contents API reports for a file:
+        # sha1 over "blob <size>\0" followed by the content.
+        h = hashlib.sha1(b"blob %d\0" % os.path.getsize(path))
+    else:
+        h = hashlib.new(algo)
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(CHUNK), b""):
             h.update(chunk)
@@ -257,3 +266,56 @@ def github_asset(repo: str, suffix: str, fallback: str = None, timeout: int = 30
             raise
         _log.warning("GitHub lookup for %s failed, downloading unverified: %s", repo, ex)
         return fallback, None
+
+
+# Asks the git blobs API for the file's bytes as-is instead of base64 JSON.
+GITHUB_RAW_HEADERS = {"Accept": "application/vnd.github.raw", "User-Agent": "DeckOps"}
+
+
+def download_github_file(repo: str, path: str, dest: str, ref: str = "main",
+                         fallback_url: str = None, lookup_timeout: int = 30, **kwargs):
+    """
+    Download one file from a GitHub repo and check it against git's own hash.
+
+    For files in a repo's tree, not release assets (those have github_asset).
+    Asks the contents API for the file's blob id at ref, then fetches that
+    exact blob from the git blobs API and verifies it. Compared with
+    downloading raw.githubusercontent.com/<repo>/<ref>/<path> this means:
+      - the bytes are the ones the API named, so a branch that moves
+        mid-download, a stale raw cache or a cut-off stream can't slip through
+      - nothing from a later push is mixed in
+
+    If the lookup fails (offline API, rate limit) and fallback_url is given,
+    that URL is downloaded without a check, and the failure is logged;
+    without a fallback the error is raised. If the blob download itself is
+    refused (HTTP error, e.g. the rate limit hit between the two calls), the
+    fallback is tried with the known hash, so it is still verified.
+
+    kwargs go to download(): on_progress, label, timeout, tries.
+    """
+    api = f"https://api.github.com/repos/{repo}"
+    try:
+        req = urllib.request.Request(
+            f"{api}/contents/{urllib.parse.quote(path)}?ref={urllib.parse.quote(ref)}",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "DeckOps"})
+        with urllib.request.urlopen(req, timeout=lookup_timeout) as r:
+            info = json.loads(r.read())
+        if not isinstance(info, dict) or info.get("type") != "file" or not info.get("sha"):
+            raise RuntimeError(f"{repo}/{path} is not a file at {ref}")
+        sha = info["sha"]
+    except Exception as ex:
+        if fallback_url is None:
+            raise
+        _log.warning("GitHub lookup for %s/%s failed, downloading unverified: %s", repo, path, ex)
+        return download(fallback_url, dest, **kwargs)
+
+    digest = f"gitblob:{sha}"
+    try:
+        return download(f"{api}/git/blobs/{sha}", dest, headers=GITHUB_RAW_HEADERS,
+                        digest=digest, **kwargs)
+    except urllib.error.HTTPError as ex:
+        if fallback_url is None:
+            raise
+        _log.warning("GitHub blob download for %s/%s refused (%s), trying %s with a hash check",
+                     repo, path, ex, fallback_url)
+        return download(fallback_url, dest, digest=digest, **kwargs)

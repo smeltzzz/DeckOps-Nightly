@@ -95,7 +95,7 @@ success "Python $PYTHON_VER found."
 info "Downloading DeckOps..."
 
 TMPZIP="$(mktemp /tmp/deckops_XXXXXX.zip)"
-curl -L --progress-bar "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/refs/heads/main.zip" -o "$TMPZIP" \
+curl -fL --progress-bar "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/refs/heads/main.zip" -o "$TMPZIP" \
     || die "Download failed. Check your internet connection."
 success "Download complete."
 
@@ -133,7 +133,7 @@ info "Downloading background music..."
 mkdir -p "$MUSIC_DIR"
 
 if [ ! -f "$MUSIC_DIR/$MUSIC_FILE" ]; then
-    curl -sSL "$MUSIC_URL" -o "$MUSIC_DIR/$MUSIC_FILE" \
+    curl -fsSL "$MUSIC_URL" -o "$MUSIC_DIR/$MUSIC_FILE" \
         && success "Background music downloaded." \
         || warn "Could not download background music — app will run without it."
 else

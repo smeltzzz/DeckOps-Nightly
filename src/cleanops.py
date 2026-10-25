@@ -19,7 +19,7 @@ Progress is reported via a callback:
 import json
 import os
 
-from net import download as _download
+from net import download_github_file as _download_github_file
 
 from log import get_logger
 
@@ -28,7 +28,10 @@ _log = get_logger(__name__)
 
 # ── CleanOps constants ────────────────────────────────────────────────────────
 
-DLL_URL       = "https://raw.githubusercontent.com/notnightwolf/cleanopsT7/main/d3d11.dll"
+REPO          = "notnightwolf/cleanopsT7"
+DLL_PATH      = "d3d11.dll"
+# Only used when GitHub's API can't be reached; that download isn't verified.
+DLL_URL       = f"https://raw.githubusercontent.com/{REPO}/main/{DLL_PATH}"
 DLL_NAME      = "d3d11.dll"
 METADATA_FILE = "deckops_cleanops.json"
 LAUNCH_OPTS   = 'WINEDLLOVERRIDES="d3d11=n,b" %command%'
@@ -63,11 +66,12 @@ def install_cleanops(game: dict, steam_root: str,
     # Download DLL
     dll_dest = os.path.join(install_dir, DLL_NAME)
     prog(5, "Downloading CleanOps d3d11.dll...")
-    _download(
-        DLL_URL,
-        dll_dest,
-        lambda p, m: prog(5 + int(p * 0.65), m),
-        "Downloading CleanOps d3d11.dll...",
+    # A DLL that gets loaded into the game, so it is checked against git's
+    # hash of the file rather than trusting whatever the branch URL serves.
+    _download_github_file(
+        REPO, DLL_PATH, dll_dest, fallback_url=DLL_URL,
+        on_progress=lambda p, m: prog(5 + int(p * 0.65), m),
+        label="Downloading CleanOps d3d11.dll...",
     )
 
     # Set launch options for Steam copies

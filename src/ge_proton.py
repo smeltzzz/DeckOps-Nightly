@@ -183,6 +183,8 @@ def install_ge_proton(on_progress=None):
             req = urllib.request.Request(checksum_url, headers=_BROWSER_UA)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 digest = "sha512:" + resp.read().decode().split()[0]
+        else:
+            _log.warning("%s has no checksum file, downloading unverified", dir_name)
 
         prog(10, f"Downloading {dir_name}...")
         download(tarball_url, tarball_path, on_progress=on_progress, label=dir_name,

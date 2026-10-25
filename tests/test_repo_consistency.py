@@ -87,5 +87,47 @@ def test_gitattributes_forces_lf_for_scripts():
         assert re.search(rf"^{re.escape(pattern)}\s+text\s+eol=lf\s*$", attrs, re.M), pattern
 
 
+def _logical_lines(rel):
+    """Non-comment lines of a script, with backslash continuations joined."""
+    text = _read(rel).replace("\\\n", " ")
+    return [l.strip() for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
+
+
+SCRIPTS = ("install.sh", "launcher.sh", "deckops_uninstall.sh", "DeckOps-Nightly.desktop")
+
+
+def test_no_script_is_piped_from_curl_into_a_shell():
+    # `curl | bash` runs whatever has arrived when the connection drops, so a
+    # half-downloaded installer or uninstaller would execute. Download to a
+    # file first (launcher.sh: run_remote_script).
+    for rel in SCRIPTS:
+        for line in _logical_lines(rel):
+            assert not re.search(r"curl\b[^|]*\|\s*(sudo\s+)?(ba|z)?sh\b", line), (rel, line)
+
+
+def test_curl_downloads_to_a_file_fail_on_http_errors():
+    # Without -f an error page (404, rate limit) is saved as if it were the
+    # file. The one exception reads the status code itself to tell a file
+    # deleted upstream (404) from a real failure.
+    for rel in SCRIPTS:
+        for line in _logical_lines(rel):
+            if "curl" in line and re.search(r"\s-o\s", line) and "%{http_code}" not in line:
+                assert re.search(r"curl\s+(-[A-Za-z]*f[A-Za-z]*|--fail)\b", line), (rel, line)
+
+
+def test_launcher_update_checks_curl_exit_status_not_just_the_http_code():
+    # A stream cut off after the headers still reports 200; only curl's exit
+    # status says the whole file arrived.
+    text = _read("launcher.sh")
+    assert "CURL_RC=$?" in text
+    assert re.search(r'\[ "\$CURL_RC" -ne 0 \]', text)
+
+
+def test_launcher_fetches_scripts_through_run_remote_script():
+    text = _read("launcher.sh")
+    assert "run_remote_script install.sh" in text
+    assert "run_remote_script deckops_uninstall.sh" in text
+
+
 def test_version_file_is_a_git_sha():
     assert re.fullmatch(r"[0-9a-f]{40}", _read("VERSION").strip())
