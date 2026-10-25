@@ -4,6 +4,3 @@
 #   pytest
 pytest>=8
 ruff>=0.6
-# Optional: with PyQt6 installed, tests/test_ui_smoke.py also builds every
-# screen offscreen (it skips itself otherwise).
-#   pip install PyQt6

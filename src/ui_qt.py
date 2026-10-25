@@ -27,13 +27,9 @@ from ui_constants import (
 )
 
 from ui_setup import SetupFlowScreen
-from ui_welcome import WelcomeScreen
-from ui_game_select import SetupScreen
-from ui_install import InstallScreen
+from ui_install import WelcomeScreen, SetupScreen, InstallScreen
 from ui_manifest import ManifestModsScreen
-from ui_manage import ManagementScreen, SetupCompleteScreen
-from ui_configure import ConfigureScreen
-from ui_update import UpdateScreen
+from ui_manage import ManagementScreen, ConfigureScreen, SetupCompleteScreen, UpdateScreen
 
 
 # ── BootstrapScreen ───────────────────────────────────────────────────────────
