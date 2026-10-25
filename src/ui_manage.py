@@ -6,7 +6,7 @@ Screens: ManagementCard, ManagementScreen, SetupCompleteScreen,
 Extracted from ui_qt.py — all hardcoded stack indices replaced with named lookups.
 """
 
-import os, subprocess, sys, shutil, stat, threading, urllib.request, urllib.error, urllib.parse, compileall
+import os, subprocess, sys, shutil, stat, threading, json, urllib.request, urllib.error, urllib.parse, compileall
 
 from qt import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea,
@@ -37,9 +37,90 @@ from ui_constants import (
 
 from identity import GITHUB_USER, GITHUB_REPO
 from log import get_logger
-from updater import HEADERS, check_update_status, remote_changes
 
 _log = get_logger(__name__)
+
+
+# VERSION is per install; the repo still tracks an old copy from 2026-05
+_PROTECTED = ("deckops.json", "VERSION", "assets/music/background.mp3")
+_HDR = {"User-Agent": "DeckOps"}
+
+
+def _protected(path: str) -> bool:
+    return path.startswith("logs/") or path in _PROTECTED
+
+
+def _tree(api: str, sha: str) -> dict:
+    """{path: (blob sha, mode, size)} for every file in the commit."""
+    req = urllib.request.Request(f"{api}/git/trees/{sha}?recursive=1", headers=_HDR)
+    with urllib.request.urlopen(req, timeout=15) as r:
+        d = json.loads(r.read())
+    if d.get("truncated"):
+        raise RuntimeError("GitHub's file list came back incomplete")
+    return {e["path"]: (e["sha"], e["mode"], e.get("size", 0)) for e in d.get("tree", []) if e.get("type") == "blob"}
+
+
+def _remote_changes(removed: bool = False):
+    """
+    (local_sha, remote_sha, stale, gone) for this install vs GitHub main.
+    stale is {path: (blob sha, mode, size)} for every file on disk that differs
+    from main or is missing, so a download that was cut off or served stale
+    gets fixed on the next update even when VERSION already matches.
+    gone lists files of the installed version that main no longer has
+    (looked up only with removed=True). Raises if GitHub can't be reached.
+    """
+    from steam_common import git_blob_sha
+    local_sha = "0"
+    try:
+        with open(os.path.join(PROJECT_ROOT, "VERSION")) as f:
+            local_sha = f.read().strip() or "0"
+    except OSError:
+        pass
+    api = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}"
+    with urllib.request.urlopen(urllib.request.Request(f"{api}/commits/main", headers=_HDR), timeout=10) as r:
+        remote_sha = json.loads(r.read()).get("sha", "")
+    if not remote_sha:
+        raise RuntimeError("GitHub returned no commit")
+    want = _tree(api, remote_sha)
+    stale = {}
+    for path, (sha, mode, size) in want.items():
+        if _protected(path):
+            continue
+        f = os.path.join(PROJECT_ROOT, path)
+        try:
+            ok = os.path.isfile(f) and git_blob_sha(f) == sha and (mode != "100755" or os.access(f, os.X_OK))
+        except OSError:
+            ok = False
+        if not ok:
+            stale[path] = (sha, mode, size)
+    gone = []
+    if removed and local_sha not in ("0", remote_sha):
+        try:
+            gone = [p for p in _tree(api, local_sha) if p not in want and not _protected(p)]
+        except Exception:
+            # e.g. the installed commit is gone after a force push; leftovers stay
+            _log.warning("could not list files of installed version %s", local_sha, exc_info=True)
+    return local_sha, remote_sha, stale, gone
+
+
+def _reset_hint(names) -> bool:
+    # Mirrors launcher.sh RESET_HINT: config.py or more than 3 src/ files changed
+    return "src/config.py" in names or sum(n.startswith("src/") for n in names) > 3
+
+
+def _check_update_status():
+    """Compare this install to GitHub main. Returns 'OK|..', 'UPDATE|..' or 'FAIL|..'."""
+    try:
+        local_sha, remote_sha, stale, _ = _remote_changes()
+        if local_sha == remote_sha:
+            if not stale:
+                return "OK|You're up to date!"
+            return f"UPDATE|{len(stale)} DeckOps file(s) need repair."
+        hint = "\nReset Config recommended after updating." if _reset_hint(stale) else ""
+        return f"UPDATE|Update available — {len(stale)} file(s) to download.{hint}"
+    except Exception as ex:
+        _log.warning("Update check failed: %s", ex)
+        return "FAIL|Update check failed."
 
 
 # ── ManagementCard ────────────────────────────────────────────────────────────
@@ -317,7 +398,7 @@ class ManagementScreen(QWidget):
         threading.Thread(target=self._deckops_update_worker, daemon=True).start()
 
     def _deckops_update_worker(self):
-        self._du_sig.log.emit(check_update_status())
+        self._du_sig.log.emit(_check_update_status())
 
     def _on_deckops_update_signal(self, msg):
         kind, text = msg.split("|", 1)
@@ -1716,7 +1797,7 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=self._update_worker, daemon=True).start()
 
     def _update_worker(self):
-        self._update_sig.log.emit(check_update_status())
+        self._update_sig.log.emit(_check_update_status())
 
     def _on_update_signal(self, msg):
         """Slot that runs on the main thread via pyqtSignal."""
@@ -1771,7 +1852,7 @@ class ConfigureScreen(QWidget):
         install_dir = PROJECT_ROOT
         update_dir = os.path.join(install_dir, ".update")
         try:
-            local_sha, remote_sha, stale, gone = remote_changes(removed=True)
+            local_sha, remote_sha, stale, gone = _remote_changes(removed=True)
             if not stale and not gone and local_sha == remote_sha:
                 self._apply_sig.log.emit("FAIL|Already up to date.")
                 return
@@ -1795,7 +1876,7 @@ class ConfigureScreen(QWidget):
                     min(99, int((g + sz * p / 100) * 100 / nbytes)), f"{h}\n{m}")
                 # net.download retries and rejects truncated streams; the hash check catches the rest
                 download(f"{raw}/{urllib.parse.quote(path)}", dest, on_progress=prog,
-                         label=os.path.basename(path), timeout=30, headers=HEADERS)
+                         label=os.path.basename(path), timeout=30, headers=_HDR)
                 if git_blob_sha(dest) != sha:
                     raise RuntimeError(f"{path} does not match GitHub")
                 got += size

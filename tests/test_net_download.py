@@ -1,13 +1,13 @@
 """net.download_github_file and the gitblob digest, against a fake urlopen."""
 
 import hashlib
+import io
 import json
 import urllib.error
 
 import pytest
 
 import net
-from fakes import FakeUrlopen
 
 
 def blob_sha(data: bytes) -> str:
@@ -15,9 +15,40 @@ def blob_sha(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+class FakeResp:
+    def __init__(self, body: bytes, status: int = 200):
+        self._buf = io.BytesIO(body)
+        self.status = status
+        self.headers = {"Content-Length": str(len(body))}
+
+    def read(self, n=-1):
+        return self._buf.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class FakeGitHub:
+    """Routes urlopen by URL and records what was asked for."""
+
+    def __init__(self):
+        self.routes = {}      # url -> bytes, or an exception to raise
+        self.requests = []    # (url, Accept header)
+
+    def __call__(self, req, timeout=None):
+        self.requests.append((req.full_url, req.get_header("Accept")))
+        result = self.routes[req.full_url]
+        if isinstance(result, Exception):
+            raise result
+        return FakeResp(result)
+
+
 @pytest.fixture
 def gh(monkeypatch):
-    fake = FakeUrlopen()
+    fake = FakeGitHub()
     monkeypatch.setattr(net.urllib.request, "urlopen", fake)
     monkeypatch.setattr(net.time, "sleep", lambda s: None)   # no retry backoff in tests
     return fake
