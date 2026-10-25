@@ -1022,7 +1022,7 @@ def add_shortcut(
     if clear_compat_tool:
         try:
             _clear_compat_tool(str(shortcut_appid))
-            prog(f"    Cleared compat tool for shortcut")
+            prog("    Cleared compat tool for shortcut")
         except Exception as ex:
             prog(f"    Could not clear compat tool: {ex}")
     elif compat_tool:
@@ -1351,7 +1351,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
             prog(f"    appid: {shortcut_appid}")
 
             if name in existing_names:
-                prog(f"    ✓ Shortcut exists")
+                prog("    ✓ Shortcut exists")
             else:
                 icon_path = os.path.join(grid_dir, f"{shortcut_appid}_icon.{shortcut_def['icon_ext']}")
 
@@ -1361,7 +1361,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
                 entry_bytes = _make_shortcut_entry(next_idx, entry)
                 new_entries.append(entry_bytes)
                 next_idx += 1
-                prog(f"    ✓ Shortcut created")
+                prog("    ✓ Shortcut created")
 
             # Set GE-Proton as the compat tool for this shortcut's appid,
             # the same way it is set for regular Steam games in ge_proton.py.
@@ -1374,7 +1374,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
                 import config as cfg
                 if key == "t4mp" and cfg.is_lcd():
                     _clear_compat_tool(str(shortcut_appid))
-                    prog(f"    ✓ Cleared compat tool (LCD HGL shortcut)")
+                    prog("    ✓ Cleared compat tool (LCD HGL shortcut)")
                 else:
                     from wrapper import set_compat_tool
                     ge_version = cfg.get_ge_proton_version()
@@ -1382,7 +1382,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
                         set_compat_tool([str(shortcut_appid)], ge_version)
                         prog(f"    ✓ GE-Proton {ge_version} set")
                     else:
-                        prog(f"    ⚠ GE-Proton version unknown — compat tool not set")
+                        prog("    ⚠ GE-Proton version unknown — compat tool not set")
             except Exception as ex:
                 prog(f"    ⚠ Could not set compat tool for shortcut: {ex}")
 
@@ -1400,11 +1400,11 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
         if new_entries:
             try:
                 _write_shortcuts_vdf(shortcuts_path, existing_raw, new_entries)
-                prog(f"  ✓ shortcuts.vdf saved")
+                prog("  ✓ shortcuts.vdf saved")
             except Exception as e:
                 prog(f"  ⚠ Failed to write shortcuts.vdf: {e}")
         else:
-            prog(f"  ✓ No new shortcuts needed")
+            prog("  ✓ No new shortcuts needed")
     
     prog("✓ Non-Steam shortcuts created.")
 
@@ -1420,7 +1420,6 @@ def apply_steam_artwork(selected_keys: list, on_progress=None):
     selected_keys — list of game keys the user selected (e.g. ["iw4mp", "t6zm"])
     on_progress   — optional callback(msg: str)
     """
-    from detect_games import GAMES
 
     prog = on_progress or (lambda *a: None)
 
@@ -1765,14 +1764,14 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
             prog(f"    appid: {shortcut_appid}")
 
             if name in existing_names:
-                prog(f"    ⚠ Unexpected name collision after strip")
+                prog("    ⚠ Unexpected name collision after strip")
 
             entry = _shortcut_entry(shortcut_appid, name, f'"{actual_exe}"', f'"{install_dir}"', icon_path, launch_options)
 
             entry_bytes = _make_shortcut_entry(next_idx, entry)
             new_entries.append(entry_bytes)
             next_idx += 1
-            prog(f"    ✓ Shortcut created")
+            prog("    ✓ Shortcut created")
 
             # Download artwork
             _download_artwork(grid_dir, shortcut_appid, shortcut_def, prog,
@@ -1802,11 +1801,11 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
         if new_entries:
             try:
                 _write_shortcuts_vdf(shortcuts_path, existing_raw, new_entries)
-                prog(f"  ✓ shortcuts.vdf saved")
+                prog("  ✓ shortcuts.vdf saved")
             except Exception as e:
                 prog(f"  ⚠ Failed to write shortcuts.vdf: {e}")
         else:
-            prog(f"  ✓ No new shortcuts needed")
+            prog("  ✓ No new shortcuts needed")
 
     prog("✓ Own game shortcuts written.")
 
@@ -2042,7 +2041,7 @@ def create_launcher_shortcut(on_progress=None):
         )
 
         if LAUNCHER_TITLE in existing_names:
-            prog(f"  Launcher shortcut already exists")
+            prog("  Launcher shortcut already exists")
         else:
             entry = _shortcut_entry(shortcut_appid, LAUNCHER_TITLE, exe_path, start_dir, icon_path, _launcher_launch_opts(shortcut_appid))
 

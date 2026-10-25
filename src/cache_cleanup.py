@@ -27,7 +27,6 @@ Steam source adds LD_PRELOAD to work around Steam's pinned libcurl
 conflicting with the system flatpak binary.
 """
 
-import binascii
 import os
 import shutil
 import sys
@@ -232,8 +231,8 @@ def main():
     setup_logging()
     if len(sys.argv) < 3:
         print(f"Usage: {sys.argv[0]} <game_key> <source>")
-        print(f"  game_key: t4sp, t4mp, t5sp, t5mp, t6mp, t6zm, iw5mp, iw5mp_ds")
-        print(f"  source:   steam or own")
+        print("  game_key: t4sp, t4mp, t5sp, t5mp, t6mp, t6zm, iw5mp, iw5mp_ds")
+        print("  source:   steam or own")
         sys.exit(1)
 
     game_key = sys.argv[1]

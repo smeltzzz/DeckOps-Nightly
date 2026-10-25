@@ -1247,7 +1247,7 @@ class _BaseInstallScreen(QWidget):
         )
         open_btn = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
         done_btn = msg.addButton("I've Placed It", QMessageBox.ButtonRole.AcceptRole)
-        skip_btn = msg.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
+        msg.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
 
         while True:
             msg.exec()
@@ -2067,7 +2067,7 @@ class _BaseInstallScreen(QWidget):
                         _plut_appid = _PLUT_META[key][0] if key in _PLUT_META else gd["appid"]
                         compat = find_compatdata(self.steam_root, _plut_appid,
                                                   game_install_dir=game.get("install_dir"))
-                    wp = install_plutonium(game, key, self.steam_root, proton, compat,
+                    install_plutonium(game, key, self.steam_root, proton, compat,
                                      on_progress=op_plut,
                                      installed_games=installed_for_plut,
                                      source=source)
@@ -2085,7 +2085,7 @@ class _BaseInstallScreen(QWidget):
             self._phase("t6sp")
             for key, gd, game in [(k, gd, g) for k, gd, g in self.selected if KEY_CLIENT.get(k) == "t6sp_mod"]:
                 base_name = gd["base"]
-                self._s.progress.emit(self._ppct(0), f"Installing Rattpak's T6SP-MOD (Beta)...")
+                self._s.progress.emit(self._ppct(0), "Installing Rattpak's T6SP-MOD (Beta)...")
                 def op_t6sp(pct, msg): self._s.progress.emit(self._ppct(pct), msg)
                 try:
                     source = "own" if key in own_selected else "steam"
@@ -2144,7 +2144,7 @@ class _BaseInstallScreen(QWidget):
             self._phase("t7x")
             for key, gd, game in [(k, gd, g) for k, gd, g in self.selected if KEY_CLIENT.get(k) == "t7x"]:
                 base_name = gd["base"]
-                self._s.progress.emit(self._ppct(0), f"Setting up T7x...")
+                self._s.progress.emit(self._ppct(0), "Setting up T7x...")
                 def op_t7x(pct, msg): self._s.progress.emit(self._ppct(pct), msg)
                 try:
                     source = "own" if key in own_selected else "steam"

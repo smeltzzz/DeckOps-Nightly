@@ -493,7 +493,7 @@ def _collect_inno_log(compatdata_path: str, on_progress=None):
                 os.makedirs(_LOG_DIR, exist_ok=True)
                 dest = os.path.join(_LOG_DIR, "cod4x_inno_setup.log")
                 shutil.copy2(latest, dest)
-                log(f"  ✓ Inno Setup log saved to logs/cod4x_inno_setup.log")
+                log("  ✓ Inno Setup log saved to logs/cod4x_inno_setup.log")
                 return dest
             except Exception as ex:
                 log(f"  ⚠ Could not copy Inno Setup log: {ex}")
@@ -650,7 +650,7 @@ def install_cod4x(game: dict, steam_root: str, proton_path: str,
     # ── Step 1: Write registry keys (pre-setup) ─────────────────────────
     # Write before the setup.exe run so Steam skips first-launch installers.
     prog(5, "Writing registry keys...")
-    pre_reg_ok = _write_registry_keys(compatdata_path, on_progress=log)
+    _write_registry_keys(compatdata_path, on_progress=log)
 
     # ── Step 1b: Write install path registry key ─────────────────────────
     # Write the CoD4 install directory into HKLM so setup.exe can find it.

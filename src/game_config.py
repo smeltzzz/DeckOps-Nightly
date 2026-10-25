@@ -907,7 +907,7 @@ def rename_player(player_name, steam_root, installed_games=None,
             if sibling and os.path.isdir(sibling):
                 _t7x_set_name(sibling, player_name)
                 updated += 1
-                prog(f"  + t7x: renamed in properties.json")
+                prog("  + t7x: renamed in properties.json")
         except Exception as ex:
             prog(f"  ⚠ t7x: rename failed: {ex}")
 

@@ -40,7 +40,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QFont, QFontDatabase, QPixmap, QPainter, QColor
 from PyQt5.QtCore import (
-    Qt, QTimer, QRect, QObject, QThread, pyqtSignal, pyqtSlot,
+    Qt, QTimer, QRect, pyqtSlot,
 )
 
 # ── paths ────────────────────────────────────────────────────────────────────

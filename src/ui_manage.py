@@ -2108,8 +2108,6 @@ class UpdateScreen(QWidget):
                                         launch_bootstrapper,
                                         is_plutonium_ready)
 
-        has_cod4  = any(KEY_CLIENT.get(k) in ("cod4r", "cod4x", "iw3sp") for k, _, _ in self.selected)
-        has_iw4x  = any(KEY_CLIENT.get(k) == "iw4x" for k, _, _ in self.selected)
         has_plut  = any(KEY_CLIENT.get(k) == "plutonium" for k, _, _ in self.selected)
         proton    = get_proton_path(self.steam_root)
 

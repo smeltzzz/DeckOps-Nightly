@@ -273,7 +273,6 @@ def _receipt_path(game_id: str, install_dir: str) -> str:
 
 def _write_receipt(game_id: str, install_dir: str, merged: dict):
     from datetime import datetime
-    target = _merge_dir(game_id, install_dir)
     path = _receipt_path(game_id, install_dir)
     data = {}
     try:

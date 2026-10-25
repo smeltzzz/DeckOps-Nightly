@@ -711,7 +711,7 @@ if __name__ == "__main__":
     else:
         print(f"Steam found at: {steam_root}")
         libraries = parse_library_folders(steam_root)
-        print(f"Libraries found:")
+        print("Libraries found:")
         for lib in libraries:
             print(f"  {lib}")
         installed = find_installed_games(libraries)
@@ -720,7 +720,7 @@ if __name__ == "__main__":
             print(f"  [{key}] {game['name']}")
             print(f"        {game['install_dir']}")
 
-    print(f"\nOwn games scan:")
+    print("\nOwn games scan:")
     own = find_own_installed(on_progress=print)
     for key, game in own.items():
         print(f"  [{key}] {game['name']}")

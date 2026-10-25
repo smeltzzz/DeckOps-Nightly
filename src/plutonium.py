@@ -581,7 +581,6 @@ def _apply_launcher_game_configs(launcher_plut_dir: str, game_key: str,
         return
 
     import config as _cfg
-    deck_model = _cfg.get_deck_model() or "oled"
     player_name = _cfg.get_player_name() or "Player"
     model_dir = _cfg.get_model_config_dir()
 

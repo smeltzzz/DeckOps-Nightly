@@ -31,14 +31,10 @@ OLED Decks do not use this module at all -- plutonium.py handles OLED
 directly through Steam's Proton runtime and a bash wrapper per game.
 """
 
-import binascii
 import json
 import os
-import re
 import shutil
-import stat
 import subprocess
-import time
 
 from identity import VENV_PYTHON
 from depot_downgrade import plut_game_dir

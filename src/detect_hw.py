@@ -8,7 +8,6 @@ node or unrecognised string returns None, never raises.
 This is a leaf module with no DeckOps imports.
 """
 
-import os
 import platform
 
 

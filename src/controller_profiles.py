@@ -41,7 +41,6 @@ Must be called while Steam is closed.
 """
 
 import os
-import re
 import shutil
 
 from log import get_logger

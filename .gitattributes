@@ -1,2 +1,7 @@
+# Scripts and source run on Linux; CRLF breaks shell scripts and .desktop files.
+*.sh      text eol=lf
+*.desktop text eol=lf
+*.py      text eol=lf
+
 # MW3 server recipes: GitHub reads .dsr as Visual Basic 6.0
 *.dsr linguist-detectable=false

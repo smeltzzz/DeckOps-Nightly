@@ -434,7 +434,7 @@ def install_alterware(game: dict, game_key: str,
             clear_launch_options(steam_root, appid)
             set_launch_options(steam_root, appid, launch_opt)
         else:
-            prog(85, f"⚠ Missing appid or steam_root — skipping launch options")
+            prog(85, "⚠ Missing appid or steam_root — skipping launch options")
     else:
         prog(85, "Own game — skipping launch options")
 

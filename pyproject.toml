@@ -1,0 +1,29 @@
+[project]
+name = "deckops-nightly"
+description = "DeckOps Nightly: Call of Duty setup and launcher for Steam Deck and other Linux handhelds"
+requires-python = ">=3.10"
+dynamic = ["version"]
+
+# Runtime dependencies are installed into the user's venv by install.sh and
+# launcher.sh; they are listed here only so tooling knows about them.
+# PyQt6 is preferred, PyQt5 is the fallback (see src/qt.py).
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src"]
+extend-exclude = ["assets"]
+
+[tool.ruff.lint]
+# Correctness only: pyflakes + syntax/runtime errors. Style rules are left
+# off on purpose (the codebase uses one-line `if x: y` and `a; b` heavily),
+# so CI flags real problems, not formatting taste.
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# qt.py re-exports whichever Qt binding is installed with star imports.
+"src/qt.py" = ["F403", "F405"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
