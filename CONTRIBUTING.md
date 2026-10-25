@@ -28,6 +28,12 @@ shellcheck --severity=error *.sh assets/LAN/*.sh
 - `tests/test_ui_smoke.py` imports every UI module and builds every screen
   offscreen. It needs PyQt6 (`pip install PyQt6`) and skips itself without it;
   run it after moving code between `ui_*.py` files.
+- `deckops_uninstall.sh` embeds about 2,000 lines of Python as heredocs
+  (`python3 - <<'PYEOF'`) that edit the user's Steam files. They can't import
+  anything from `src/`: it is already gone when they run. `tests/test_uninstall_blocks.py`
+  pulls them out of the script, lints them and runs the shortcut-removal ones
+  against fixture `shortcuts.vdf` files. Run it after touching any of them; its
+  job is to make sure the user's own shortcuts are never removed or damaged.
 - A few tests pin values that must never change (shortcut appids, Heroic app
   names). If one fails, the code is wrong, not the test: existing installs and
   Steam shortcuts depend on those values.

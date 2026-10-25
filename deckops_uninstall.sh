@@ -881,7 +881,7 @@ for uid in os.listdir(USERDATA_DIR):
                 if os.path.isdir(t7x_data):
                     try:
                         shutil.rmtree(t7x_data)
-                        print(f"    Removed legacy t7x/ directory")
+                        print("    Removed legacy t7x/ directory")
                     except Exception as ex:
                         print(f"    Failed to remove t7x/: {ex}")
             continue
@@ -990,7 +990,7 @@ for uid in os.listdir(USERDATA_DIR):
         if os.path.exists(plut_meta):
             try:
                 os.remove(plut_meta)
-                print(f"    Removed deckops_plutonium.json")
+                print("    Removed deckops_plutonium.json")
             except Exception:
                 pass
 
@@ -2131,7 +2131,7 @@ info "Removing DeckOps non-Steam shortcuts from Steam library..."
 # (appid CRC algorithm lives in steam_common.py calc_shortcut_appid)
 remove_steam_shortcuts() {
     python3 - << 'PYEOF'
-import os, struct
+import os
 
 SHORTCUT_NAMES = {
     # Steam-path shortcuts (shortcut.py SHORTCUTS)
@@ -3045,6 +3045,46 @@ userdata   = os.path.join(steam_root, "userdata")
 if not os.path.isdir(userdata):
     sys.exit(0)
 
+def split_entries(raw):
+    """The shortcut entries of a shortcuts.vdf body, found by walking the typed
+    binary format. (Splitting on two 0x08 bytes does not work: 0x08 also occurs
+    inside integer fields, and an entry without a tags section does not end in
+    two of them, so entries were cut in half or merged with their neighbour.)
+    Each entry comes back whole: its 0x00 <index> 0x00 start up to its closing
+    0x08. Returns None if the data is not the expected shape, so the caller
+    leaves the file alone."""
+    entries, pos = [], 0
+    try:
+        while raw[pos] != 0x08:                    # 0x08 ends the outer map
+            if raw[pos] != 0x00:
+                return None
+            start = pos
+            pos = raw.index(b'\x00', pos + 1) + 1  # skip 0x00 <index> 0x00
+            depth = 1
+            while depth:
+                t = raw[pos]
+                pos += 1
+                if t == 0x08:                      # end of a map
+                    depth -= 1
+                    continue
+                pos = raw.index(b'\x00', pos) + 1  # the field's key
+                if t == 0x00:                      # nested map
+                    depth += 1
+                elif t == 0x01:                    # string
+                    pos = raw.index(b'\x00', pos) + 1
+                elif t in (0x02, 0x03, 0x04, 0x06):    # int32, float32, pointer, colour
+                    pos += 4
+                elif t in (0x07, 0x0A):            # uint64, int64
+                    pos += 8
+                else:
+                    return None
+            entries.append(raw[start:pos])
+    except (IndexError, ValueError):
+        return None
+    # what is left is the end of the outer map and of the file
+    return entries if raw[pos:] == b'\x08\x08' else None
+
+
 removed_total = 0
 for uid in os.listdir(userdata):
     if not uid.isdigit() or int(uid) < 10000:
@@ -3058,19 +3098,18 @@ for uid in os.listdir(userdata):
     except Exception:
         continue
 
-    if not data.startswith(b'\x00shortcuts\x00'):
+    header = b'\x00shortcuts\x00'
+    if not data.startswith(header):
         continue
 
-    header = b'\x00shortcuts\x00'
-    body = data[len(header):]
-    parts = body.split(b'\x08\x08')
+    entries = split_entries(data[len(header):])
+    if entries is None:
+        print(f"  uid {uid}: shortcuts.vdf is not in the expected format, leaving it alone")
+        continue
 
     kept = []
     removed_here = 0
-    for part in parts:
-        if not part:
-            kept.append(part)
-            continue
+    for part in entries:
         m_exe = re.search(rb'\x01(?:exe|Exe)\x00([^\x00]*)\x00', part)
         if m_exe:
             exe = m_exe.group(1).decode("utf-8", "replace").strip('"')
@@ -3104,18 +3143,9 @@ for uid in os.listdir(userdata):
         continue
 
     # Reindex remaining entries
-    new_parts = []
-    idx = 0
-    for part in kept:
-        if not part:
-            new_parts.append(part)
-            continue
-        new_part = re.sub(rb'^\x00\d+\x00', f'\x00{idx}\x00'.encode(), part, count=1)
-        new_parts.append(new_part)
-        idx += 1
-
-    new_body = b'\x08\x08'.join(new_parts)
-    new_data = header + new_body
+    new_parts = [re.sub(rb'^\x00\d+\x00', f'\x00{idx}\x00'.encode(), part, count=1)
+                 for idx, part in enumerate(kept)]
+    new_data = header + b''.join(new_parts) + b'\x08\x08'
 
     # Backup before writing
     bak = vdf + ".deckops_uninstall.bak"
