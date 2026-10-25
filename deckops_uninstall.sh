@@ -2899,6 +2899,12 @@ steam_root = sys.argv[1]
 out_path   = sys.argv[2]
 userdata   = os.path.join(steam_root, "userdata")
 
+# DeckOps' own Heroic shortcuts launch a sideload entry whose app name starts with
+# "do_" (steam_common.heroic_app_name), as heroic://launch?appName=do_...&runner=sideload
+# or heroic://launch/sideload/do_.... Matching any heroic:// URL also caught the
+# user's own Heroic shortcuts (which use Heroic's own ids) and removed them.
+DECKOPS_HEROIC_URL = re.compile(r"heroic://launch[^\s\"']*?(?:appName=|/)do_[A-Za-z0-9_-]+")
+
 def calc_shortcut_appid(exe_path, name):
     key = (exe_path + name).encode("utf-8")
     crc = binascii.crc32(key) & 0xFFFFFFFF
@@ -2954,7 +2960,7 @@ if os.path.isdir(userdata):
                 found.add(appid)
                 continue
 
-            # Pattern 2: old Heroic native (Exe="flatpak", LaunchOptions has heroic://)
+            # Pattern 2: old Heroic native (Exe="flatpak", LaunchOptions launch a do_ entry)
             if exe_clean == "flatpak":
                 # Find closest following LaunchOptions
                 best_lo = None
@@ -2962,19 +2968,19 @@ if os.path.isdir(userdata):
                     if lo_pos > name_pos:
                         best_lo = lo
                         break
-                if best_lo and "heroic://launch" in best_lo:
+                if best_lo and DECKOPS_HEROIC_URL.search(best_lo):
                     appid = calc_shortcut_appid(best_exe, name)
                     found.add(appid)
                     continue
 
-            # Pattern 3: current Heroic native (Exe="/usr/bin/flatpak", LaunchOptions has heroic://)
+            # Pattern 3: Heroic native (Exe="/usr/bin/flatpak", LaunchOptions launch a do_ entry)
             if exe_clean == "/usr/bin/flatpak":
                 best_lo = None
                 for lo_pos, lo in launch_opts:
                     if lo_pos > name_pos:
                         best_lo = lo
                         break
-                if best_lo and "heroic://launch" in best_lo:
+                if best_lo and DECKOPS_HEROIC_URL.search(best_lo):
                     appid = calc_shortcut_appid(best_exe, name)
                     found.add(appid)
 
@@ -3044,6 +3050,13 @@ userdata   = os.path.join(steam_root, "userdata")
 
 if not os.path.isdir(userdata):
     sys.exit(0)
+
+# DeckOps' own Heroic shortcuts launch a sideload entry whose app name starts with
+# "do_" (steam_common.heroic_app_name), as heroic://launch?appName=do_...&runner=sideload
+# or heroic://launch/sideload/do_.... Matching any heroic:// URL also caught the
+# user's own Heroic shortcuts (which use Heroic's own ids) and removed them.
+DECKOPS_HEROIC_URL = re.compile(r"heroic://launch[^\s\"']*?(?:appName=|/)do_[A-Za-z0-9_-]+")
+
 
 def split_entries(raw):
     """The shortcut entries of a shortcuts.vdf body, found by walking the typed
@@ -3119,21 +3132,21 @@ for uid in os.listdir(userdata):
                 removed_here += 1
                 continue
 
-            # Pattern 2: old Heroic native (Exe=flatpak + heroic:// in LaunchOptions)
+            # Pattern 2: old Heroic native (Exe=flatpak, LaunchOptions launch a do_ entry)
             if exe == "flatpak":
                 m_lo = re.search(rb'\x01LaunchOptions\x00([^\x00]*)\x00', part)
                 if m_lo:
                     lo = m_lo.group(1).decode("utf-8", "replace")
-                    if "heroic://launch" in lo:
+                    if DECKOPS_HEROIC_URL.search(lo):
                         removed_here += 1
                         continue
 
-            # Pattern 3: current Heroic native (Exe=/usr/bin/flatpak + heroic:// in LaunchOptions)
+            # Pattern 3: Heroic native (Exe=/usr/bin/flatpak, LaunchOptions launch a do_ entry)
             if exe == "/usr/bin/flatpak":
                 m_lo = re.search(rb'\x01LaunchOptions\x00([^\x00]*)\x00', part)
                 if m_lo:
                     lo = m_lo.group(1).decode("utf-8", "replace")
-                    if "heroic://launch" in lo:
+                    if DECKOPS_HEROIC_URL.search(lo):
                         removed_here += 1
                         continue
 
