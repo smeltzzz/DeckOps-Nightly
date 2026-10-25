@@ -2133,6 +2133,8 @@ remove_steam_shortcuts() {
     python3 - << 'PYEOF'
 import os
 
+import deckops_vdf
+
 SHORTCUT_NAMES = {
     # Steam-path shortcuts (shortcut.py SHORTCUTS)
     "Call of Duty 4: Modern Warfare - Multiplayer",
@@ -2291,6 +2293,11 @@ for uid in os.listdir(userdata):
         if name in LAUNCHER_NAMES and other_branch_entry(entry_blob):
             print(f"  uid {uid}: kept \"{name}\" (belongs to the other DeckOps install)")
             name = ""
+        if name in SHORTCUT_NAMES and not deckops_vdf.is_deckops_entry(entry_blob):
+            # Same title as one of ours, but not made by DeckOps (no DeckOps tag,
+            # and it does not point at anything DeckOps manages): the user's own.
+            print(f"  uid {uid}: kept \"{name}\" (not created by DeckOps)")
+            name = ""
         if name in SHORTCUT_NAMES:
             print(f"  uid {uid}: removed shortcut \"{name}\"")
             removed += 1
@@ -2331,6 +2338,132 @@ for uid in os.listdir(userdata):
 PYEOF
 }
 
+# Helpers for reading Steam's binary shortcuts.vdf, shared by the Python blocks
+# below that decide which shortcuts are DeckOps'. Those blocks cannot import from
+# src/ (it is already gone by now), so the helpers are written to a temp dir and
+# put on PYTHONPATH.
+DECKOPS_PY_HELPERS="$(mktemp -d)"
+export PYTHONPATH="$DECKOPS_PY_HELPERS${PYTHONPATH:+:$PYTHONPATH}"
+cat > "$DECKOPS_PY_HELPERS/deckops_vdf.py" <<'PYEOF'
+"""Read Steam's binary shortcuts.vdf and tell DeckOps' shortcuts from the user's.
+
+A shortcut counts as DeckOps' if its tags section contains "DeckOps" (every
+shortcut DeckOps has written carries that tag), or if its exe, start dir or
+launch options point into a place DeckOps manages. A shortcut that merely shares
+a title with one of DeckOps' (a user's own Call of Duty shortcut, say) is not.
+"""
+
+# Where DeckOps' shortcuts point: its install dirs (Stable and Nightly), its data
+# dir, and the launchers and wrappers it generates.
+DECKOPS_PATHS = (
+    "/DeckOps-Nightly/", "/DeckOps/", "/deckops/",
+    "cache_cleanup.py", "/lcd_wrappers/", "DeckOps-T7X", "DeckOps_Offline", "launcher_offline.sh",
+)
+
+
+def split_entries(raw):
+    """The shortcut entries of a shortcuts.vdf body, found by walking the typed
+    binary format (0x08 also occurs inside integers, so splitting on it breaks).
+    Each entry comes back whole: its 0x00 <index> 0x00 start up to its closing
+    0x08. Returns None if the data is not the expected shape."""
+    entries, pos = [], 0
+    try:
+        while raw[pos] != 0x08:                    # 0x08 ends the outer map
+            if raw[pos] != 0x00:
+                return None
+            start = pos
+            pos = raw.index(b'\x00', pos + 1) + 1  # skip 0x00 <index> 0x00
+            depth = 1
+            while depth:
+                t = raw[pos]
+                pos += 1
+                if t == 0x08:
+                    depth -= 1
+                    continue
+                pos = raw.index(b'\x00', pos) + 1  # the field's key
+                if t == 0x00:
+                    depth += 1
+                elif t == 0x01:
+                    pos = raw.index(b'\x00', pos) + 1
+                elif t in (0x02, 0x03, 0x04, 0x06):
+                    pos += 4
+                elif t in (0x07, 0x0A):
+                    pos += 8
+                else:
+                    return None
+            entries.append(raw[start:pos])
+    except (IndexError, ValueError):
+        return None
+    return entries if raw[pos:] == b'\x08\x08' else None
+
+
+def _read_map(b, pos):
+    out = {}
+    while True:
+        t = b[pos]
+        pos += 1
+        if t == 0x08:
+            return out, pos
+        k_end = b.index(b'\x00', pos)
+        key = b[pos:k_end].decode("utf-8", "replace")
+        pos = k_end + 1
+        if t == 0x00:
+            out[key], pos = _read_map(b, pos)
+        elif t == 0x01:
+            v_end = b.index(b'\x00', pos)
+            out[key] = b[pos:v_end].decode("utf-8", "replace")
+            pos = v_end + 1
+        elif t in (0x02, 0x03, 0x04, 0x06):
+            out[key] = b[pos:pos + 4]
+            pos += 4
+        elif t in (0x07, 0x0A):
+            out[key] = b[pos:pos + 8]
+            pos += 8
+        else:
+            raise ValueError("unknown field type")
+
+
+def entry_fields(blob):
+    """{key: value} of one entry (top-level keys lower-cased, nested maps as
+    dicts), or None if it does not parse cleanly."""
+    try:
+        fields, pos = _read_map(blob, blob.index(b'\x00', 1) + 1)
+    except (IndexError, ValueError):
+        return None
+    if pos != len(blob):
+        return None
+    return {k.lower(): v for k, v in fields.items()}
+
+
+def is_deckops(fields):
+    tags = fields.get("tags")
+    if isinstance(tags, dict) and "DeckOps" in tags.values():
+        return True
+    where = " ".join(fields[k] for k in ("exe", "startdir", "launchoptions")
+                     if isinstance(fields.get(k), str))
+    return any(p in where for p in DECKOPS_PATHS)
+
+
+def is_deckops_entry(blob):
+    """True only for an entry that parses and is DeckOps'. One that does not
+    parse is not, so it is left alone."""
+    fields = entry_fields(blob)
+    return fields is not None and is_deckops(fields)
+
+
+def entries(data):
+    """(fields, is_deckops) for each shortcut in a whole shortcuts.vdf file.
+    Yields nothing if the file is not in the expected shape."""
+    header = b'\x00shortcuts\x00'
+    pos = data.find(header)
+    if pos < 0:
+        return
+    for blob in split_entries(data[pos + len(header):]) or ():
+        fields = entry_fields(blob)
+        if fields is not None:
+            yield fields, is_deckops(fields)
+PYEOF
+
 # Snapshot every shortcuts.vdf BEFORE removing anything. The artwork,
 # controller-config and LCD appid scans further down work out which appids
 # to clean by reading DeckOps' entries out of shortcuts.vdf -- entries that
@@ -2338,7 +2471,7 @@ PYEOF
 # (via $SHORTCUTS_SNAPSHOT/<uid>.vdf) instead of the live file.
 SHORTCUTS_SNAPSHOT="$(mktemp -d)"
 export SHORTCUTS_SNAPSHOT
-trap 'rm -rf "$SHORTCUTS_SNAPSHOT"' EXIT
+trap 'rm -rf "$SHORTCUTS_SNAPSHOT" "$DECKOPS_PY_HELPERS"' EXIT
 for _root in "$HOME/.local/share/Steam" "$STEAM_ROOT"; do
     [ -n "$_root" ] && [ -d "$_root/userdata" ] || continue
     for _vdf in "$_root"/userdata/*/config/shortcuts.vdf; do
@@ -2357,6 +2490,8 @@ info "Removing non-Steam shortcut artwork from Steam grid..."
 # Mirrors: shortcut.py _download_artwork() and steam_common.py calc_shortcut_appid()
 python3 - << 'PYEOF'
 import os, re, binascii, glob
+
+import deckops_vdf
 
 # Shortcut definitions — must match shortcut.py SHORTCUTS
 SHORTCUTS = {
@@ -2469,8 +2604,12 @@ for uid in os.listdir(userdata):
     try:
         with open(vdf_path, "rb") as f:
             data = f.read()
-        for m in re.finditer(b'\x01(?:exe|Exe)\x00([^\x00]+)\x00', data):
-            exe_raw = m.group(1).decode("utf-8", errors="replace")
+        for _fields, _mine in deckops_vdf.entries(data):
+            if not _mine:
+                continue    # the user's own shortcut: leave its artwork alone
+            exe_raw = _fields.get("exe", "")
+            if not exe_raw:
+                continue
             exe_name = os.path.basename(exe_raw.strip('"')).lower()
             canonical = OWN_EXE_MAP.get(exe_name)
             if canonical:
@@ -2613,6 +2752,8 @@ info "Removing per-game controller configs..."
 # files, update the copies here too or uninstall will miss entries.
 python3 - << 'PYEOF'
 import os, shutil, re, binascii, glob
+
+import deckops_vdf
 
 STEAM_DIR = os.path.expanduser("~/.local/share/Steam")
 USERDATA  = os.path.join(STEAM_DIR, "userdata")
@@ -2785,6 +2926,10 @@ def shortcuts_vdf(uid):
         return snap
     return os.path.join(USERDATA, uid, "config", "shortcuts.vdf")
 
+# Titles the user's own shortcuts use. Controller config is keyed by title, so a
+# title one of them shares with ours must be left alone.
+user_titles = set()
+
 for uid in os.listdir(USERDATA):
     if not uid.isdigit() or int(uid) < 10000:
         continue
@@ -2794,8 +2939,13 @@ for uid in os.listdir(USERDATA):
     try:
         with open(vdf_path, "rb") as f:
             data = f.read()
-        for m in re.finditer(b'\x01(?:exe|Exe)\x00([^\x00]+)\x00', data):
-            exe_raw = m.group(1).decode("utf-8", errors="replace")
+        for _fields, _mine in deckops_vdf.entries(data):
+            if not _mine:
+                user_titles.add(_fields.get("appname", ""))
+                continue    # the user's own shortcut: keep its controller config
+            exe_raw = _fields.get("exe", "")
+            if not exe_raw:
+                continue
             exe_name = os.path.basename(exe_raw.strip('"')).lower()
             canonical = OWN_EXE_MAP.get(exe_name)
             if canonical:
@@ -2818,6 +2968,9 @@ SHORTCUT_TITLES = (set(OWN_EXE_MAP.values()) | {i["name"] for i in SHORTCUTS.val
     "Call of Duty: Advanced Warfare - Multiplayer", "Call of Duty: Advanced Warfare - Singleplayer",
     "DeckOps: Plutonium Offline",
 })
+for title in sorted(SHORTCUT_TITLES & user_titles):
+    print(f"  kept controller config for \"{title}\" (a shortcut DeckOps did not create)")
+SHORTCUT_TITLES -= user_titles
 for title in SHORTCUT_TITLES:
     all_configset_keys.add(re.sub(r'[/\\?%*:|"<>.]', "", title.lower()))
 
