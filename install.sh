@@ -15,7 +15,13 @@ warn()    { printf "${YELLOW}${BOLD}[ WARN ]${CLEAR} %s\n" "$1"; }
 die()     {
     printf "${RED}${BOLD}[ERROR ]${CLEAR} %s\n" "$1"
     echo ""
-    read -r -p "  Press Enter to close..."
+    # From the terminal, not stdin: the installer normally runs as
+    # `curl ... | bash`, where stdin is the script itself -- read swallowed the
+    # next script line and returned at once, and the terminal closed before
+    # the error could be read. No terminal at all: just exit.
+    printf "  Press Enter to close..."
+    read -r _ </dev/tty 2>/dev/null || true
+    echo ""
     exit 1
 }
 
@@ -55,6 +61,12 @@ if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then
     DESKTOP_FILE="$HOME/.local/share/applications/deckops-nightly.desktop"
     DESKTOP_SHORTCUT="$HOME/Desktop/DeckOps-Nightly.desktop"
 fi
+# This script's own repo always wins. Under `curl | bash` the identity comes
+# from ~/DeckOps-Nightly; on an install made from upstream (or from before the
+# fork) that file has the same BRANCH but another GITHUB_USER, so the fork's
+# installer downloaded and installed upstream instead.
+GITHUB_USER="smeltzzz"
+GITHUB_REPO="DeckOps-Nightly"
 
 MUSIC_URL="https://archive.org/download/adrenaline-klickaud/Adrenaline_KLICKAUD.mp3"
 MUSIC_FILE="background.mp3"
@@ -132,6 +144,16 @@ fi
 
 # ── step 5: set up Python venv + install packages ────────────────────────────
 info "Setting up Python environment..."
+
+# A venv folder can exist and still be unusable: after a SteamOS Python
+# update its lib/pythonX.Y no longer matches (pip and PyQt can't be
+# imported), or `python3 -m venv` failed half way and left no pip. Only the
+# folder was checked, so every reinstall then died with a misleading "check
+# your internet connection" until the user deleted .venv by hand.
+if [ -d "$VENV_DIR" ] && ! "$VENV_PYTHON" -c "import pip" &>/dev/null; then
+    warn "Python environment is broken (Python was updated?) -- rebuilding it."
+    rm -rf "$VENV_DIR"
+fi
 
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR" || die "Failed to create Python virtual environment."

@@ -42,7 +42,8 @@ def _plutonium(key, cmd):
     if not os.path.isdir(master) or not compat:
         return
     log = lambda m: _log.info(m)
-    info = pu.update(master, log)
+    # Inside prelaunch.sh's 120 s limit, with room left for linking the prefix
+    info = pu.update(master, log, budget=pu.LAUNCH_BUDGET)
     prefix = _plut_dir_in_prefix(compat)
     if os.path.isdir(prefix) and os.path.realpath(prefix) != os.path.realpath(master):
         pu.link_prefix(master, prefix, info, log)

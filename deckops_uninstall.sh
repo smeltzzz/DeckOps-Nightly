@@ -37,23 +37,68 @@ if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then
     XDG_ID="deckops-nightly"
     ENTRY_POINT="$INSTALL_DIR/src/main.py"
 fi
+# This script's own repo always wins. An identity file from an older install
+# (upstream, or from before the fork) has the same BRANCH but another
+# GITHUB_USER, and sourcing it pointed downloads at that repo instead.
+GITHUB_USER="smeltzzz"
+GITHUB_REPO="DeckOps-Nightly"
+
+# ── The other branch ─────────────────────────────────────────────────────────
+# Stable (~/DeckOps) and Nightly (~/DeckOps-Nightly) can be installed side by
+# side. While the other one is installed, its install dir, config, VDF ledger,
+# desktop entries, its own Steam shortcut and its Offline launcher shortcut are
+# left alone, and so is ~/.local/share/deckops, which both branches use
+# (Plutonium prefix, Offline Mode, save backups). Uninstalling Nightly used to
+# wipe a working Stable install. When the other branch is NOT installed, its
+# leftovers are cleaned up as before.
+if [ "$INSTALL_DIR_NAME" = "DeckOps-Nightly" ]; then
+    OTHER_DIR_NAME="DeckOps";         OTHER_XDG_ID="deckops";         OTHER_TITLE="DeckOps"
+else
+    OTHER_DIR_NAME="DeckOps-Nightly"; OTHER_XDG_ID="deckops-nightly"; OTHER_TITLE="DeckOps Nightly"
+fi
+OTHER_DIR="$HOME/$OTHER_DIR_NAME"
+KEEP_OTHER=""
+[ -f "$OTHER_DIR/src/main.py" ] && KEEP_OTHER=1
+# For the embedded Python steps below
+export DECKOPS_INSTALL_DIR="$INSTALL_DIR" DECKOPS_OTHER_DIR="$OTHER_DIR" \
+       DECKOPS_OTHER_XDG_ID="$OTHER_XDG_ID" DECKOPS_OTHER_TITLE="$OTHER_TITLE" \
+       DECKOPS_KEEP_OTHER="$KEEP_OTHER"
 
 echo ""
 echo -e "${BOLD}  $APP_TITLE -- Full Uninstaller${CLEAR}"
 echo ""
 
-zenity --question \
-    --title="$APP_TITLE Uninstaller" \
-    --text="This will clear all DeckOps launch options, remove client files, and remove ALL DeckOps and Plutonium data from your Wine prefixes.\n\nContinue?" \
-    --ok-label="Cancel" \
-    --cancel-label="Yes, Uninstall" 2>/dev/null
+# Only an explicit "Yes, Uninstall" goes ahead. The buttons used to be swapped
+# (OK labelled "Cancel"), so Escape, the window's X or a zenity failure -- all
+# non-zero -- started the uninstall, and without zenity it ran unasked.
+CONFIRM_TEXT="This will clear all DeckOps launch options, remove client files, and remove ALL DeckOps and Plutonium data from your Wine prefixes.\n\nContinue?"
+if command -v zenity >/dev/null 2>&1; then
+    zenity --question \
+        --title="$APP_TITLE Uninstaller" \
+        --text="$CONFIRM_TEXT" \
+        --ok-label="Yes, Uninstall" \
+        --cancel-label="Cancel" 2>/dev/null
+    CONFIRM=$?
+else
+    echo -e "$CONFIRM_TEXT"
+    CONFIRM=1
+    read -r -p "  Type yes to uninstall: " CONFIRM_ANSWER </dev/tty 2>/dev/null || CONFIRM_ANSWER=""
+    [ "$CONFIRM_ANSWER" = "yes" ] && CONFIRM=0
+fi
 
-if [ $? -eq 0 ]; then
-    zenity --info --title="$APP_TITLE" --text="Uninstall cancelled." 2>/dev/null
+if [ "$CONFIRM" -ne 0 ]; then
+    echo "  Uninstall cancelled."
+    command -v zenity >/dev/null 2>&1 && \
+        zenity --info --title="$APP_TITLE" --text="Uninstall cancelled." 2>/dev/null
     exit 0
 fi
 
 echo ""
+
+if [ -n "$KEEP_OTHER" ]; then
+    info "$OTHER_TITLE is also installed ($OTHER_DIR) -- its install, config and shortcuts are left alone."
+    echo ""
+fi
 
 info "Closing Steam..."
 
@@ -380,6 +425,26 @@ else
     skip "save_backup.py not found — skipping save backup."
 fi
 
+fi
+echo ""
+
+# ── Manifest mods ─────────────────────────────────────────────────────────────
+# Mods installed from manifests (ui_manifest.py) used to stay behind. Removed
+# with DeckOps' own code while it is still on disk: unchanged mod files go,
+# files they replaced are put back, files the user changed are kept.
+info "Removing manifest mods..."
+if [ -f "$INSTALL_DIR/src/manifest_mods.py" ]; then
+    if [ -x "$VENV_PYTHON" ]; then _MMPY="$VENV_PYTHON"; else _MMPY="python3"; fi
+    (cd "$INSTALL_DIR/src" && "$_MMPY" manifest_mods.py uninstall-all) 2>&1 | while IFS= read -r line; do
+        echo "         $line"
+    done
+    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+        success "Manifest mods removed."
+    else
+        warn "Some manifest mods could not be removed (see above)."
+    fi
+else
+    skip "manifest_mods.py not found — skipping manifest mods."
 fi
 echo ""
 
@@ -870,11 +935,16 @@ for uid in os.listdir(USERDATA_DIR):
         ) if dlc_dirs else False
 
         if has_iwds:
+            # From the terminal: this script reaches python3 as a heredoc, so
+            # stdin is already used up and input() always read "no"
             try:
-                ans = input(f"    Remove free MW2 DLC maps (~3 GB)? [y/N] ").strip()
-                remove_dlc = ans.lower().startswith("y")
-            except EOFError:
-                remove_dlc = False
+                with open("/dev/tty", "r+") as tty:
+                    tty.write("    Remove free MW2 DLC maps (~3 GB)? [y/N] ")
+                    tty.flush()
+                    ans = tty.readline().strip()
+            except OSError:
+                ans = ""
+            remove_dlc = ans.lower().startswith("y")
         elif dlc_dirs:
             remove_dlc = True
 
@@ -941,8 +1011,11 @@ python3 - << 'PYEOF'
 import os, re, json, shutil
 
 LEDGER_PATH = os.path.expanduser("~/.config/deckops-nightly/vdf_edits.json")
-if not os.path.exists(LEDGER_PATH):
-    LEDGER_PATH = os.path.expanduser("~/.config/deckops/vdf_edits.json")
+# The other branch's ledger only when that branch isn't installed (leftover):
+# while it is, those edits are its own and must stay
+if not os.path.exists(LEDGER_PATH) and not os.environ.get("DECKOPS_KEEP_OTHER"):
+    other_xdg = os.environ.get("DECKOPS_OTHER_XDG_ID") or "deckops"
+    LEDGER_PATH = os.path.expanduser(f"~/.config/{other_xdg}/vdf_edits.json")
 steam_dir   = os.path.expanduser("~/.local/share/Steam")
 userdata    = os.path.join(steam_dir, "userdata")
 
@@ -983,6 +1056,151 @@ def find_block_end(text, start):
                 if depth == 0: return i
         i += 1
     return -1
+
+# Structural VDF reading, same as wrapper.py (_vdf_children / _app_block /
+# _flat_values / _set_flat_value). The first "<appid>" { anywhere in the
+# file can be a same-named block in another section, and Steam often writes
+# LaunchOptions after the "cloud" { } sub-block, which the old flat-section
+# regex never saw -- the prelaunch.sh option then outlived the uninstall.
+def vdf_skip_ws(text, i, end):
+    while i < end:
+        if text[i].isspace():
+            i += 1
+        elif text.startswith("//", i):
+            nl = text.find("\n", i, end)
+            i = end if nl == -1 else nl + 1
+        else:
+            break
+    return i
+
+def vdf_quoted_end(text, i, end):
+    i += 1
+    while i < end:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == '"':
+            return i + 1
+        i += 1
+    raise ValueError("unterminated string in VDF")
+
+def vdf_brace_end(text, i, end):
+    depth = 0
+    while i < end:
+        c = text[i]
+        if c == '"':
+            i = vdf_quoted_end(text, i, end)
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise ValueError("unbalanced braces in VDF")
+
+def vdf_children(text, start, end):
+    i = start
+    while True:
+        i = vdf_skip_ws(text, i, end)
+        if i >= end:
+            return
+        if text[i] != '"':
+            raise ValueError(f"unexpected {text[i]!r} in VDF at offset {i}")
+        k_end = vdf_quoted_end(text, i, end)
+        key = text[i + 1:k_end - 1]
+        j = vdf_skip_ws(text, k_end, end)
+        if j < end and text[j] == "{":
+            close = vdf_brace_end(text, j, end)
+            yield key, i, j, close, True
+            i = close + 1
+        elif j < end and text[j] == '"':
+            v_end = vdf_quoted_end(text, j, end)
+            yield key, i, j + 1, v_end - 1, False
+            i = v_end
+        else:
+            raise ValueError(f"VDF key {key!r} has no value")
+
+STEAM_APPS_PATH = ("UserLocalConfigStore", "Software", "Valve", "Steam", "apps")
+
+def app_block(text, appid):
+    """(open, close) of "<appid>" { under .../Steam/apps, or None. Raises
+    ValueError if the file doesn't parse."""
+    block = (-1, len(text))
+    for key in STEAM_APPS_PATH + (str(appid),):
+        open_, close = block
+        block = next(((vs, ve) for k, _, vs, ve, is_block
+                      in vdf_children(text, open_ + 1, close)
+                      if is_block and k.lower() == key.lower()), None)
+        if not block:
+            return None
+    return block
+
+def flat_values(text, block, key):
+    """[(key_start, value_start, value_end)] for every direct "key" "value"
+    child of block, before or after its sub-blocks (never inside them)."""
+    open_, close = block
+    return [(ks, vs, ve) for k, ks, vs, ve, is_block
+            in vdf_children(text, open_ + 1, close)
+            if not is_block and k.lower() == key.lower()]
+
+def set_flat_value(text, found, value):
+    """Set the first of found to value and remove the duplicates."""
+    for ks, vs, ve in reversed(found[1:]):
+        line_start = text.rfind("\n", 0, ks) + 1
+        line_end = text.find("\n", ve)
+        line_end = len(text) if line_end == -1 else line_end
+        if not text[line_start:ks].strip() and not text[ve + 1:line_end].strip():
+            text = text[:line_start] + text[line_end + 1:]
+        else:
+            text = text[:ks] + text[ve + 1:]
+    _, vs, ve = found[0]
+    return text[:vs] + value + text[ve:]
+
+# Only DeckOps' own part of a LaunchOptions value is removed. set_launch_options
+# adds DeckOps' option after whatever was there, and the user can add more
+# later; the whole value used to be emptied, taking -dx11, PROTON_* etc. with
+# it. Values are as stored in localconfig.vdf (quotes escaped as \").
+_BQ = r'\\"'
+_QS = _BQ + r'[^"]*' + _BQ
+_PREFIX = (r'(?:DECKOPS_MENU=' + _QS + r'|DECKOPS_MENU_ARGS=' + _QS +
+           r'|bash ' + _BQ + r'[^"]*/prelaunch\.sh' + _BQ + r' \S+)\s+')
+_TAIL = (r"bash -c 'exec " + _BQ + r'\$\{@/[^}]*\}' + _BQ + r"[^']*' -- %command%"
+         r'|WINEDLLOVERRIDES=' + _BQ + r'd3d11=n,b' + _BQ + r' %command%'
+         r'|' + _QS + r' ' + _BQ + r'[^"]*/cache_cleanup\.py' + _BQ + r' \S+ steam %command%')
+# prelaunch / menu prefixes + exe swap / CleanOps / LCD cache_cleanup,
+# or the prefixes in front of a bare %command% (IW4x, Plutonium menu)
+DECKOPS_OPTION_RE = re.compile(r'\s*(?:(?:' + _PREFIX + r')*(?:' + _TAIL + r')|(?:' + _PREFIX + r')+%command%)')
+# Whole values older DeckOps versions wrote
+OLD_DECKOPS_VALUES = {
+    "%command%", "PROTON_USE_NTSYNC=1 %command%",
+    "PROTON_NO_FSYNC=1 PROTON_NO_ESYNC=1 %command%",
+    "%command% -multiplayer", "%command% -singleplayer",
+    "iw4x.exe %command%", "iw3sp_mod.exe %command%",
+}
+# Older DeckOps text that can't be split from the rest (LCD flatpak/Heroic
+# launch with #%command%, plutonium:// URLs, exe swaps): the value is then
+# cleared as a whole, as before, so the game can't keep a dead command.
+DECKOPS_LEFTOVER_RE = re.compile(
+    r'prelaunch\.sh|cache_cleanup|deckops|heroicgameslauncher|plutonium://'
+    r'|iw3sp_mod\.exe|iw4x\.exe|iw4x-launcher\.exe|iw-pad\.exe|iw6-mod\.exe|s1-mod\.exe'
+    r'|t6sp-mod\.exe|d3d11=n,b', re.IGNORECASE)
+
+def strip_deckops_options(value, recorded=""):
+    """value without DeckOps' launch option text; "" if nothing else is left."""
+    if recorded and recorded in value:
+        value = value.replace(recorded, " ")
+    value = DECKOPS_OPTION_RE.sub("", value).strip()
+    if value in OLD_DECKOPS_VALUES or DECKOPS_LEFTOVER_RE.search(value):
+        return ""
+    return value
+
+def cleaned_launch_options(values, recorded=""):
+    """One value for all LaunchOptions keys found (duplicates are merged)."""
+    parts = [strip_deckops_options(v, recorded) for v in values]
+    return " ".join(dict.fromkeys(p for p in parts if p))
 
 # ── localconfig.vdf edits ────────────────────────────────────────────────
 lc_edits = ledger.get("localconfig", {})
@@ -1026,49 +1244,35 @@ for uid, apps in lc_edits.items():
                 print(f"  uid {uid}: [ledger] removed DefaultLaunchOption for appid {appid}")
 
             elif key_name in ("LaunchOptions", "UseSteamControllerConfig"):
-                # Find the appid block, then blank or remove the key
-                key_pattern = re.compile(
-                    r'"' + re.escape(appid) + r'"\s*\{',
-                    re.IGNORECASE
-                )
-                key_match = key_pattern.search(content)
-                if not key_match:
+                # The app's own key under .../Steam/apps/<appid>, wherever it
+                # sits among the app's keys; never inside sub-blocks (cloud)
+                try:
+                    block = app_block(content, appid)
+                    found = flat_values(content, block, key_name) if block else []
+                except ValueError as ex:
+                    print(f"  uid {uid}: [ledger] localconfig.vdf not parsed, appid {appid} skipped ({ex})")
                     continue
-                app_open  = key_match.end() - 1
-                app_close = find_block_end(content, app_open)
-                if app_close == -1:
+                if not found:
                     continue
-                app_inner = content[app_open + 1:app_close]
+                # Duplicates left by older DeckOps versions all count
+                values = [content[vs:ve] for _, vs, ve in found]
 
-                # Only touch the flat section, not inside sub-blocks
-                subblock_match = re.search(r'"[^"]+"\s*\{', app_inner)
-                flat_section = app_inner[:subblock_match.start()] if subblock_match else app_inner
-
-                val_pattern = re.compile(
-                    r'("' + re.escape(key_name) + r'"\s*")((?:[^"\\]|\\.)*)(")',
-                    re.IGNORECASE
-                )
-                val_match = val_pattern.search(flat_section)
-                if not val_match:
-                    continue
-                current_value = val_match.group(2)
-
-                # For LaunchOptions, check if the recorded value is still in there
                 if key_name == "LaunchOptions":
-                    if recorded_value and recorded_value not in current_value:
-                        print(f"  uid {uid}: [ledger] appid {appid} LaunchOptions changed — skipping")
+                    # Remove DeckOps' part only; the user's own options stay
+                    new_value = cleaned_launch_options(values, recorded_value)
+                    if len(values) == 1 and new_value == values[0]:
                         continue
-                    # Clear to empty
-                    new_flat = val_pattern.sub(r'\g<1>\g<3>', flat_section, count=1)
-                else:
-                    # UseSteamControllerConfig — clear to empty
-                    new_flat = val_pattern.sub(r'\g<1>\g<3>', flat_section, count=1)
+                    content = set_flat_value(content, found, new_value)
+                    modified = True
+                    if new_value:
+                        print(f"  uid {uid}: [ledger] removed DeckOps launch options for appid {appid}, "
+                              f"kept yours: {new_value}")
+                    else:
+                        print(f"  uid {uid}: [ledger] cleared LaunchOptions for appid {appid}")
+                    continue
 
-                if subblock_match:
-                    new_app_inner = new_flat + app_inner[subblock_match.start():]
-                else:
-                    new_app_inner = new_flat
-                content = content[:app_open + 1] + new_app_inner + content[app_close:]
+                # UseSteamControllerConfig: clear to empty (duplicates merged)
+                content = set_flat_value(content, found, "")
                 modified = True
                 print(f"  uid {uid}: [ledger] cleared {key_name} for appid {appid}")
 
@@ -1273,10 +1477,10 @@ echo ""
 info "Clearing DeckOps launch options from localconfig.vdf..."
 
 # Mirrors: wrapper.py clear_launch_options()
-# Clears LaunchOptions for ALL managed Steam appids so no stale launch
-# commands survive uninstall. Covers AlterWare bash substitutions,
-# CleanOps DLL injection, LCD Plutonium Heroic launch, and any future
-# launch options DeckOps writes.
+# Removes DeckOps' launch options for ALL managed Steam appids so no stale
+# launch commands survive uninstall: prelaunch.sh, AlterWare / IW-Pad /
+# IW3SP bash substitutions, CleanOps DLL override, LCD Plutonium Heroic
+# launch and older DeckOps forms. Options the user added are kept.
 python3 - << 'PYEOF'
 import os, re, shutil
 
@@ -1293,23 +1497,8 @@ if not os.path.isdir(userdata):
     print("  No Steam userdata found — skipping.")
     exit(0)
 
-def find_block_end(text, start):
-    """Brace-depth parser that skips braces inside quoted strings."""
-    depth = 0; i = start; in_quote = False
-    while i < len(text):
-        c = text[i]
-        if c == '"' and (i == 0 or text[i-1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
-            if c == '{': depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0: return i
-        i += 1
-    return -1
-
 def validate_vdf(data):
-    """Check brace balance using the same quote-aware parser."""
+    """Check brace balance using a quote-aware parser."""
     depth = 0; in_quote = False
     for i, c in enumerate(data):
         if c == '"' and (i == 0 or data[i-1] != '\\'):
@@ -1320,6 +1509,132 @@ def validate_vdf(data):
                 depth -= 1
                 if depth < 0: return False
     return depth == 0
+
+# Structural VDF reading, same as the ledger pass above and wrapper.py:
+# the app block under .../Steam/apps only, and LaunchOptions before or
+# after its sub-blocks (Steam often writes it after "cloud" { }).
+def vdf_skip_ws(text, i, end):
+    while i < end:
+        if text[i].isspace():
+            i += 1
+        elif text.startswith("//", i):
+            nl = text.find("\n", i, end)
+            i = end if nl == -1 else nl + 1
+        else:
+            break
+    return i
+
+def vdf_quoted_end(text, i, end):
+    i += 1
+    while i < end:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == '"':
+            return i + 1
+        i += 1
+    raise ValueError("unterminated string in VDF")
+
+def vdf_brace_end(text, i, end):
+    depth = 0
+    while i < end:
+        c = text[i]
+        if c == '"':
+            i = vdf_quoted_end(text, i, end)
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise ValueError("unbalanced braces in VDF")
+
+def vdf_children(text, start, end):
+    i = start
+    while True:
+        i = vdf_skip_ws(text, i, end)
+        if i >= end:
+            return
+        if text[i] != '"':
+            raise ValueError(f"unexpected {text[i]!r} in VDF at offset {i}")
+        k_end = vdf_quoted_end(text, i, end)
+        key = text[i + 1:k_end - 1]
+        j = vdf_skip_ws(text, k_end, end)
+        if j < end and text[j] == "{":
+            close = vdf_brace_end(text, j, end)
+            yield key, i, j, close, True
+            i = close + 1
+        elif j < end and text[j] == '"':
+            v_end = vdf_quoted_end(text, j, end)
+            yield key, i, j + 1, v_end - 1, False
+            i = v_end
+        else:
+            raise ValueError(f"VDF key {key!r} has no value")
+
+STEAM_APPS_PATH = ("UserLocalConfigStore", "Software", "Valve", "Steam", "apps")
+
+def app_block(text, appid):
+    block = (-1, len(text))
+    for key in STEAM_APPS_PATH + (str(appid),):
+        open_, close = block
+        block = next(((vs, ve) for k, _, vs, ve, is_block
+                      in vdf_children(text, open_ + 1, close)
+                      if is_block and k.lower() == key.lower()), None)
+        if not block:
+            return None
+    return block
+
+def flat_values(text, block, key):
+    open_, close = block
+    return [(ks, vs, ve) for k, ks, vs, ve, is_block
+            in vdf_children(text, open_ + 1, close)
+            if not is_block and k.lower() == key.lower()]
+
+def set_flat_value(text, found, value):
+    for ks, vs, ve in reversed(found[1:]):
+        line_start = text.rfind("\n", 0, ks) + 1
+        line_end = text.find("\n", ve)
+        line_end = len(text) if line_end == -1 else line_end
+        if not text[line_start:ks].strip() and not text[ve + 1:line_end].strip():
+            text = text[:line_start] + text[line_end + 1:]
+        else:
+            text = text[:ks] + text[ve + 1:]
+    _, vs, ve = found[0]
+    return text[:vs] + value + text[ve:]
+
+# Same DeckOps launch option matching as the ledger pass above: only
+# DeckOps' part is removed, the user's own options stay.
+_BQ = r'\\"'
+_QS = _BQ + r'[^"]*' + _BQ
+_PREFIX = (r'(?:DECKOPS_MENU=' + _QS + r'|DECKOPS_MENU_ARGS=' + _QS +
+           r'|bash ' + _BQ + r'[^"]*/prelaunch\.sh' + _BQ + r' \S+)\s+')
+_TAIL = (r"bash -c 'exec " + _BQ + r'\$\{@/[^}]*\}' + _BQ + r"[^']*' -- %command%"
+         r'|WINEDLLOVERRIDES=' + _BQ + r'd3d11=n,b' + _BQ + r' %command%'
+         r'|' + _QS + r' ' + _BQ + r'[^"]*/cache_cleanup\.py' + _BQ + r' \S+ steam %command%')
+DECKOPS_OPTION_RE = re.compile(r'\s*(?:(?:' + _PREFIX + r')*(?:' + _TAIL + r')|(?:' + _PREFIX + r')+%command%)')
+OLD_DECKOPS_VALUES = {
+    "%command%", "PROTON_USE_NTSYNC=1 %command%",
+    "PROTON_NO_FSYNC=1 PROTON_NO_ESYNC=1 %command%",
+    "%command% -multiplayer", "%command% -singleplayer",
+    "iw4x.exe %command%", "iw3sp_mod.exe %command%",
+}
+DECKOPS_LEFTOVER_RE = re.compile(
+    r'prelaunch\.sh|cache_cleanup|deckops|heroicgameslauncher|plutonium://'
+    r'|iw3sp_mod\.exe|iw4x\.exe|iw4x-launcher\.exe|iw-pad\.exe|iw6-mod\.exe|s1-mod\.exe'
+    r'|t6sp-mod\.exe|d3d11=n,b', re.IGNORECASE)
+
+def strip_deckops_options(value):
+    value = DECKOPS_OPTION_RE.sub("", value).strip()
+    if value in OLD_DECKOPS_VALUES or DECKOPS_LEFTOVER_RE.search(value):
+        return ""
+    return value
+
+def cleaned_launch_options(values):
+    parts = [strip_deckops_options(v) for v in values]
+    return " ".join(dict.fromkeys(p for p in parts if p))
 
 cleared = 0
 for uid in os.listdir(userdata):
@@ -1334,48 +1649,29 @@ for uid in os.listdir(userdata):
 
     modified = False
     for appid in MANAGED_STEAM_APPIDS:
-        key_pattern = re.compile(
-            r'"' + re.escape(appid) + r'"\s*\{',
-            re.IGNORECASE
-        )
-        key_match = key_pattern.search(content)
-        if not key_match:
+        # Only the app's own LaunchOptions (any position), never sub-blocks
+        try:
+            block = app_block(content, appid)
+            found = flat_values(content, block, "LaunchOptions") if block else []
+        except ValueError as ex:
+            print(f"  uid {uid}: localconfig.vdf not parsed, appid {appid} skipped ({ex})")
+            continue
+        if not any(content[vs:ve].strip() for _, vs, ve in found):
             continue
 
-        app_open  = key_match.end() - 1
-        app_close = find_block_end(content, app_open)
-        if app_close == -1:
+        # Remove DeckOps' part only (duplicates merged into one key); a value
+        # with nothing of DeckOps in it is the user's and stays as it is
+        values = [content[vs:ve] for _, vs, ve in found]
+        new_value = cleaned_launch_options(values)
+        if len(values) == 1 and new_value == values[0]:
             continue
-
-        app_inner = content[app_open + 1:app_close]
-
-        # Only touch LaunchOptions in the flat block, not inside sub-blocks.
-        subblock_match = re.search(r'"[^"]+"\s*\{', app_inner)
-        flat_section = app_inner[:subblock_match.start()] if subblock_match else app_inner
-
-        launch_pattern = re.compile(
-            r'("LaunchOptions"\s*")((?:[^"\\]|\\.)*)(")',
-            re.IGNORECASE
-        )
-        launch_match = launch_pattern.search(flat_section)
-        if not launch_match or not launch_match.group(2).strip():
-            continue
-
-        # Clear the value to empty string
-        new_flat = launch_pattern.sub(r'\g<1>\g<3>', flat_section, count=1)
-        if subblock_match:
-            new_app_inner = new_flat + app_inner[subblock_match.start():]
-        else:
-            new_app_inner = new_flat
-
-        content = (
-            content[:app_open + 1] +
-            new_app_inner +
-            content[app_close:]
-        )
+        content = set_flat_value(content, found, new_value)
         modified = True
         cleared += 1
-        print(f"  uid {uid}: cleared LaunchOptions for appid {appid}")
+        if new_value:
+            print(f"  uid {uid}: removed DeckOps launch options for appid {appid}, kept yours: {new_value}")
+        else:
+            print(f"  uid {uid}: cleared LaunchOptions for appid {appid}")
 
     if modified:
         bak = vdf_path + ".deckops_uninstall.bak"
@@ -1868,12 +2164,30 @@ SHORTCUT_NAMES = {
     "Call of Duty: Advanced Warfare - Multiplayer",
 }
 
+# Other branch installed side by side: keep its own shortcut and its Offline
+# launcher (same title in both branches, told apart by the exe path)
+KEEP_OTHER = bool(os.environ.get("DECKOPS_KEEP_OTHER"))
+OTHER_DIR  = os.environ.get("DECKOPS_OTHER_DIR", "")
+LAUNCHER_NAMES = {"DeckOps: Plutonium Offline", "DeckOps: Plutonium Launcher"}
+if KEEP_OTHER:
+    SHORTCUT_NAMES.discard(os.environ.get("DECKOPS_OTHER_TITLE", ""))
+
+def other_branch_entry(blob):
+    """True for a launcher shortcut whose exe lives in the other branch's dir."""
+    if not (KEEP_OTHER and OTHER_DIR):
+        return False
+    m = re.search(b'\x01(?:Exe|exe)\x00([^\x00]*)\x00', blob)
+    exe = m.group(1).decode('utf-8', errors='replace').strip('"') if m else ""
+    return exe.startswith(OTHER_DIR.rstrip("/") + "/")
+
 steam_dir = os.path.expanduser("~/.local/share/Steam")
 userdata  = os.path.join(steam_dir, "userdata")
 
 if not os.path.isdir(userdata):
     print("No Steam userdata found — skipping.")
     exit(0)
+
+import re
 
 for uid in os.listdir(userdata):
     vdf_path = os.path.join(userdata, uid, "config", "shortcuts.vdf")
@@ -1889,7 +2203,6 @@ for uid in os.listdir(userdata):
     removed = 0
     # Split on entry boundaries: \x00<single digit or two digits>\x00
     # Safer: rebuild the whole file keeping only entries not in our set
-    import re
 
     # Extract all AppName values to check if we need to do anything
     names_found = re.findall(b'\x01(?:AppName|appname)\x00([^\x00]+)\x00', data)
@@ -1977,6 +2290,9 @@ for uid in os.listdir(userdata):
         name_match = re.search(b'\x01(?:AppName|appname)\x00([^\x00]+)\x00', entry_blob)
         name = name_match.group(1).decode('utf-8', errors='replace') if name_match else ""
 
+        if name in LAUNCHER_NAMES and other_branch_entry(entry_blob):
+            print(f"  uid {uid}: kept \"{name}\" (belongs to the other DeckOps install)")
+            name = ""
         if name in SHORTCUT_NAMES:
             print(f"  uid {uid}: removed shortcut \"{name}\"")
             removed += 1
@@ -2176,25 +2492,20 @@ if not shortcut_appids:
 # the quoted exe path + title. We check both the current and old exe paths.
 _LAUNCHER_TITLE = "DeckOps: Plutonium Offline"
 _OLD_LAUNCHER_TITLE = "DeckOps: Plutonium Launcher"
-_launcher_exe_new = os.path.join(os.path.expanduser("~"), "DeckOps-Nightly",
-                                  "assets", "LAN", "DeckOps_Offline.exe")
-_launcher_exe_old = os.path.join(os.path.expanduser("~"), "DeckOps-Nightly",
-                                  ".venv", "bin", "python3")
-# Also check stable branch paths
-_launcher_exe_new_stable = os.path.join(os.path.expanduser("~"), "DeckOps",
-                                         "assets", "LAN", "DeckOps_Offline.exe")
-_launcher_exe_old_stable = os.path.join(os.path.expanduser("~"), "DeckOps",
-                                         ".venv", "bin", "python3")
-for _exe, _title in [
-    (f'"{_launcher_exe_new}"', _LAUNCHER_TITLE),
-    (f'"{_launcher_exe_old}"', _LAUNCHER_TITLE),
-    (f'"{_launcher_exe_new}"', _OLD_LAUNCHER_TITLE),
-    (f'"{_launcher_exe_old}"', _OLD_LAUNCHER_TITLE),
-    (f'"{_launcher_exe_new_stable}"', _LAUNCHER_TITLE),
-    (f'"{_launcher_exe_old_stable}"', _LAUNCHER_TITLE),
-    (f'"{_launcher_exe_new_stable}"', _OLD_LAUNCHER_TITLE),
-    (f'"{_launcher_exe_old_stable}"', _OLD_LAUNCHER_TITLE),
-]:
+# This branch's install dir, plus the other branch's only when that one isn't
+# installed (leftovers): while it is, its launcher keeps its artwork.
+_launcher_dirs = [os.environ.get("DECKOPS_INSTALL_DIR")
+                  or os.path.join(os.path.expanduser("~"), "DeckOps-Nightly")]
+if not os.environ.get("DECKOPS_KEEP_OTHER"):
+    _launcher_dirs.append(os.environ.get("DECKOPS_OTHER_DIR")
+                          or os.path.join(os.path.expanduser("~"), "DeckOps"))
+_launcher_ids = []
+for _d in _launcher_dirs:
+    for _exe in (os.path.join(_d, "assets", "LAN", "DeckOps_Offline.exe"),
+                 os.path.join(_d, ".venv", "bin", "python3")):
+        for _title in (_LAUNCHER_TITLE, _OLD_LAUNCHER_TITLE):
+            _launcher_ids.append((f'"{_exe}"', _title))
+for _exe, _title in _launcher_ids:
     _appid = calc_shortcut_appid(_exe, _title)
     if _appid not in shortcut_appids:
         shortcut_appids.add(_appid)
@@ -2215,11 +2526,16 @@ for uid in os.listdir(userdata):
     if not os.path.isdir(grid_dir):
         continue
     for f in os.listdir(grid_dir):
-        for appid in all_appids:
-            if f.startswith(appid):
-                path = os.path.join(grid_dir, f)
-                os.remove(path)
-                print(f"  Removed {f}")
+        # The appid followed by a non-digit (p.png, _hero.jpg, .png, ...): a
+        # plain prefix match also took other games' art (42690 -> 426900...),
+        # and a second matching appid then crashed on the removed file.
+        if not any(re.match(rf"{re.escape(str(a))}(?!\d)", f) for a in all_appids):
+            continue
+        try:
+            os.remove(os.path.join(grid_dir, f))
+            print(f"  Removed {f}")
+        except OSError as ex:
+            print(f"  Could not remove {f}: {ex}")
 PYEOF
 
 echo ""
@@ -2891,7 +3207,7 @@ sweep_parts() {
     local f
     while IFS= read -r -d '' f; do
         rm -f "$f" && part_hits=$((part_hits + 1))
-    done < <(find "$dir" -maxdepth 5 -type f -name '*.part' -print0 2>/dev/null)
+    done < <(find "$dir" -maxdepth 5 -type f \( -name '*.part' -o -name '*.part.meta' \) -print0 2>/dev/null)
 }
 
 if [ -n "$STEAM_ROOT" ]; then
@@ -2916,10 +3232,18 @@ info "Removing DeckOps Decky plugin..."
 DECKY_PLUGIN_DIR="$HOME/homebrew/plugins/DeckOps"
 
 if [ -d "$DECKY_PLUGIN_DIR" ]; then
-    sudo systemctl stop plugin_loader 2>/dev/null
-    rm -rf "$DECKY_PLUGIN_DIR"
-    success "Decky plugin removed."
-    sudo systemctl start plugin_loader 2>/dev/null
+    # The plugins folder is usually root-owned, so a plain rm fails; it used to
+    # report "removed" anyway. sudo -n: never stop for a password prompt
+    # (a Deck has no password by default).
+    sudo -n systemctl stop plugin_loader 2>/dev/null
+    rm -rf "$DECKY_PLUGIN_DIR" 2>/dev/null || sudo -n rm -rf "$DECKY_PLUGIN_DIR" 2>/dev/null
+    if [ -d "$DECKY_PLUGIN_DIR" ]; then
+        warn "Could not remove the Decky plugin (needs root). Remove it with:"
+        warn "  sudo rm -rf \"$DECKY_PLUGIN_DIR\""
+    else
+        success "Decky plugin removed."
+    fi
+    sudo -n systemctl start plugin_loader 2>/dev/null
 else
     skip "Decky plugin not installed."
 fi
@@ -2927,12 +3251,17 @@ fi
 echo ""
 
 SHORTCUTS=(
-    "$HOME/.local/share/applications/deckops-nightly.desktop"
-    "$HOME/.local/share/applications/deckops.desktop"
-    "$HOME/Desktop/DeckOps-Nightly.desktop"
-    "$HOME/Desktop/DeckOps.desktop"
-    "$HOME/Desktop/deckops.desktop"
+    "$HOME/.local/share/applications/${XDG_ID}.desktop"
+    "$HOME/Desktop/${INSTALL_DIR_NAME}.desktop"
 )
+# The other branch's entries only when it isn't installed (leftovers)
+if [ -z "$KEEP_OTHER" ]; then
+    SHORTCUTS+=(
+        "$HOME/.local/share/applications/${OTHER_XDG_ID}.desktop"
+        "$HOME/Desktop/${OTHER_DIR_NAME}.desktop"
+        "$HOME/Desktop/deckops.desktop"
+    )
+fi
 
 for s in "${SHORTCUTS[@]}"; do
     [ -f "$s" ] && rm -f "$s" && success "Removed $s" || skip "$(basename "$s") not found"
@@ -2946,7 +3275,9 @@ echo ""
 # Last on purpose: if any step above fails, DeckOps and its config are
 # still on disk and the uninstaller can simply be run again.
 info "Stopping any leftover DeckOps audio..."
-pkill -f "mpv" 2>/dev/null && success "mpv stopped" || skip "No audio process found"
+# Only the mpv older DeckOps versions started for their music (DeckOps now
+# plays it itself); a plain "mpv" match also killed the user's own players.
+pkill -f "mpv.*$INSTALL_DIR/assets/music" 2>/dev/null && success "mpv stopped" || skip "No audio process found"
 # Offline Mode's local bot servers run as systemd user units from ~/.local/share/deckops
 systemctl --user stop 'deckops-lan-*' 2>/dev/null && success "Offline servers stopped" || skip "No offline server running"
 echo ""
@@ -2954,15 +3285,19 @@ echo ""
 info "Removing DeckOps install directory and config..."
 
 DECKOPS_DIRS=(
-    "$HOME/DeckOps-Nightly"
-    "$HOME/DeckOps"
-    "$HOME/.local/share/deckops-nightly"
-    "$HOME/.config/deckops-nightly"
-    "$HOME/.local/share/deckops-nightly/plutonium_prefix"
-    "$HOME/.local/share/deckops/plutonium_prefix"
-    "$HOME/.local/share/deckops"
-    "$HOME/.config/deckops"
+    "$INSTALL_DIR"
+    "$HOME/.config/$XDG_ID"
 )
+[ "$XDG_ID" != "deckops" ] && DECKOPS_DIRS+=("$HOME/.local/share/$XDG_ID")
+if [ -n "$KEEP_OTHER" ]; then
+    # Shared with the other branch: Plutonium prefix, Offline Mode, save backups
+    skip "$HOME/.local/share/deckops -- kept, $OTHER_TITLE still uses it"
+    skip "$OTHER_DIR and $HOME/.config/$OTHER_XDG_ID -- kept ($OTHER_TITLE is installed)"
+else
+    DECKOPS_DIRS+=("$OTHER_DIR" "$HOME/.config/$OTHER_XDG_ID")
+    [ "$OTHER_XDG_ID" != "deckops" ] && DECKOPS_DIRS+=("$HOME/.local/share/$OTHER_XDG_ID")
+    DECKOPS_DIRS+=("$HOME/.local/share/deckops")
+fi
 
 for d in "${DECKOPS_DIRS[@]}"; do
     # save_backup.py writes here; keep it so a reinstall can restore saves

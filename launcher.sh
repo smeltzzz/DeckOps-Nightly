@@ -23,6 +23,12 @@ if [ "$BRANCH" != "$EXPECTED_BRANCH" ]; then
     ENTRY_POINT="$INSTALL_DIR/src/main.py"
     APP_TITLE="DeckOps Nightly"
 fi
+# This script's own repo always wins. Launched from the desktop file the script
+# runs from /tmp, so the identity comes from ~/DeckOps-Nightly; on an install
+# made from upstream (or from before the fork) that file has the same BRANCH but
+# another GITHUB_USER, and updates and reinstalls kept coming from that repo.
+GITHUB_USER="smeltzzz"
+GITHUB_REPO="DeckOps-Nightly"
 
 GITHUB_RAW="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main"
 LOCKFILE="$HOME/.deckops_installing"
@@ -99,8 +105,9 @@ check_for_updates() {
         # No compare available — download full repo zip
         local TMPZIP
         TMPZIP="$(mktemp /tmp/deckops_update_XXXXXX.zip)"
+        # The commit itself, not main: it is the version recorded below
         curl -sL --max-time 120 \
-            "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/refs/heads/main.zip" \
+            "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$REMOTE_SHA.zip" \
             -o "$TMPZIP"
 
         if [ $? -ne 0 ]; then
@@ -136,9 +143,13 @@ check_for_updates() {
             DEST_DIR="$UPDATE_DIR/$(dirname "$filepath")"
             mkdir -p "$DEST_DIR"
 
+            # From the commit itself, not main: raw.githubusercontent caches a
+            # branch for minutes after a push, so updating right after one got
+            # the old files and still recorded REMOTE_SHA as installed -- those
+            # changes were skipped for good. (Same fix as the in-app updater.)
             local HTTP_CODE
             HTTP_CODE=$(curl -s --max-time 30 -w '%{http_code}' \
-                "$GITHUB_RAW/$filepath" \
+                "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$REMOTE_SHA/$filepath" \
                 -o "$UPDATE_DIR/$filepath")
 
             if [ "$HTTP_CODE" = "404" ]; then

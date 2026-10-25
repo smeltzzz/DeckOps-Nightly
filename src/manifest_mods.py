@@ -688,3 +688,104 @@ def needs_update(m: dict, games_root: str) -> bool:
     except ManifestError:
         return True
 
+
+# --- Uninstall
+#
+# There was no way to remove a manifest mod: _remove_ours only ran when
+# switching options, and the DeckOps uninstaller left mod files behind.
+
+def _forget(mod_id: str, games_root: str = None):
+    """Drop the mod from deckops.json (only the entry for this Games folder)."""
+    try:
+        import config as cfg
+        c = cfg.load()
+        mods = dict(c.get("manifest_mods") or {})
+        entry = mods.get(mod_id)
+        if entry is not None and (games_root is None or entry.get("games_root") in (None, games_root)):
+            mods.pop(mod_id)
+            c["manifest_mods"] = mods
+            cfg.save(c)
+    except Exception:
+        _log.debug("manifest %s: could not update deckops.json", mod_id, exc_info=True)
+
+
+def uninstall_manifest(mod_id: str, root: str, on_log=None, games_root: str = None) -> list:
+    """
+    Remove an installed mod from root (install_root of its Games folder):
+    files we installed and that are unchanged are deleted, files that were
+    there before are put back from their backup, then the receipt goes.
+    Returns the relative paths left in place: files changed since install
+    (kept, they're the user's now) and originals that couldn't be put back
+    (kept in <root>/.deckops_manifests/<id>.orig/).
+    """
+    log = on_log or (lambda *a: None)
+    if not isinstance(mod_id, str) or not _SLUG.match(mod_id):
+        raise ManifestError(f"bad mod id: {mod_id!r}")
+    receipt = get_receipt(root, mod_id)
+    if not receipt:
+        raise ManifestError("not installed in this Games folder")
+    receipt.setdefault("id", mod_id)
+    _remove_ours(root, receipt)
+
+    left = []
+    overwritten = set(receipt.get("overwritten", []))
+    for p in (receipt.get("files") or {}):
+        if p in overwritten:
+            continue
+        try:
+            _check_relpath(p)
+            if os.path.isfile(_safe_dest(root, p)):
+                left.append(p)
+                log(f"  kept {p} (changed since it was installed)")
+        except ManifestError:
+            continue
+    bk_root = _backup_root(root, mod_id)
+    for dirpath, _, names in os.walk(bk_root):
+        for n in names:
+            rel = os.path.relpath(os.path.join(dirpath, n), bk_root).replace(os.sep, "/")
+            left.append(rel)
+            log(f"  original of {rel} kept in {bk_root} (the installed file was changed)")
+    try:
+        os.remove(_receipt_path(root, mod_id))
+    except FileNotFoundError:
+        pass
+    _prune(bk_root, os.path.join(root, RECEIPT_DIR))
+    _prune(os.path.join(root, RECEIPT_DIR), root)
+    _forget(mod_id, games_root)
+    log(f"✓ {receipt.get('name') or mod_id} removed" + (f" ({len(left)} file(s) kept)" if left else ""))
+    return left
+
+
+def installed_receipts(roots: list = None) -> list:
+    """[(root, mod_id)] of every mod receipt in the Games folders: directly
+    in Games/ or one level down (manifests with an install_dir)."""
+    out = []
+    for g in (roots if roots is not None else manifest_dirs()):
+        for pat in (os.path.join(g, RECEIPT_DIR, "*.json"),
+                    os.path.join(g, "*", RECEIPT_DIR, "*.json")):
+            for rp in sorted(glob.glob(pat)):
+                mod_id = os.path.splitext(os.path.basename(rp))[0]
+                if _SLUG.match(mod_id):
+                    out.append((os.path.dirname(os.path.dirname(rp)), mod_id))
+    return out
+
+
+if __name__ == "__main__":
+    # Used by deckops_uninstall.sh: python3 manifest_mods.py uninstall-all
+    import sys
+    if sys.argv[1:2] != ["uninstall-all"]:
+        print(f"Usage: {sys.argv[0]} uninstall-all")
+        sys.exit(2)
+    found = installed_receipts()
+    if not found:
+        print("No manifest mods installed.")
+    failed = 0
+    for root, mod_id in found:
+        print(f"{mod_id} in {root}:")
+        try:
+            uninstall_manifest(mod_id, root, on_log=lambda m: print(f"  {m.strip()}"))
+        except (ManifestError, OSError) as ex:
+            failed += 1
+            print(f"  could not remove: {ex}")
+    sys.exit(1 if failed else 0)
+

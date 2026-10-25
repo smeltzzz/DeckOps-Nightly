@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 
 from log import get_logger
@@ -83,6 +84,8 @@ def download(url: str, dest: str, on_progress=None, label: str = "",
     leaves a partial file that the next attempt resumes from with a
     Range request. The part file is kept on failure deliberately, which
     is what makes a retry cheap on the multi-gigabyte downloads.
+    <dest>.part.meta keeps the server's ETag / Last-Modified so a resume
+    is only appended to when the file on the server is still the same.
 
     Progress is reported as on_progress(percent, message) where message
     is the label with transferred size and rate appended, e.g.
@@ -101,25 +104,55 @@ def download(url: str, dest: str, on_progress=None, label: str = "",
                   not hold anything up, e.g. before a game launch)
     """
     part = dest + ".part"
-    for attempt in range(tries):
+    # The server's version of the file (ETag / Last-Modified) the .part was
+    # started from. A resume sends it as If-Range, so a file that changed on
+    # the server since ("latest" URLs) comes back whole instead of its tail
+    # being appended to the old start. A .part that can't be checked this way
+    # (no validator, no digest) isn't resumed: without a digest nothing would
+    # catch the spliced result.
+    meta = part + ".meta"
+    attempt = 0
+    restarted = False
+    while attempt < tries:
         resume = 0
+        validator = _read_validator(meta)
         if os.path.exists(part):
-            try:
-                resume = os.path.getsize(part)
-            except OSError:
-                resume = 0
+            if validator or digest:
+                try:
+                    resume = os.path.getsize(part)
+                except OSError:
+                    resume = 0
+            else:
+                _discard(part, meta)
         try:
             hdrs = dict(headers or BROWSER_UA)
             if resume:
                 hdrs["Range"] = f"bytes={resume}-"
+                if validator:
+                    hdrs["If-Range"] = validator
             req = urllib.request.Request(url, headers=hdrs)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            try:
+                r = urllib.request.urlopen(req, timeout=timeout)
+            except urllib.error.HTTPError as ex:
+                # 416: the .part is already as long as (or longer than) the
+                # file -- a finished download that wasn't renamed, or a stale
+                # one. Every retry used to fail the same way for good. Start
+                # over once, without using up an attempt.
+                if ex.code == 416 and resume and not restarted:
+                    _log.debug("range not satisfiable for %s, restarting download", url)
+                    _discard(part, meta)
+                    restarted = True
+                    continue
+                raise
+            with r:
                 # 206 means the range was honored. Anything else (including
                 # a plain 200) means the server sent the whole file, so the
                 # part file has to be discarded rather than appended to.
                 status = getattr(r, "status", None) or getattr(r, "code", None)
                 if resume and status != 206:
                     resume = 0
+                if not resume:
+                    _write_validator(meta, r.headers)
                 length = int(r.headers.get("Content-Length", 0) or 0)
                 total  = resume + length if length else 0
                 done   = resume
@@ -145,14 +178,50 @@ def download(url: str, dest: str, on_progress=None, label: str = "",
             if digest:
                 _check_digest(part, digest)
             os.replace(part, dest)
+            _discard(meta)
             if on_progress:
                 on_progress(100, _detail(label, done, total or done, 0))
             return
         except Exception:
-            if attempt == tries - 1:
+            if not os.path.exists(part):
+                _discard(meta)          # digest mismatch removed the part
+            attempt += 1
+            if attempt >= tries:
                 raise
-            _log.debug("download retry %d for %s", attempt + 1, url)
-            time.sleep(2 ** attempt)
+            _log.debug("download retry %d for %s", attempt, url)
+            time.sleep(2 ** (attempt - 1))
+
+
+def _discard(*paths):
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _read_validator(meta: str):
+    """The If-Range value saved for a .part, or None."""
+    try:
+        with open(meta, encoding="utf-8") as f:
+            return (json.load(f) or {}).get("if_range") or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _write_validator(meta: str, resp_headers):
+    """Save the response's strong ETag (else Last-Modified) for a later
+    If-Range resume. Weak ETags (W/...) aren't allowed in If-Range."""
+    etag = resp_headers.get("ETag") or ""
+    value = etag if etag and not etag.startswith("W/") else resp_headers.get("Last-Modified")
+    if not value:
+        _discard(meta)
+        return
+    try:
+        with open(meta, "w", encoding="utf-8") as f:
+            json.dump({"if_range": value}, f)
+    except OSError:
+        _log.debug("could not save resume validator %s", meta, exc_info=True)
 
 
 def _check_digest(path: str, digest: str):

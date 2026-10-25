@@ -9,7 +9,8 @@ user's device selection:
     LCD   -> assets/configs/LCD/
     Other -> assets/configs/Other/<resolution>/   (e.g. Other/1920x1200)
 
-Overwrites whatever is currently there.
+Overwrites whatever is currently there, except with "My Own" resolution
+(Other/own): the display settings already in a live config are kept.
 
 After copying, replaces the default player name ("Player") with the user's
 chosen name from deckops.json in any config that has `seta name "Player"`.
@@ -86,6 +87,49 @@ def _pfx_local(steam_root, appid, *parts, game_install_dir=None):
         "pfx", "drive_c", "users", "steamuser", "AppData", "Local",
         *parts
     )
+
+
+def _own_compatdata(key, game):
+    """
+    Prefix of an own-copy (non-Steam) game, or None for Steam games. Uses the
+    compatdata_path enrich_own_games stored; games from a plain scan
+    (find_all_games: name change, Offline Mode switch, updates) don't have
+    it, and their configs used to go into the Steam appid's prefix instead
+    of the shortcut's. Worked out the same way enrich_own_games does.
+    """
+    if game.get("source") != "own":
+        return None
+    if game.get("compatdata_path"):
+        return game["compatdata_path"]
+    try:
+        from shortcut import OWN_SHORTCUTS, own_plut_prefix, own_shortcut_appid
+        from steam_common import nvme_compatdata
+        if key not in OWN_SHORTCUTS or not game.get("exe_path") or not game.get("install_dir"):
+            return None
+        if key == "t4mp":                       # WaW MP shares WaW SP's prefix
+            return own_plut_prefix(key, game)
+        return nvme_compatdata(own_shortcut_appid(key, game))
+    except Exception:
+        _log.debug("own prefix lookup failed for %s", key, exc_info=True)
+        return None
+
+
+def _own_pfx_dest(fixed_dest, own_pfx):
+    """fixed_dest (built from the Steam appid's prefix) moved into own_pfx."""
+    pfx_parts = fixed_dest.split(os.sep + "pfx" + os.sep, 1)
+    if own_pfx and len(pfx_parts) == 2:
+        return os.path.join(own_pfx, "pfx", pfx_parts[1])
+    return fixed_dest
+
+
+def _cod4_appdata_profiles(steam_root, install_dir, own_pfx):
+    """CoD4x's AppData profiles folder: in the own shortcut's prefix for an
+    own copy (it was always the Steam 7940 prefix), else Steam's."""
+    if own_pfx:
+        return os.path.join(own_pfx, "pfx", "drive_c", "users", "steamuser", "AppData", "Local",
+                            "CallofDuty4MW", "players", "profiles")
+    return _pfx_local(steam_root, 7940, "CallofDuty4MW", "players", "profiles",
+                      game_install_dir=install_dir)
 
 
 def _heroic_pfx_local(*parts):
@@ -425,6 +469,77 @@ def _replace_player_name(filepath, player_name):
         pass  # Non-fatal — config still works with current name
 
 
+# ── "My Own" resolution ───────────────────────────────────────────────────────
+# With "My Own" (assets Other/own) the user sets the resolution in-game, and
+# the own assets have no resolution lines. A redeploy (reinstall, adding a
+# game, switching Offline Mode) copied the asset over the live config, so the
+# game fell back to its default resolution. The display settings already in
+# the live file are carried over instead, and BO2's binary hardware/user
+# profiles (which hold the resolution) are left as they are.
+import re as _re
+
+_OWN_DISPLAY_CFG = _re.compile(
+    r'^\s*seta\s+(r_mode|r_customMode|r_aspectRatio\w*|r_customAspectRatio|'
+    r'r_displayRefresh|r_refreshRate|r_displayMode|r_videomode|r_fullscreen\w*|'
+    r'r_previousFullscreen|r_noborder|r_monitor|r_resolution|'
+    r'vid_width|vid_height|vid_xpos|vid_ypos)\b', _re.IGNORECASE)
+_OWN_DISPLAY_INI = _re.compile(
+    r'^\s*(WindowSize|RefreshRate|FullScreenMode|Monitor|ResolutionPercent)\s*=',
+    _re.IGNORECASE)
+_OWN_KEEP_BINARY = (".chp", ".cgp")
+
+
+def _display_lines(path):
+    """{setting name (lowercase): line} of the display settings in a config."""
+    pat = _OWN_DISPLAY_INI if path.lower().endswith(".ini") else _OWN_DISPLAY_CFG
+    found = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f.read().splitlines():
+            m = pat.match(line)
+            if m:
+                found[m.group(1).lower()] = line
+    return found
+
+
+def _deploy_config(src, dest, keep_display):
+    """
+    Copy a config asset to dest. keep_display (the "My Own" resolution) with
+    an existing dest: the user's display settings stay -- binary BO2 profiles
+    aren't replaced at all, and the display lines of a text config are put
+    back after the copy. Returns "kept" when dest was left as it was.
+    """
+    if not (keep_display and os.path.isfile(dest)):
+        shutil.copy2(src, dest)
+        return "copied"
+    if dest.lower().endswith(_OWN_KEEP_BINARY):
+        return "kept"
+    try:
+        saved = _display_lines(dest)
+    except (IOError, OSError):
+        saved = {}
+    shutil.copy2(src, dest)
+    if not saved:
+        return "copied"
+    pat = _OWN_DISPLAY_INI if dest.lower().endswith(".ini") else _OWN_DISPLAY_CFG
+    with open(dest, "r", encoding="utf-8", errors="replace", newline="") as f:
+        content = f.read()
+    nl = "\r\n" if "\r\n" in content else "\n"
+    out, used = [], set()
+    for line in content.splitlines():
+        m = pat.match(line)
+        key = m.group(1).lower() if m else None
+        if key in saved:
+            if key not in used:
+                out.append(saved[key])
+                used.add(key)
+            continue
+        out.append(line)
+    out += [line for key, line in saved.items() if key not in used]
+    with open(dest, "w", encoding="utf-8", newline="") as f:
+        f.write(nl.join(out) + nl)
+    return "copied"
+
+
 def _write_cod4_active_txt(profiles_dir, player_name):
     """
     Write (or overwrite) the active.txt file in a CoD4 profiles directory.
@@ -526,6 +641,7 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
                 installed_games[sp_key] = installed_games[mp_key]
 
     model_dir    = cfg.get_model_config_dir()
+    keep_display = model_dir == "Other/own"     # "My Own": resolution set in-game
     allowed_keys = _LCD_KEYS if deck_model == "lcd" else _OLED_KEYS
     config_map  = _build_config_map(steam_root, installed_games)
 
@@ -539,6 +655,7 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
 
         game       = installed_games.get(key, {})
         install_dir = game.get("install_dir", "")
+        own_pfx     = _own_compatdata(key, game)
 
         for asset_subpath, fixed_dest in config_map[key]:
             src = os.path.join(CONFIGS_DIR, model_dir, asset_subpath)
@@ -551,14 +668,9 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
             # Resolve destination directory
             if fixed_dest:
                 # For "own" games, fixed_dest was built using the Steam appid-based
-                # compatdata path. Swap the base out for the actual shortcut prefix
-                # stored in the game dict so configs land in the right prefix.
-                if game.get("source") == "own" and game.get("compatdata_path"):
-                    pfx_parts = fixed_dest.split("/pfx/", 1)
-                    if len(pfx_parts) == 2:
-                        fixed_dest = os.path.join(
-                            game["compatdata_path"], "pfx", pfx_parts[1]
-                        )
+                # compatdata path. Swap the base out for the game's shortcut prefix
+                # so configs land in the right prefix.
+                fixed_dest = _own_pfx_dest(fixed_dest, own_pfx)
                 dest_dir = fixed_dest
             else:
                 if not install_dir:
@@ -576,10 +688,12 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
             dest = os.path.join(dest_dir, os.path.basename(src))
 
             try:
-                shutil.copy2(src, dest)
+                if _deploy_config(src, dest, keep_display) == "kept":
+                    prog(f"  = {key}: kept your {os.path.basename(src)} (My Own resolution)")
+                else:
+                    prog(f"  + {key}: {os.path.basename(src)} -> {dest_dir}")
                 # Replace default player name with user's chosen name
                 _replace_player_name(dest, player_name)
-                prog(f"  + {key}: {os.path.basename(src)} -> {dest_dir}")
                 applied += 1
                 if os.path.basename(dest) == "iw3sp_mod_config.cfg":
                     _mark_iw3sp_cfg_initialized(dest_dir)
@@ -593,12 +707,8 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
                 # correct name is used even on the very first launch.
                 if key in ("cod4sp", "cod4mp") and player_name:
                     _write_cod4_active_txt(os.path.dirname(dest_dir), player_name)
-                    appdata_profiles = _pfx_local(
-                        steam_root, 7940,
-                        "CallofDuty4MW", "players", "profiles",
-                        game_install_dir=install_dir,
-                    )
-                    _write_cod4_active_txt(appdata_profiles, player_name)
+                    _write_cod4_active_txt(_cod4_appdata_profiles(steam_root, install_dir, own_pfx),
+                                           player_name)
 
             except Exception as ex:
                 prog(f"  - {key}: failed to copy {os.path.basename(src)}: {ex}")
@@ -619,7 +729,7 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
                         heroic_dest = os.path.join(
                             heroic_dest_dir, os.path.basename(src)
                         )
-                        shutil.copy2(src, heroic_dest)
+                        _deploy_config(src, heroic_dest, keep_display)
                         _replace_player_name(heroic_dest, player_name)
                         prog(f"  + {key}: also mirrored to HGL prefix "
                              f"-> {heroic_dest_dir}")
@@ -638,7 +748,7 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
                         offline_dest = os.path.join(
                             offline_dir, os.path.basename(src)
                         )
-                        shutil.copy2(src, offline_dest)
+                        _deploy_config(src, offline_dest, keep_display)
                         _replace_player_name(offline_dest, player_name)
                         prog(f"  + {key}: also mirrored to the offline copy "
                              f"-> {offline_dir}")
@@ -683,16 +793,12 @@ def rename_player(player_name, steam_root, installed_games=None,
 
         game = (installed_games or {}).get(key, {})
         install_dir = game.get("install_dir", "")
+        own_pfx = _own_compatdata(key, game)
 
         for asset_subpath, fixed_dest in config_map[key]:
             # Resolve destination
             if fixed_dest:
-                if game.get("source") == "own" and game.get("compatdata_path"):
-                    pfx_parts = fixed_dest.split("/pfx/", 1)
-                    if len(pfx_parts) == 2:
-                        fixed_dest = os.path.join(
-                            game["compatdata_path"], "pfx", pfx_parts[1]
-                        )
+                fixed_dest = _own_pfx_dest(fixed_dest, own_pfx)
                 dest_dir = fixed_dest
             else:
                 if not install_dir:
@@ -756,12 +862,8 @@ def rename_player(player_name, steam_root, installed_games=None,
             # CoD4x also reads from the AppData prefix — update active.txt
             # there too so the profile name is correct after first launch.
             if key in ("cod4sp", "cod4mp") and install_dir:
-                appdata_profiles = _pfx_local(
-                    steam_root, 7940,
-                    "CallofDuty4MW", "players", "profiles",
-                    game_install_dir=install_dir,
-                )
-                _write_cod4_active_txt(appdata_profiles, player_name)
+                _write_cod4_active_txt(_cod4_appdata_profiles(steam_root, install_dir, own_pfx),
+                                       player_name)
                 prog(f"  + {key}: updated active.txt in AppData prefix")
 
             # Heroic mirror

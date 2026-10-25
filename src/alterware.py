@@ -32,10 +32,13 @@ Progress is reported via a callback:
 
 import os
 import json
+import re
 import shutil
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 
 from log import get_logger
 from net import download as _download, github_asset
@@ -163,6 +166,74 @@ def _migrate_old_wrapper(install_dir: str, original_exe: str):
         os.rename(backup_path, original_path)
 
 
+# The launcher used to run with a fixed 10 minute timeout and its output
+# captured until the end: with bonus content on a slow connection it timed out
+# while still downloading, and the bar sat at 25% the whole time. Now its
+# output is shown as it comes, and it is only stopped when it makes no
+# progress at all (no output and no file written in the game folder).
+LAUNCHER_STALL_TIMEOUT = 10 * 60
+LAUNCHER_STALL_CHECK = 30
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _newest_mtime(path: str) -> float:
+    newest = 0.0
+    for dirpath, _, files in os.walk(path):
+        for f in files:
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(dirpath, f)))
+            except OSError:
+                pass
+    return newest
+
+
+def _run_launcher(cmd, install_dir: str, prog, timeout: float = None, check: float = None):
+    """Run the AlterWare launcher, logging and showing its output as it
+    comes. Returns (exit code, stalled, last output lines)."""
+    timeout = LAUNCHER_STALL_TIMEOUT if timeout is None else timeout
+    check = LAUNCHER_STALL_CHECK if check is None else check
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=install_dir)
+    last = [time.monotonic()]
+    stalled = [False]
+    stop = threading.Event()
+
+    def _watch():
+        seen = _newest_mtime(install_dir)
+        while not stop.wait(check):
+            newest = _newest_mtime(install_dir)
+            if newest > seen:
+                seen = newest
+                last[0] = time.monotonic()
+            if time.monotonic() - last[0] > timeout:
+                stalled[0] = True
+                _log.warning("alterware-launcher stalled for %ds, stopping it", int(timeout))
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                return
+
+    threading.Thread(target=_watch, daemon=True).start()
+    tail = []
+    shown = 0.0
+    try:
+        for raw in iter(proc.stdout.readline, b""):
+            last[0] = time.monotonic()
+            for part in raw.decode("utf-8", errors="replace").split("\r"):
+                line = _ANSI.sub("", part).strip()
+                if not line:
+                    continue
+                _log.info("alterware-launcher: %s", line)
+                tail = (tail + [line])[-5:]
+                if time.monotonic() - shown > 0.5:
+                    shown = time.monotonic()
+                    prog(40, f"AlterWare: {line[:100]}")
+        proc.wait()
+    finally:
+        stop.set()
+    return proc.returncode, stalled[0], " | ".join(tail[-3:])
+
+
 def _sha1(path: str) -> str:
     import hashlib
     h = hashlib.sha1()
@@ -279,33 +350,22 @@ def install_alterware(game: dict, game_key: str,
     ]
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=600,
-            cwd=install_dir,
-        )
-        stdout = result.stdout.decode("utf-8", errors="replace").strip()
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        if stdout:
-            for line in stdout.splitlines():
-                _log.info("alterware-launcher: %s", line)
-        if stderr:
-            for line in stderr.splitlines():
-                _log.warning("alterware-launcher stderr: %s", line)
-        if result.returncode != 0:
-            if not os.path.exists(os.path.join(install_dir, client_exe)):
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                raise RuntimeError(
-                    f"AlterWare launcher failed (exit {result.returncode}): "
-                    f"{stderr or 'no error output'}"
-                )
-    except subprocess.TimeoutExpired:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise RuntimeError("AlterWare launcher timed out after 10 minutes")
+        rc, stalled, tail = _run_launcher(cmd, install_dir, prog)
     except OSError as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(f"Failed to run AlterWare launcher: {e}")
+    if stalled or rc != 0:
+        # A failed update used to count as success whenever an older client
+        # exe was still there, so "Update AlterWare" reported "complete" on
+        # the old files. The old files stay; the install is reported failed.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        kept = (" Your previous client files were left in place."
+                if os.path.exists(os.path.join(install_dir, client_exe)) else "")
+        if stalled:
+            raise RuntimeError(f"AlterWare launcher made no progress for "
+                               f"{LAUNCHER_STALL_TIMEOUT // 60} minutes and was stopped.{kept}")
+        raise RuntimeError(f"AlterWare launcher failed (exit {rc}): "
+                           f"{tail or 'no error output'}.{kept}")
 
     # ── Step 3a: Undo the old wrapper-over-exe flow (Steam installs) ─────
     # Before the CDN step: it puts a legacy .bak back over the exe, which

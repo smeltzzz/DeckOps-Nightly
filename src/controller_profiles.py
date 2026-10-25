@@ -32,7 +32,8 @@ Per-device SteamOS Handheld templates (Legion Go 2 only):
     controller_steamos_handheld_deckops_legion_{ads,off}.vdf
     controller_steamos_handheld_deckops_legion_other_{ads,off}.vdf
 
-Per-device Triton templates (Steam Machine only):
+Triton templates (Steam Machine, and the Steam Controller as an external
+controller on any device):
     controller_triton_deckops_{ads,off,hold,toggle}.vdf
     controller_triton_deckops_other_{ads,off,hold,toggle}.vdf
 
@@ -239,8 +240,12 @@ EXTERNAL_CONFIGSET_NAMES = {
     "other": [
         "configset_controller_generic.vdf",
     ],
+    # Only the Steam Controller's own configset. configset_controller_neptune
+    # is the built-in controller on the Deck, Legion Go 1, ROG Ally and MSI
+    # Claw: patching it here overwrote their legion / 2btn layouts with the
+    # standard Neptune templates (not even installed on those devices), and
+    # on a Deck the primary pass already writes it.
     "steamcontroller": [
-        "configset_controller_neptune.vdf",
         "configset_controller_triton.vdf",
     ],
 }
@@ -419,9 +424,9 @@ def _external_profile_filenames(controller_type: str, profile_type: str, gyro_mo
             suffix = "_other_off" if profile_type == "other" else "_off"
         else:
             suffix = "_other_ads" if profile_type == "other" else "_ads"
-        import config as cfg
-        prefix = "controller_triton" if cfg.is_steam_machine() else "controller_neptune"
-        return [f"{prefix}_deckops{suffix}.vdf"]
+        # Triton templates for the Steam Controller on every device (Neptune
+        # ones went into its configset everywhere but on a Steam Machine)
+        return [f"controller_triton_deckops{suffix}.vdf"]
 
     return []
 
@@ -621,6 +626,10 @@ def install_controller_templates(on_progress=None):
     else:
         # LCD, OLED -> standard Neptune
         to_install += NEPTUNE_STANDARD
+    # A Steam Controller (Triton) as the external controller gets Triton
+    # templates on any device (assign_external_controller_profiles)
+    if cfg.uses_external_controller() and cfg.get_external_controller() == "steamcontroller":
+        to_install += [f for f in TRITON_STANDARD if f not in to_install]
 
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
 

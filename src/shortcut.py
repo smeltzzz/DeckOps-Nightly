@@ -501,10 +501,58 @@ def _read_shortcuts_or_skip(path: str, uid, prog):
         return None
 
 
+def _entry_end(body: bytes, pos: int) -> int:
+    """
+    Index just past the shortcut entry that starts at pos
+    (0x00 <index> 0x00 <fields> 0x08), walking the typed binary KV fields:
+    0x00 map, 0x01 string, 0x02 int32, 0x03 float32, 0x07 uint64, 0x08 end.
+    Raises ValueError if the data doesn't parse.
+    """
+    if body[pos] != 0x00:
+        raise ValueError(f"no entry at offset {pos}")
+    i = body.index(b'\x00', pos + 1) + 1        # past the index key
+    depth = 1
+    while depth:
+        t = body[i]
+        if t == 0x08:
+            depth -= 1
+            i += 1
+            continue
+        i = body.index(b'\x00', i + 1) + 1      # past the field name
+        if t == 0x00:
+            depth += 1
+        elif t == 0x01:
+            i = body.index(b'\x00', i) + 1
+        elif t in (0x02, 0x03):
+            i += 4
+        elif t == 0x07:
+            i += 8
+        else:
+            raise ValueError(f"unknown field type 0x{t:02x} at offset {i}")
+        if i > len(body):
+            raise ValueError("entry runs past the end of shortcuts.vdf")
+    return i
+
+
 def _split_entries(body: bytes) -> list:
-    """Split a header-stripped shortcuts body into raw entries."""
-    starts = [m.start() for m in re.finditer(rb'\x00\d+\x00', body)]
-    return [body[s:e] for s, e in zip(starts, starts[1:] + [len(body)])]
+    """
+    Split a header-stripped shortcuts body into raw entries by walking the
+    binary structure. Splitting on every \\x00<digits>\\x00 also cut inside
+    entries -- an all-digit string value (a shortcut named "2048",
+    LaunchOptions "1") matched -- and _reindex then rewrote bytes in the
+    middle of a user's shortcut. Returns [] (and logs) if the body doesn't
+    parse, so callers leave the file alone instead of guessing.
+    """
+    entries, pos = [], 0
+    try:
+        while pos < len(body):
+            end = _entry_end(body, pos)
+            entries.append(body[pos:end])
+            pos = end
+    except (ValueError, IndexError) as ex:
+        _log.warning("shortcuts.vdf entries not parsed, left as they are: %s", ex)
+        return []
+    return entries
 
 
 def _reindex(entries: list) -> bytes:
@@ -820,8 +868,8 @@ def get_shortcut_appid(name: str) -> int | None:
 # could not correct a broken LaunchOptions field. For LCD Own installs in
 # particular this broke every reinstall after Steam touched shortcuts.vdf.
 #
-# Entry splitting goes through _split_entries (\x00\d+\x00 boundaries), shared
-# with remove_shortcut and cleanup_orphan_shortcuts.
+# Entry splitting goes through _split_entries (structural walk of the binary
+# VDF), shared with remove_shortcut and cleanup_orphan_shortcuts.
 
 def _strip_entries_by_name(raw_body: bytes, names_to_strip: set) -> tuple:
     """
@@ -1430,9 +1478,15 @@ def own_shortcut_exe(key: str, game: dict) -> str:
 
 def own_shortcut_appid(key: str, game: dict) -> int:
     """The shortcut appid of an own-copy game, as enrich_own_games computes
-    it (quoted exe path + canonical name). Its prefix is
-    compatdata/<this appid>, not the Steam appid's."""
-    return _calc_shortcut_appid(f'"{game["exe_path"]}"', OWN_SHORTCUTS[key]["name"])
+    it (quoted shortcut exe + canonical name). Its prefix is
+    compatdata/<this appid>, not the Steam appid's.
+
+    Hashes own_shortcut_exe -- the mod client exe the shortcut runs
+    (iw4x.exe, iw3sp_mod.exe, t7x.exe, iw6-mod.exe, s1-mod.exe), else the
+    game exe -- like enrich_own_games and controller_profiles. It used to
+    hash exe_path, so e.g. updating an own IW3SP-MOD from My Games put it
+    into a different, empty prefix."""
+    return _calc_shortcut_appid(f'"{own_shortcut_exe(key, game)}"', OWN_SHORTCUTS[key]["name"])
 
 
 def own_plut_prefix(key: str, game: dict) -> str:

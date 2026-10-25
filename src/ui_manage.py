@@ -519,8 +519,27 @@ class ManagementScreen(QWidget):
         us.task = ("REPAIR OFFLINE LAUNCHER", task)
         go_to(self.stack, "UpdateScreen")
 
-    def _setup(self, gd, force_downgrade_ids=None):
-        """Route a single card's keys through the install flow."""
+    def _current_cod4_client(self):
+        """
+        The CoD4 MP client that is set up now: "cod4x" or "cod4r". From
+        setup_games, else from the game folder's DeckOps metadata (after a
+        config reset). InstallScreen used to fall back to "cod4r" whenever
+        the Setup screen hadn't run this session, so Set Up / Reinstall from
+        here replaced a working CoD4x with CoD4R.
+        """
+        c = cfg.get_setup_games().get("cod4mp", {}).get("client")
+        if c in ("cod4r", "cod4x"):
+            return c
+        d = (self.installed.get("cod4mp") or {}).get("install_dir", "")
+        if d and os.path.exists(os.path.join(d, "deckops_cod4x.json")) \
+                and not os.path.exists(os.path.join(d, "deckops_cod4r.json")):
+            return "cod4x"
+        return "cod4r"
+
+    def _setup(self, gd, force_downgrade_ids=None, cod4_client=None):
+        """Route a single card's keys through the install flow.
+        cod4_client -- the CoD4 MP client to install (Reinstall reads it
+        before clearing the setup state); default: the one set up now."""
         root = find_steam_root()
         keys = _active_keys(gd)
         # Find which keys are present in the merged installed dict
@@ -560,6 +579,7 @@ class ManagementScreen(QWidget):
         s._return_to_management = True
         s.install_iw4x_dlc = dlc
         s.force_downgrade_ids = set(force_downgrade_ids or ())
+        s.cod4_client = cod4_client or self._current_cod4_client()
         go_to(self.stack, "InstallScreen")
 
     def _add_mw3_ds(self, gd):
@@ -685,6 +705,12 @@ class ManagementScreen(QWidget):
     def _zombies_declassified(self, gd, installed_keys):
         """Install, update, or uninstall Zombies Declassified DLC5 for BO2 ZM."""
 
+        # One at a time: the progress dialog wasn't modal, so the card's
+        # Options -> ZD could start a second worker on the same storage folder
+        if getattr(self, "_zd_running", False):
+            self._status.setText("Zombies Declassified is already running -- wait for it to finish.")
+            return
+
         from zombies_declassified import resolve_zd_storage
         plut_storage_t6 = resolve_zd_storage(self.installed.get("t6zm"))
 
@@ -723,10 +749,18 @@ class ManagementScreen(QWidget):
         else:
             return
 
-        # Run on background thread with a simple progress dialog
+        # Run on background thread with a simple progress dialog. Modal, and
+        # sleep blocked for the ~9 GB download (neither was done before, so the
+        # Deck could suspend mid-download). Escape can still hide the dialog;
+        # it comes back with the result when the worker ends.
         from qt import QProgressDialog
+        self._zd_running = True
+        inhibit.start({"install": "DeckOps is downloading Zombies Declassified",
+                       "update": "DeckOps is updating Zombies Declassified",
+                       "uninstall": "DeckOps is removing Zombies Declassified"}[action])
         pd = QProgressDialog("Starting...", None, 0, 100, self)
         pd.setWindowTitle("Zombies Declassified")
+        pd.setWindowModality(Qt.WindowModality.WindowModal)
         pd.setMinimumDuration(0); pd.setAutoClose(False); pd.setAutoReset(False)
         pd.setCancelButton(None); pd.show()
 
@@ -739,9 +773,12 @@ class ManagementScreen(QWidget):
         sigs.progress.connect(lambda p, m: (pd.setValue(p), pd.setLabelText(m)))
 
         def _on_done(result_msg):
+            self._zd_running = False
+            inhibit.stop()
             pd.setValue(100); pd.setLabelText(result_msg)
             pd.setCancelButtonText("OK")
             pd.canceled.connect(pd.close)
+            pd.show()       # if Escape hid it while the worker ran
             if action == "install":
                 from zombies_declassified import get_zd_info as _get_info
                 info = _get_info(_st6)
@@ -780,10 +817,12 @@ class ManagementScreen(QWidget):
     def _reinstall(self, gd):
         """Unmark game keys as set up, then route through the install flow."""
         keys = _active_keys(gd)
+        # Read before the setup state (which holds it) is cleared
+        cod4_client = self._current_cod4_client()
         cfg.unmark_game_setup(keys)
         self._status.setText(f"Cleared setup state for {gd['base']}. Running clean install...")
         # Route through the same path as "Set Up"
-        self._setup(gd)
+        self._setup(gd, cod4_client=cod4_client)
 
     def _depot_downgrade(self, game_id, gd, installed_keys):
         """Downgrade a game from 64-bit to 32-bit and trigger reinstall.
@@ -1533,9 +1572,27 @@ class ConfigureScreen(QWidget):
                 btn.setStyleSheet(btn.styleSheet().replace(C_IW, C_DARK_BTN))
         self.status.setText(f"Gyro mode set to {mode.upper()}. Hit Re-apply Templates to update controller profiles.")
 
+    def _settings_task(self, s):
+        """
+        Start of a Settings action (Re-apply Templates, Repair Shortcuts, Save
+        name, Clear Shader Cache): False, with a message, while another one
+        runs. They used to start a thread straight from the click, so a double
+        tap -- easy on the touchscreen -- ran two at once, both closing Steam
+        and rewriting shortcuts.vdf / configsets / game configs together.
+        The worker's done signal (always emitted) frees it again.
+        """
+        if getattr(self, "_settings_running", False):
+            self.status.setText("Please wait for the current task to finish.")
+            return False
+        self._settings_running = True
+        s.done.connect(lambda _ok: setattr(self, "_settings_running", False))
+        return True
+
     def _apply_controller_profiles(self):
-        self.status.setText("Re-applying controller profiles...")
         s = _Sigs()
+        if not self._settings_task(s):
+            return
+        self.status.setText("Re-applying controller profiles...")
         s.log.connect(lambda msg: self.status.setText(msg))
         s.done.connect(lambda ok: self.status.setText(
             "✓  Controller profiles applied." if ok else "✗  Failed — check that Steam is closed."
@@ -1572,8 +1629,10 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _repair_shortcuts(self):
-        self.status.setText("Checking shortcuts...")
         s = _Sigs()
+        if not self._settings_task(s):
+            return
+        self.status.setText("Checking shortcuts...")
         s.log.connect(lambda msg: self.status.setText(msg))
         def _run():
             try:
@@ -1589,6 +1648,8 @@ class ConfigureScreen(QWidget):
                     s.log.emit("✓  All shortcuts present. It is now safe to reopen Steam.")
             except Exception as ex:
                 s.log.emit(f"✗  Repair failed: {ex}")
+            finally:
+                s.done.emit(True)
         threading.Thread(target=_run, daemon=True).start()
 
     def _save_name(self):
@@ -1598,10 +1659,12 @@ class ConfigureScreen(QWidget):
             self.status.setText("Please enter a name (letters, numbers and most symbols; "
                                 "not \" \\ / $ ` ; < > : | ? *).")
             return
+        s = _Sigs()
+        if not self._settings_task(s):
+            return
         self._name_input.setText(name)
         cfg.set_player_name(name)
         self.status.setText(f"Updating player name to \"{name}\"...")
-        s = _Sigs()
         s.log.connect(lambda msg: self.status.setText(msg))
         def _run():
             try:
@@ -1616,11 +1679,15 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✓  Player name set to \"{name}\" ({count} config(s) updated).")
             except Exception as ex:
                 s.log.emit(f"✗  Failed: {ex}")
+            finally:
+                s.done.emit(True)
         threading.Thread(target=_run, daemon=True).start()
 
     def _clear_shader_cache(self):
-        self.status.setText("Clearing shader cache...")
         s = _Sigs()
+        if not self._settings_task(s):
+            return
+        self.status.setText("Clearing shader cache...")
         s.log.connect(lambda msg: self.status.setText(msg))
         def _run():
             try:
@@ -1635,6 +1702,8 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✓  Shader cache cleared for {cleared} game(s).")
             except Exception as ex:
                 s.log.emit(f"✗  Failed: {ex}")
+            finally:
+                s.done.emit(True)
         threading.Thread(target=_run, daemon=True).start()
 
     def _view_log(self):
@@ -1994,6 +2063,20 @@ class UpdateScreen(QWidget):
         go_to(self.stack, "ManagementScreen")
 
     def _run(self):
+        # Several steps (get_proton_path, find_all_games, get_setup_games,
+        # is_plutonium_ready, ...) aren't in a try of their own. An exception
+        # used to end the thread without done: no Back button, the user was
+        # stuck on this screen and sleep stayed blocked until DeckOps closed.
+        try:
+            self._run_steps()
+        except Exception as ex:
+            import traceback
+            _log.error("update failed:\n%s", traceback.format_exc())
+            self._s.log.emit(f"✗  Update failed: {ex}")
+            self._s.progress.emit(100, "Update failed.")
+            self._s.done.emit(False)
+
+    def _run_steps(self):
         task, self.task = self.task, None
         if task:
             try:

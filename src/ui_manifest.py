@@ -10,7 +10,7 @@ import html, os, threading
 
 from qt import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QScrollArea, QCheckBox, QPushButton,
-    QButtonGroup, QProgressBar, QLineEdit, QPlainTextEdit,
+    QButtonGroup, QProgressBar, QLineEdit, QPlainTextEdit, QMessageBox,
 )
 from qt import Qt
 
@@ -172,6 +172,8 @@ class ManifestModsScreen(QWidget):
             if m["version"]: head.addWidget(_lbl(f"v{m['version']}", 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft, wrap=False))
             head.addStretch()
             state = _badge("", C_IW, 110, h=24, size=9, radius=4); state.setVisible(False); head.addWidget(state)
+            unin = _btn("Uninstall", C_DARK_BTN, size=10, h=28); unin.setFixedWidth(110); unin.setVisible(False)
+            head.addWidget(unin)
             v.addLayout(head)
             if m["description"]: v.addWidget(_lbl(m["description"], 10, "#777788", align=Qt.AlignmentFlag.AlignLeft))
             orow = QHBoxLayout(); orow.setContentsMargins(32,0,0,0); orow.setSpacing(8)
@@ -198,7 +200,10 @@ class ManifestModsScreen(QWidget):
                 cb.toggled.connect(lambda _on: self._update_total())
                 grp.buttonClicked.connect(lambda _b, mc=cb: (mc.setChecked(True), self._update_total()))
             orow.addStretch(); v.addLayout(orow)
-            self._rows.append({"m": m, "dir": os.path.dirname(f["path"]), "cb": cb, "grp": grp, "boxes": boxes, "state": state, "card": card})
+            row = {"m": m, "dir": os.path.dirname(f["path"]), "cb": cb, "grp": grp, "boxes": boxes,
+                   "state": state, "card": card, "unin": unin}
+            unin.clicked.connect(lambda _c=False, rr=row: self._uninstall(rr))
+            self._rows.append(row)
             self._list.insertWidget(self._list.count() - 1, card)
         self._refresh_rows()
 
@@ -212,6 +217,7 @@ class ManifestModsScreen(QWidget):
         for r in self._rows:
             root = self._target(r); mid = r["m"]["id"]; iroot = mm.install_root(root, r["m"]) if root else ""
             rec = mm.get_receipt(iroot, mid) if iroot else {}
+            r["unin"].setVisible(bool(rec))
             if r["boxes"] is not None:
                 # Tick what is installed in this Games folder, so installing more parts keeps the old ones.
                 have = set((rec.get("option") or "").split("+")) if rec else None
@@ -304,6 +310,64 @@ class ManifestModsScreen(QWidget):
         finally:
             inhibit.stop()
         self._isigs.done.emit(all(e == [] for _m, _o, e, _x in self._results))
+
+    def _uninstall(self, r):
+        """Remove an installed mod from the chosen Games folder."""
+        if self._busy:
+            return
+        root = self._target(r)
+        if not root:
+            self._warn("Choose the Games folder the mod is installed in."); return
+        iroot = mm.install_root(root, r["m"])
+        if QMessageBox.question(
+                self, "Uninstall Mod",
+                f"Remove {r['m']['name']} from {iroot}?\n\n"
+                "Files it replaced are put back. Files you changed since are kept.") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._busy = True; self._set_enabled(False)
+        self._pick.setVisible(False); self._run.setVisible(True)
+        self.cur.setText(f"Removing {r['m']['name']}..."); self.cur.setStyleSheet("color:#CCC;background:transparent;")
+        self.bar.setValue(0); self.log.clear(); self._log_status.setVisible(False)
+        self.summary.setVisible(False); self.mods_btn.setVisible(False); self.cont.setVisible(False)
+        self._usigs = _Sigs()
+        self._usigs.log.connect(self._append_log)
+        self._usigs.done.connect(self._on_uninstalled)
+        threading.Thread(target=self._do_uninstall, args=(r["m"], iroot, root), daemon=True).start()
+
+    def _do_uninstall(self, m, iroot, root):
+        log = self._usigs.log.emit
+        log(f"--- {m['name']}: uninstall from {iroot} ---")
+        inhibit.start("DeckOps is removing a mod")
+        try:
+            left = mm.uninstall_manifest(m["id"], iroot, on_log=log, games_root=root)
+            self._uresult = (m, left, "")
+        except mm.ManifestError as ex:
+            log(f"✗ {ex}")
+            self._uresult = (m, None, str(ex))
+        except Exception as ex:
+            _log_to_file(f"[ManifestModsScreen] {m['id']} uninstall failed: {ex}")
+            log(f"✗ unexpected error: {ex}")
+            self._uresult = (m, None, "unexpected error, see log")
+        finally:
+            inhibit.stop()
+        self._usigs.done.emit(self._uresult[1] is not None)
+
+    def _on_uninstalled(self, ok):
+        self._busy = False; self.bar.setValue(100)
+        m, left, msg = self._uresult
+        name = html.escape(m["name"])
+        if ok:
+            text = f'<span style="color:{C_IW}">&#10003; {name} removed</span>'
+            if left:
+                text += f'<br><span style="color:#AAA">{len(left)} file(s) kept, see the log.</span>'
+        else:
+            text = f'<span style="color:{C_TREY}">&#10007; {name}: {html.escape(msg)}</span>'
+        self.summary.setText(text); self.summary.setVisible(True)
+        self.cur.setText("Mod removed." if ok else "Could not remove the mod.")
+        self.cur.setStyleSheet(f"color:{C_IW if ok else C_TREY};background:transparent;")
+        self.mods_btn.setVisible(True); self.cont.setVisible(True)
+        self._set_enabled(True); self._refresh_rows()
 
     def _append_log(self, text):
         _log_to_file(text)

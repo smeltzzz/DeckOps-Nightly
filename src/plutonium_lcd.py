@@ -43,7 +43,7 @@ import time
 from identity import VENV_PYTHON
 from depot_downgrade import plut_game_dir
 from log import get_logger
-from net import DownloadError, download
+from net import DownloadError
 
 _log = get_logger(__name__)
 
@@ -452,24 +452,46 @@ def _grant_heroic_filesystem_access(paths: list, on_progress=None):
 # ── Heroic library.json management ──────────────────────────────────────────
 
 def _read_heroic_library() -> dict:
-    """Read the Heroic sideload library. Returns the full JSON dict."""
+    """
+    Read the Heroic sideload library. Returns the full JSON dict.
+
+    Raises RuntimeError when the file exists but can't be read or isn't a
+    library: it used to come back as an empty library, and the write that
+    followed replaced the user's file with only DeckOps' entries -- every
+    other game they had sideloaded in Heroic was gone. The file is left as
+    it is (and copied to library.json.deckops_bad for reference).
+    """
     if not os.path.exists(HEROIC_LIBRARY_JSON):
         return {"games": []}
     try:
-        with open(HEROIC_LIBRARY_JSON) as f:
-            data = json.load(f)
-        if "games" not in data:
-            data["games"] = []
-        return data
-    except (json.JSONDecodeError, IOError):
-        return {"games": []}
+        with open(HEROIC_LIBRARY_JSON, encoding="utf-8") as f:
+            text = f.read()
+        if not text.strip():
+            return {"games": []}            # empty file: nothing to lose
+        data = json.loads(text)
+        if not isinstance(data, dict) or not isinstance(data.get("games", []), list):
+            raise ValueError("not a Heroic sideload library")
+    except (ValueError, OSError) as ex:     # JSONDecodeError/UnicodeDecodeError are ValueErrors
+        try:
+            shutil.copy2(HEROIC_LIBRARY_JSON, HEROIC_LIBRARY_JSON + ".deckops_bad")
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"HGL's game library ({HEROIC_LIBRARY_JSON}) couldn't be read ({ex}). "
+            "It was left as it is so your other HGL games aren't lost. Open HGL once "
+            "(or fix/remove that file), then run DeckOps again.") from ex
+    data.setdefault("games", [])
+    return data
 
 
 def _write_heroic_library(data: dict):
-    """Write the Heroic sideload library back to disk."""
+    """Write the Heroic sideload library back to disk (temp file + rename, so
+    an interrupted write can't leave a truncated library behind)."""
     os.makedirs(os.path.dirname(HEROIC_LIBRARY_JSON), exist_ok=True)
-    with open(HEROIC_LIBRARY_JSON, "w") as f:
+    tmp = HEROIC_LIBRARY_JSON + ".deckops_tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent="\t")
+    os.replace(tmp, HEROIC_LIBRARY_JSON)
 
 
 def _add_heroic_sideload_entry(game_key: str, executable: str,
@@ -781,35 +803,14 @@ def _download_plutonium_exe(dest_dir: str, on_progress=None) -> str:
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, "plutonium.exe")
 
-    # If it's already there and non-empty, assume it's good
-    if os.path.exists(dest) and os.path.getsize(dest) > 0:
-        prog("  plutonium.exe already present, skipping download.")
-        return dest
-
+    # Always downloaded and checked, like OLED. Any non-empty file used to be
+    # reused as-is: a stale exe or a saved HTML error page then made every
+    # login attempt fail until the user found and deleted it by hand. A valid
+    # exe already there is only used when both downloads fail.
+    from plutonium import fetch_bootstrapper
     prog("  Downloading Plutonium bootstrapper...")
-    try:
-        download(PLUT_BOOTSTRAPPER_URL, dest)
-        prog(f"  Downloaded plutonium.exe ({os.path.getsize(dest)} bytes)")
-        return dest
-    except Exception as ex:
-        _log.warning("Primary Plutonium download failed after 3 attempts: %s", ex)
-
-    prog("  Falling back to archive.org mirror...")
-    # Drop the primary's partial file or download() would resume the
-    # mirror's copy on top of it.
-    try: os.remove(dest + ".part")
-    except OSError: pass
-    try:
-        download(_PLUT_ARCHIVE_FALLBACK_URL, dest)
-    except Exception as ex2:
-        raise DownloadError(
-            url=_PLUT_ARCHIVE_FALLBACK_URL,
-            dest=dest,
-            label="Plutonium bootstrapper",
-            cause=ex2,
-        )
-    _log.info("Plutonium bootstrapper downloaded from archive.org fallback")
-    prog(f"  Downloaded plutonium.exe from archive.org ({os.path.getsize(dest)} bytes)")
+    fetch_bootstrapper(dest, lambda m: prog(f"  {m}"), keep_existing=True)
+    prog(f"  plutonium.exe ready ({os.path.getsize(dest)} bytes)")
     return dest
 
 
@@ -1145,10 +1146,14 @@ def install_plutonium_lcd(game: dict, game_key: str,
                            steam_root: str = None,
                            proton_path: str = None,
                            compatdata_path: str = None,
-                           source: str = "steam"):
+                           source: str = "steam",
+                           lan_ok: bool = None):
     """
     LCD per-game Plutonium install. Called from plutonium.install_plutonium
     via the early LCD dispatch at the top of that function.
+
+    lan_ok -- plutonium.setup_lan's result: False (offline setup failed) means
+    no offline script or menu entry for this game; None = not run here.
 
     Flow:
       1. Verify the shared Heroic prefix is ready (user logged in, storage
@@ -1277,7 +1282,8 @@ def install_plutonium_lcd(game: dict, game_key: str,
     lan_wrapper_path = None
     import config as _cfg_off
     from plutonium import remove_offline_files, _write_offline_wrapper
-    offline = _cfg_off.get_offline_mode()
+    # A failed offline setup counts as no offline for this game
+    offline = _cfg_off.get_offline_mode() and lan_ok is not False
     if not offline:
         remove_offline_files(game, game_key)
     if source == "own":

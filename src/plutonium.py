@@ -45,6 +45,72 @@ _log = get_logger(__name__)
 DEDICATED_PREFIX = os.path.expanduser("~/.local/share/deckops/plutonium_prefix")
 PLUT_BOOTSTRAPPER_URL = "https://cdn.plutonium.pw/updater/plutonium.exe"
 _PLUT_ARCHIVE_FALLBACK_URL = "https://archive.org/download/plutonium_202605/plutonium.exe"
+# The archive.org item is a fixed snapshot, so its copy is pinned (checked
+# 2026-10-25; the CDN served the same file then). The CDN copy changes with
+# Plutonium updates and only gets the Windows-exe check below.
+_PLUT_ARCHIVE_DIGEST = "sha256:85d1d1ca4d5881d9b98928c2006fb0eec9655e2705fe74088e6f974a19703f0f"
+_PLUT_MIN_SIZE = 500_000
+
+
+def is_windows_exe(path: str) -> bool:
+    """True if path looks like a real Windows executable: MZ header, PE
+    signature where the header points, and a plausible size. An HTML error
+    or challenge page served with HTTP 200 used to be run as plutonium.exe."""
+    import struct
+    try:
+        if os.path.getsize(path) < _PLUT_MIN_SIZE:
+            return False
+        with open(path, "rb") as f:
+            if f.read(2) != b"MZ":
+                return False
+            f.seek(0x3C)
+            pe = struct.unpack("<I", f.read(4))[0]
+            f.seek(pe)
+            return f.read(4) == b"PE\0\0"
+    except (OSError, struct.error):
+        return False
+
+
+def fetch_bootstrapper(dest: str, prog=lambda m: None, keep_existing: bool = False):
+    """
+    Download plutonium.exe to dest: the Plutonium CDN first, then the pinned
+    archive.org copy. Each download must be a real Windows exe, else it is
+    deleted and counts as a failure. keep_existing: when both downloads fail,
+    a valid exe already at dest is used instead (LCD keeps one in the Heroic
+    prefix). Raises DownloadError when there is no valid exe.
+    """
+    try:
+        download(PLUT_BOOTSTRAPPER_URL, dest)
+        if is_windows_exe(dest):
+            return dest
+        _log.warning("Plutonium CDN sent something that isn't plutonium.exe (%d bytes)",
+                     os.path.getsize(dest))
+        os.remove(dest)
+    except Exception as ex:
+        _log.warning("Primary Plutonium download failed after 3 attempts: %s", ex)
+    prog("Falling back to archive.org mirror...")
+    # Drop the primary's partial file or download() would resume the
+    # mirror's copy on top of it.
+    try: os.remove(dest + ".part")
+    except OSError: pass
+    try:
+        download(_PLUT_ARCHIVE_FALLBACK_URL, dest, digest=_PLUT_ARCHIVE_DIGEST)
+        if not is_windows_exe(dest):
+            os.remove(dest)
+            raise IOError("archive.org copy is not a Windows executable")
+        _log.info("Plutonium bootstrapper downloaded from archive.org fallback")
+        return dest
+    except Exception as ex2:
+        if keep_existing and is_windows_exe(dest):
+            _log.warning("Plutonium downloads failed, using the existing plutonium.exe: %s", ex2)
+            prog("Downloads failed -- using the plutonium.exe already there")
+            return dest
+        raise DownloadError(
+            url=_PLUT_ARCHIVE_FALLBACK_URL,
+            dest=dest,
+            label="Plutonium bootstrapper",
+            cause=ex2,
+        )
 
 
 # ── game metadata ─────────────────────────────────────────────────────────────
@@ -214,25 +280,7 @@ def launch_bootstrapper(proton_path: str, on_progress=None, steam_root: str = No
     bootstrapper = os.path.join(plut_dir, "plutonium.exe")
 
     prog(5, "Downloading Plutonium bootstrapper...")
-    try:
-        download(PLUT_BOOTSTRAPPER_URL, bootstrapper)
-    except Exception as ex:
-        _log.warning("Primary Plutonium download failed after 3 attempts: %s", ex)
-        prog(5, "Falling back to archive.org mirror...")
-        # Drop the primary's partial file or download() would resume the
-        # mirror's copy on top of it.
-        try: os.remove(bootstrapper + ".part")
-        except OSError: pass
-        try:
-            download(_PLUT_ARCHIVE_FALLBACK_URL, bootstrapper)
-            _log.info("Plutonium bootstrapper downloaded from archive.org fallback")
-        except Exception as ex2:
-            raise DownloadError(
-                url=_PLUT_ARCHIVE_FALLBACK_URL,
-                dest=bootstrapper,
-                label="Plutonium bootstrapper",
-                cause=ex2,
-            )
+    fetch_bootstrapper(bootstrapper, lambda m: prog(5, m))
 
     prog(15, "Launching Plutonium , please log in, then close the window when done.")
 
@@ -1171,10 +1219,16 @@ def setup_lan(game: dict, game_key: str, user_plut: str, source: str, prog):
     """Set up offline play for a Plutonium game when Offline Mode is on: the offline
     prefixes and the game's offline Plutonium copy, plus the local server for
     t4mp / t5mp / t6mp / iw5mp. user_plut is the game's online Plutonium folder (OLED: its
-    compatdata prefix, LCD: Heroic's). MW3 DS shares MW3's offline folders."""
+    compatdata prefix, LCD: Heroic's). MW3 DS shares MW3's offline folders.
+
+    Returns True when offline play is set up, False when it failed, None when
+    Offline Mode is off or the game has none. A failure used to be swallowed:
+    the callers still wrote the offline script, the Plutonium Offline menu
+    entry and lan_wrapper_path, so the game showed up in the Offline launcher
+    and failed at launch."""
     import config as _cfg
     if game_key not in OLED_LAN_WRAPPER_NAMES or not _cfg.get_offline_mode():
-        return
+        return None
     mode = _plut_key(game_key)
     try:
         _lan_prefixes(prog)
@@ -1205,7 +1259,10 @@ def setup_lan(game: dict, game_key: str, user_plut: str, source: str, prog):
                     shutil.copyfile(os.path.join(admin, n), os.path.join(dst_dir, n))
     except Exception as ex:
         _log.warning("offline setup failed for %s", game_key, exc_info=True)
-        prog(f"  ⚠ Offline setup failed: {ex}")
+        prog(f"  ⚠ Offline setup failed: {ex or type(ex).__name__} -- Offline Mode is off "
+             f"for this game; run Set Up again to retry")
+        return False
+    return True
 
 
 def _lan_prefixes(prog):
@@ -1359,7 +1416,7 @@ def install_plutonium(game: dict, game_key: str, steam_root: str,
         from plutonium_lcd import install_plutonium_lcd, get_shared_plut_dir
         # Offline runs from its own prefix and Plutonium copy, not through Heroic
         # (Heroic is for online). First, so the offline script finds its prefix.
-        setup_lan(game, game_key, get_shared_plut_dir(), source, lambda msg: prog(5, msg))
+        lan_ok = setup_lan(game, game_key, get_shared_plut_dir(), source, lambda msg: prog(5, msg))
         return install_plutonium_lcd(
             game, game_key, installed_games,
             on_progress=on_progress,
@@ -1367,6 +1424,7 @@ def install_plutonium(game: dict, game_key: str, steam_root: str,
             proton_path=proton_path,
             compatdata_path=compatdata_path,
             source=source,
+            lan_ok=lan_ok,
         )
 
     src_plut_dir  = get_dedicated_plut_dir()
@@ -1408,9 +1466,11 @@ def install_plutonium(game: dict, game_key: str, steam_root: str,
     prog(65, "Installing menu mod...")
     _install_menu_mod(dest_plut_dir, game_key,
                       on_progress=lambda msg: prog(67, msg))
-    setup_lan(game, game_key, dest_plut_dir, source, lambda msg: prog(68, msg))
+    lan_ok = setup_lan(game, game_key, dest_plut_dir, source, lambda msg: prog(68, msg))
     import config as _cfg_off
-    offline = _cfg_off.get_offline_mode()
+    # A failed offline setup counts as no offline for this game: no offline
+    # script, menu entry or lan_wrapper_path pointing at a broken setup
+    offline = _cfg_off.get_offline_mode() and lan_ok is not False
     if not offline:
         remove_offline_files(game, game_key)
 

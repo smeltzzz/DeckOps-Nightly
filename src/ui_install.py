@@ -168,7 +168,12 @@ class WelcomeScreen(QWidget):
         if cfg.is_first_run():
             s = get_screen(self.stack, "SetupScreen")
             s.steam_installed = self.steam_installed
-            s.own_installed   = self.own_installed
+            # Keep the games the user added with Choose Folder: this scan
+            # doesn't know their folders, and Back -> Continue used to replace
+            # the list with it, dropping those games.
+            folder_found = {k: v for k, v in (getattr(s, "_folder_found", None) or {}).items()
+                            if k not in self.steam_installed}
+            s.own_installed   = {**self.own_installed, **folder_found}
             s.steam_root      = self.steam_root
             go_to(self.stack, "SetupScreen")
         else:
@@ -186,6 +191,7 @@ class SetupScreen(QWidget):
         self.steam_installed={}; self.own_installed={}; self.steam_root=""
         self._checks={}
         self._extra_paths = []
+        self._folder_found = {}
         self._cod4_choice = "cod4r"
         self._iw4x_dlc_cb = None; self._iw4x_dlc_present = False
         self._zd_cb = None; self._lan_cb = None
@@ -507,9 +513,11 @@ class SetupScreen(QWidget):
         if not dlg.exec():
             return
         folder = dlg.selectedFiles()[0] if dlg.selectedFiles() else ""
-        if not folder or folder in self._extra_paths:
+        if not folder:
             return
-        self._extra_paths.append(folder)
+        # Picking a folder again rescans it (it used to do nothing, silently)
+        if folder not in self._extra_paths:
+            self._extra_paths.append(folder)
         self._folder_btn.setEnabled(False); self.inst_btn.setEnabled(False)
         self.warning.setText(f"Scanning {folder}...")
         self.warning.setStyleSheet(f"color:{C_DIM};background:transparent;")
@@ -524,11 +532,19 @@ class SetupScreen(QWidget):
             found = find_own_installed(extra_paths=self._extra_paths)
         except Exception as ex:
             _log_to_file(f"[SetupScreen] folder scan failed: {ex}")
-            found = {}
+            self._scanned_own = None        # keep what was found before
+            self._scan_sigs.done.emit(False)
+            return
         self._scanned_own = {k: v for k, v in found.items() if k not in self.steam_installed}
         self._scan_sigs.done.emit(True)
 
-    def _on_folder_scanned(self, _):
+    def _on_folder_scanned(self, ok):
+        if not ok or self._scanned_own is None:
+            self._folder_btn.setEnabled(True); self.inst_btn.setEnabled(True)
+            self.warning.setText("Couldn't scan that folder. Your list is unchanged; try again.")
+            self.warning.setStyleSheet(f"color:{C_TREY};background:transparent;")
+            self.warning.setVisible(True)
+            return
         own = self._scanned_own
         if cfg.is_lcd():
             lcd_allowed = set()
@@ -536,6 +552,7 @@ class SetupScreen(QWidget):
             own = {k: v for k, v in own.items() if k in lcd_allowed}
         added = len(set(own) - set(self.own_installed))
         self.own_installed = own
+        self._folder_found = own        # WelcomeScreen merges these back after Back -> Continue
         self._folder_btn.setEnabled(True); self.inst_btn.setEnabled(True)
         self._build()
         self.warning.setText(f"Found {added} new game(s)." if added else "No new supported games in that folder.")
@@ -887,7 +904,7 @@ class _BaseInstallScreen(QWidget):
             f"The following games need older depot files\n"
             f"for community client compatibility:\n\n"
             f"  {_games}\n\n"
-            "This requires at least 15 GB of free disk space.\n"
+            "This downloads several GB per game (free space was checked).\n"
             "One QR scan covers all games listed above.\n\n"
             "How would you like to authenticate the download?"
         )
@@ -958,12 +975,15 @@ class _BaseInstallScreen(QWidget):
         Each job is (game_id, game_name, install_dir, depots, cmds).
         One QR scan / one manual session covers all games.
         Called from the worker thread.
-        Returns the captured username or None.
+        Returns {game_id: reason} for every game whose downgrade didn't
+        finish (cancelled, download failed, merge failed); empty when all
+        did. The caller fails those games instead of installing a client
+        on the old files.
         """
         from depot_downgrade import (
             ensure_depotdownloader, run_depot_download_qr,
             find_depot_stagings, merge_depots, open_steam_console,
-            GAME_CONFIGS,
+            GAME_CONFIGS, required_space_gb, check_free_space_gb,
         )
 
         game_names = ", ".join(j[1] for j in dg_jobs)
@@ -974,11 +994,40 @@ class _BaseInstallScreen(QWidget):
         self._iw5_dg_event.wait()
 
         if not self._iw5_method:
-            return None
+            self._s.log.emit("✗  Depot downgrade cancelled.")
+            return {j[0]: "downgrade cancelled" for j in dg_jobs}
 
         captured_user = None
+        failed_ids = {}
+        done_ids = set()
         total_depots = sum(len(d) for _, _, _, d, _ in dg_jobs)
         depot_num = 0
+
+        def _merge(game_id, game_name, staging, install_dir):
+            self._s.progress.emit(self._ppct(90), f"Merging {game_name} files...")
+            self._s.pulse_start.emit(f"Merging {game_name} files")
+            merged = False
+            try:
+                # False = merge_depots' own sanity check found the game
+                # still 64-bit (it logs the warning itself)
+                merged = merge_depots(
+                    game_id, staging, install_dir,
+                    on_progress=lambda m: self._s.log.emit(f"  {m}"),
+                )
+                if not merged:
+                    failed_ids[game_id] = "game files still not downgraded after the merge"
+            except Exception as ex:
+                self._s.log.emit(f"✗  {game_name} merge failed: {ex}")
+                failed_ids[game_id] = f"merge failed: {ex}"
+            finally:
+                self._s.pulse_stop.emit()
+            if merged:
+                self._s.log.emit(f"✓  {game_name} depot files updated")
+                done_ids.add(game_id)
+                try:
+                    self._maybe_trim_iw5(game_id, install_dir)
+                except Exception as ex:
+                    self._s.log.emit(f"  MW3 trim skipped: {ex}")
 
         if self._iw5_method == "qr":
             # DepotDownloader may save a login from here on; the caller removes
@@ -998,6 +1047,10 @@ class _BaseInstallScreen(QWidget):
 
                 failed = False
                 for game_id, game_name, install_dir, depots, _ in dg_jobs:
+                    if failed:
+                        # An earlier depot failed; the QR login isn't retried
+                        failed_ids[game_id] = "not downloaded (an earlier depot download failed)"
+                        continue
                     gcfg = GAME_CONFIGS[game_id]
                     staging = os.path.join(
                         os.path.dirname(install_dir),
@@ -1027,25 +1080,19 @@ class _BaseInstallScreen(QWidget):
                     self._s.iw5_qr_hide.emit()
 
                     if failed:
-                        break
-                    if not os.path.isdir(staging):
+                        failed_ids[game_id] = f"depot {depot['depot']} download failed"
                         continue
-                    self._s.progress.emit(self._ppct(90), f"Merging {game_name} files...")
-                    self._s.pulse_start.emit(f"Merging {game_name} files")
-                    try:
-                        merge_depots(
-                            game_id, staging, install_dir,
-                            on_progress=lambda m: self._s.log.emit(f"  {m}"),
-                        )
-                        self._s.log.emit(f"✓  {game_name} depot files updated")
-                        self._maybe_trim_iw5(game_id, install_dir)
-                    except Exception as ex:
-                        self._s.log.emit(f"✗  {game_name} merge failed: {ex}")
-                    finally:
-                        self._s.pulse_stop.emit()
+                    if not os.path.isdir(staging):
+                        self._s.log.emit(f"✗  No depot files were downloaded for {game_name}.")
+                        failed_ids[game_id] = "no depot files were downloaded"
+                        continue
+                    _merge(game_id, game_name, staging, install_dir)
 
             except Exception as ex:
                 self._s.log.emit(f"✗  QR downgrade failed: {ex}")
+                for j in dg_jobs:
+                    if j[0] not in done_ids:
+                        failed_ids.setdefault(j[0], f"QR downgrade failed: {ex}")
 
         elif self._iw5_method == "manual":
             self._s.log.emit(
@@ -1057,8 +1104,27 @@ class _BaseInstallScreen(QWidget):
             self._s.progress.emit(self._ppct(2), "Depot download...")
             open_steam_console()
 
+            # Steam saves console downloads under its own steamapps/content,
+            # usually the internal drive. The game's drive was checked before;
+            # when Steam's is a different one, it needs the room too.
+            steam_need = 0.0
             for game_id, game_name, install_dir, depots, cmds in dg_jobs:
                 gcfg = GAME_CONFIGS[game_id]
+                try:
+                    other_drive = os.stat(self.steam_root).st_dev != os.stat(install_dir).st_dev
+                except OSError:
+                    other_drive = False
+                if other_drive:
+                    need = required_space_gb(self.steam_root, depots, gcfg["app_id"])
+                    free = check_free_space_gb(self.steam_root)
+                    if free < steam_need + need:
+                        self._s.log.emit(
+                            f"✗  {game_name}: the Steam console downloads to {self.steam_root}, "
+                            f"which needs about {steam_need + need:.0f} GB free ({free:.0f} GB free).")
+                        failed_ids[game_id] = (f"not enough free space on Steam's drive for the console "
+                                               f"download (about {steam_need + need:.0f} GB needed)")
+                        continue
+                    steam_need += need
                 for cmd in cmds:
                     depot_num += 1
                     step = f"Depot {depot_num} of {total_depots}"
@@ -1079,22 +1145,11 @@ class _BaseInstallScreen(QWidget):
                 if not staging:
                     self._s.log.emit(
                         f"✗  Could not find staging directory for {game_name}.")
+                    failed_ids[game_id] = "downloaded depot files not found"
                     continue
-                self._s.progress.emit(self._ppct(90), f"Merging {game_name} files...")
-                self._s.pulse_start.emit(f"Merging {game_name} files")
-                try:
-                    merge_depots(
-                        game_id, staging, install_dir,
-                        on_progress=lambda m: self._s.log.emit(f"  {m}"),
-                    )
-                    self._s.log.emit(f"✓  {game_name} depot files updated")
-                    self._maybe_trim_iw5(game_id, install_dir)
-                except Exception as ex:
-                    self._s.log.emit(f"✗  {game_name} merge failed: {ex}")
-                finally:
-                    self._s.pulse_stop.emit()
+                _merge(game_id, game_name, staging, install_dir)
 
-        return captured_user
+        return failed_ids
 
     def _seed_results(self):
         """One record per selected key; phases overwrite status as they run."""
@@ -1589,8 +1644,8 @@ class _BaseInstallScreen(QWidget):
             GAME_CONFIGS as _DG_CONFIGS,
             is_downgrade_needed as _dg_needed,
             detect_dlc_status as _dg_dlc_status,
-            has_enough_space as _dg_space,
-            REQUIRED_FREE_SPACE_GB as _DG_SPACE_GB,
+            check_free_space_gb as _dg_free,
+            required_space_gb as _dg_need,
             cleanup_depotdownloader,
             detect_installed_dlc as _dg_installed_dlc,
             migrate_legacy_iw5 as _dg_migrate_iw5,
@@ -1603,6 +1658,39 @@ class _BaseInstallScreen(QWidget):
         }
         # Each job: (game_id, game_name, install_dir, depots_list, cmds_list)
         _dg_jobs = []
+        # Keys whose client needs the downgraded files, per game_id, and the
+        # keys whose downgrade didn't happen -> reason. Those are marked failed
+        # and their client is skipped: AlterWare / Plutonium on the newer files
+        # used to be installed anyway and reported as done.
+        _dg_job_keys = {}
+        _dg_failed = {}
+
+        def _dg_fail(keys, reason):
+            for k in keys:
+                _dg_failed[k] = reason
+
+        # Free space: sized from the depots each game will download (a fixed
+        # 15 GB was far too little for Ghosts / AW), added up per drive so two
+        # games on one drive both have to fit.
+        _dg_reserved = {}
+
+        def _dg_room(game_id, path, depots, keys):
+            need = _dg_need(self.steam_root, depots, _DG_CONFIGS[game_id]["app_id"])
+            try:
+                dev = os.stat(path).st_dev
+            except OSError:
+                dev = path
+            total = _dg_reserved.get(dev, 0.0) + need
+            free = _dg_free(path)
+            if free < total:
+                name = _DG_CONFIGS[game_id]["name"]
+                self._s.log.emit(f"✗  {name} downgrade needs about {total:.0f} GB free on that drive "
+                                 f"({free:.0f} GB free).")
+                _dg_fail(keys, f"not enough free space for the downgrade "
+                               f"(about {total:.0f} GB needed, {free:.0f} GB free)")
+                return False
+            _dg_reserved[dev] = total
+            return True
 
         for _dg_id, _dg_keys in _DG_KEY_MAP.items():
             _matched = [
@@ -1649,9 +1737,6 @@ class _BaseInstallScreen(QWidget):
                     continue
 
                 self._s.log.emit("Checking MW3... downgrade needed.")
-                if not _dg_space(_dir):
-                    self._s.log.emit(f"✗  MW3 downgrade requires at least {_DG_SPACE_GB} GB of free space.")
-                    continue
 
                 # MP: base + MP client + language. DS: base + server +
                 # language, all requested under the DS app (42750) so a
@@ -1672,7 +1757,10 @@ class _BaseInstallScreen(QWidget):
                     _depots.append({"depot": dlc["depot"], "manifest": dlc["manifest"], "app": dlc["app"]})
                     _cmds.append(f"download_depot {dlc['app']} {dlc['depot']} {dlc['manifest']}")
 
+                if not _dg_room("iw5", _dir, _depots, _has_mp):
+                    continue
                 _dg_jobs.append(("iw5", _gcfg["name"], _dir, _depots, _cmds))
+                _dg_job_keys["iw5"] = set(_has_mp)
             else:
                 # Ghosts, AW: PE/config check + appmanifest DLC detection
                 if not _forced and not _dg_needed(_dg_id, _dir):
@@ -1682,9 +1770,6 @@ class _BaseInstallScreen(QWidget):
                     self._s.log.emit(f"Checking {_gcfg['name']}... needs older depot files for community clients.")
                 else:
                     self._s.log.emit(f"Checking {_gcfg['name']}... 64-bit detected, downgrade needed.")
-                if not _dg_space(_dir):
-                    self._s.log.emit(f"✗  {_gcfg['name']} downgrade requires at least {_DG_SPACE_GB} GB of free space.")
-                    continue
                 _depots = list(_gcfg["depots"])
                 _cmds = list(_gcfg["depot_cmds"])
                 _owned_dlc = _dg_installed_dlc(_dg_id, self.steam_root)
@@ -1695,7 +1780,10 @@ class _BaseInstallScreen(QWidget):
                 if _owned_dlc:
                     _dlc_names = ", ".join(_gcfg["dlc"][k]["name"] for k in _owned_dlc)
                     self._s.log.emit(f"  DLC to downgrade: {_dlc_names}")
+                if not _dg_room(_dg_id, _dir, _depots, _sel):
+                    continue
                 _dg_jobs.append((_dg_id, _gcfg["name"], _dir, _depots, _cmds))
+                _dg_job_keys[_dg_id] = set(_sel)
 
         self.force_downgrade_ids = set()
 
@@ -1704,14 +1792,29 @@ class _BaseInstallScreen(QWidget):
         self._dg_qr_started = None
         if _dg_jobs:
             self._phase("depot")
+            _dg_res = None
             try:
-                self._run_batch_depot_downgrade(_dg_jobs)
+                _dg_res = self._run_batch_depot_downgrade(_dg_jobs)
+            except Exception as ex:
+                self._s.log.emit(f"✗  Depot downgrade failed: {ex}")
             finally:
                 if self._dg_qr_started is not None:
                     self._s.log.emit("  Removing DepotDownloader and its saved Steam login...")
                     n = cleanup_depotdownloader(since=self._dg_qr_started)
                     self._s.log.emit("  ✓  DepotDownloader removed, saved Steam login deleted." if n
                                      else "  ✓  DepotDownloader removed (no saved Steam login found).")
+            if _dg_res is None:
+                _dg_res = {j[0]: "depot downgrade failed" for j in _dg_jobs}
+            for _gid, _why in _dg_res.items():
+                _dg_fail(_dg_job_keys.get(_gid, ()), f"depot downgrade: {_why}")
+
+        # Their client is skipped below; Retry Failed offers them again
+        for _k, _why in _dg_failed.items():
+            self._mark(_k, "failed", _why)
+        if _dg_failed:
+            self._s.log.emit("✗  Skipping the client install for "
+                             + ", ".join(sorted(_dg_failed))
+                             + " -- the game files were not downgraded")
 
         # --- Plutonium bootstrapper (Steam still running)
         # Downloads Plutonium and launches it so the user can log in. LCD
@@ -1946,7 +2049,7 @@ class _BaseInstallScreen(QWidget):
                     self._s.log.emit(f"  HGL prefix deps skipped: {ex}")
 
             plut_selected = [(k, gd, g) for k, gd, g in self.selected
-                             if KEY_CLIENT.get(k) == "plutonium"]
+                             if KEY_CLIENT.get(k) == "plutonium" and k not in _dg_failed]
             installed_for_plut = {k: g for k, gd, g in self.selected if g}
             total_plut = len(plut_selected)
             self._phase("plut")
@@ -2084,7 +2187,8 @@ class _BaseInstallScreen(QWidget):
         has_alterware = any(KEY_CLIENT.get(k) == "alterware" for k in selected_keys)
         if has_alterware:
             from alterware import install_alterware
-            _aw_sel = [(k, gd, g) for k, gd, g in self.selected if KEY_CLIENT.get(k) == "alterware"]
+            _aw_sel = [(k, gd, g) for k, gd, g in self.selected
+                       if KEY_CLIENT.get(k) == "alterware" and k not in _dg_failed]
             self._phase("alterware")
             _n_aw = len(_aw_sel)
             for _i_aw, (key, gd, game) in enumerate(_aw_sel):

@@ -18,6 +18,8 @@ import re
 import shutil
 import struct
 import subprocess
+import threading
+import time
 import zipfile
 
 from log import get_logger, redact_also
@@ -524,8 +526,75 @@ def check_free_space_gb(path: str) -> float:
         return 0.0
 
 
-def has_enough_space(path: str) -> bool:
-    return check_free_space_gb(path) >= REQUIRED_FREE_SPACE_GB
+def has_enough_space(path: str, need_gb: float = None) -> bool:
+    return check_free_space_gb(path) >= (REQUIRED_FREE_SPACE_GB if need_gb is None else need_gb)
+
+
+# A fixed 15 GB was fine for MW3's MP depots but far too little for Ghosts and
+# Advanced Warfare, whose old depots are most of the game: the download ran
+# out of space hours in. Steam's appmanifest lists the size of every installed
+# depot (InstalledDepots); the old manifests of the same depot ids are about
+# the same size, so their sum is the room the download needs.
+SPACE_MARGIN_GB = 2
+
+
+def installed_depot_sizes(steam_root: str, app_ids) -> dict:
+    """{depot_id: size in bytes} from the InstalledDepots of these apps'
+    appmanifests in every Steam library."""
+    from detect_games import _all_library_dirs
+    sizes = {}
+    for steamapps_dir in _all_library_dirs(steam_root):
+        for app in dict.fromkeys(str(a) for a in app_ids):
+            acf = os.path.join(steamapps_dir, f"appmanifest_{app}.acf")
+            try:
+                with open(acf, "r", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                continue
+            m = re.search(r'"InstalledDepots"\s*\{', content)
+            if not m:
+                continue
+            # The block's own closing brace (depot blocks inside are flat)
+            depth, end = 1, m.end()
+            while end < len(content) and depth:
+                depth += {"{": 1, "}": -1}.get(content[end], 0)
+                end += 1
+            for dm in re.finditer(r'"(\d+)"\s*\{([^{}]*)\}', content[m.end():end]):
+                sm = re.search(r'"size"\s*"(\d+)"', dm.group(2))
+                if sm:
+                    depot = int(dm.group(1))
+                    sizes[depot] = max(sizes.get(depot, 0), int(sm.group(1)))
+    return sizes
+
+
+def required_space_gb(steam_root: str, depots, default_app: int = None) -> float:
+    """Free space (GB) a downgrade of these depots needs: the size Steam
+    reports for them, plus a margin, never less than REQUIRED_FREE_SPACE_GB."""
+    apps = {d.get("app") or default_app for d in depots} - {None}
+    try:
+        sizes = installed_depot_sizes(steam_root, apps) if steam_root else {}
+    except Exception as ex:
+        _log.warning("depot size lookup failed: %s", ex)
+        sizes = {}
+    total = sum(sizes.get(int(d["depot"]), 0) for d in depots) / (1024 ** 3)
+    need = max(float(REQUIRED_FREE_SPACE_GB), total + SPACE_MARGIN_GB) if total else float(REQUIRED_FREE_SPACE_GB)
+    return round(need, 1)
+
+
+def estimate_space_gb(game_id: str, steam_root: str) -> float:
+    """required_space_gb for a typical downgrade of game_id (all its depots
+    except MW3 SP/DS-only, plus its installed DLC) -- for the pre-install check."""
+    cfg = GAME_CONFIGS.get(game_id)
+    if not cfg:
+        return float(REQUIRED_FREE_SPACE_GB)
+    skip = {cfg.get("sp_depot_id"), 42751} if game_id == "iw5" else set()
+    depots = [d for d in cfg["depots"] if d["depot"] not in skip]
+    try:
+        for key in detect_installed_dlc(game_id, steam_root):
+            depots.append(cfg["dlc"][key])
+    except Exception:
+        pass
+    return required_space_gb(steam_root, depots, cfg["app_id"])
 
 
 # --- Depot staging
@@ -705,6 +774,48 @@ _DD_ERROR_KEYWORDS = (
 )
 
 
+# DepotDownloader had no timeout at all: a stalled connection hung the install
+# forever (the only way out was killing DeckOps). A depot can legitimately take
+# hours, so this is a stall limit, not a total one: no new output AND no file
+# in the download folder written to for this long. (DD sizes files up front and
+# fills them in, so their modified time is the progress signal, not the size.)
+DD_STALL_TIMEOUT = 15 * 60
+DD_STALL_CHECK = 30
+
+
+def _newest_mtime(path: str) -> float:
+    newest = 0.0
+    for dirpath, _, files in os.walk(path):
+        for f in files:
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(dirpath, f)))
+            except OSError:
+                pass
+    return newest
+
+
+def _watch_stall(proc, staging_dir: str, last_output: list, stalled: list,
+                 stop: threading.Event, timeout: float = None, check: float = None):
+    """Kill proc once it has been silent and idle for the stall timeout."""
+    timeout = DD_STALL_TIMEOUT if timeout is None else timeout
+    check = DD_STALL_CHECK if check is None else check
+    seen = _newest_mtime(staging_dir)
+    last_activity = time.monotonic()
+    while not stop.wait(check):
+        newest = _newest_mtime(staging_dir)
+        if newest > seen:
+            seen = newest
+            last_activity = time.monotonic()
+        if time.monotonic() - max(last_activity, last_output[0]) > timeout:
+            stalled[0] = True
+            _log.warning("DepotDownloader stalled for %ds, stopping it", int(timeout))
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            return
+
+
 def _is_qr_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
@@ -814,6 +925,9 @@ def run_depot_download_qr(
         captured_username = None
         auth_succeeded = False
         error_lines = []
+        last_output = [time.monotonic()]
+        stalled = [False]
+        stop_watch = threading.Event()
 
         try:
             proc = subprocess.Popen(
@@ -824,11 +938,14 @@ def run_depot_download_qr(
                 bufsize=1,
                 cwd=DEPOTDOWNLOADER_DIR,
             )
+            threading.Thread(target=_watch_stall, daemon=True,
+                             args=(proc, staging_dir, last_output, stalled, stop_watch)).start()
 
             qr_lines = []
             reading_qr = False
 
             for line in proc.stdout:
+                last_output[0] = time.monotonic()
                 line = line.rstrip("\n\r")
                 _log.debug("DD: %s", line)
 
@@ -871,6 +988,13 @@ def run_depot_download_qr(
                         on_log(line)
 
             proc.wait()
+            stop_watch.set()
+
+            if stalled[0]:
+                on_log(f"DepotDownloader stopped responding (no progress for "
+                       f"{DD_STALL_TIMEOUT // 60} minutes) and was stopped. "
+                       "Check your connection and try again.")
+                return None
 
             if proc.returncode == 0 and (auth_succeeded or username):
                 on_log(f"Depot {depot_info['depot']} download complete.")
@@ -908,6 +1032,8 @@ def run_depot_download_qr(
             on_log(f"DepotDownloader error: {ex}")
             _log.exception("DepotDownloader failed")
             return None
+        finally:
+            stop_watch.set()
 
 
 # --- Merge helpers

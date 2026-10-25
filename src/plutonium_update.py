@@ -23,6 +23,7 @@ import fnmatch
 import json
 import os
 import tempfile
+import time
 
 from log import get_logger
 from net import download
@@ -80,27 +81,46 @@ def _yeet(plut_dir: str, patterns: list, keep: set, log) -> int:
     return n
 
 
-def sync_master(plut_dir: str, prod: dict, info: dict, log=None) -> int:
+class OutOfTime(Exception):
+    """The update's time budget ran out (see update())."""
+
+
+def sync_master(plut_dir: str, prod: dict, info: dict, log=None, deadline: float = None) -> int:
     """
     Bring the master Plutonium folder in line with the manifest and return
     how many files were replaced. Changed files download to <file>.new and
     are only renamed into place once every download succeeded, so an
     interrupted update leaves the previous version runnable.
+
+    deadline -- time.monotonic() value; past it the downloads stop (even mid
+    file, checked after each 1 MB read, so it can run over by one read) and
+    OutOfTime is raised with nothing renamed into place. Finished
+    .new files and the .part of the stopped one are kept, so the next run
+    picks up where this one stopped.
     """
     log = log or (lambda *a: None)
     files = info["files"]
     todo = [e for e in files if not (
         os.path.isfile(p := os.path.join(plut_dir, e["name"])) and _sha1(p) == e["hash"])]
     log(f"Plutonium r{info['revision']}: {len(files) - len(todo)} of {len(files)} files up to date")
+
+    def _check_time(*_):
+        if deadline is not None and time.monotonic() > deadline:
+            raise OutOfTime()
+
     for e in todo:
         p = os.path.join(plut_dir, e["name"])
         new = p + ".new"
         # Left by an earlier interrupted update and already complete.
         if os.path.isfile(new) and _sha1(new) == e["hash"]:
             continue
+        _check_time()
         os.makedirs(os.path.dirname(p), exist_ok=True)
         download(info["baseUrl"] + e["hash"], new, label=os.path.basename(p),
-                 timeout=120, digest=f"sha1:{e['hash']}")
+                 timeout=120 if deadline is None else 30,
+                 tries=3 if deadline is None else 1,
+                 digest=f"sha1:{e['hash']}", on_progress=_check_time)
+    _check_time()
     for e in todo:
         p = os.path.join(plut_dir, e["name"])
         os.replace(p + ".new", p)
@@ -114,15 +134,30 @@ def sync_master(plut_dir: str, prod: dict, info: dict, log=None) -> int:
     return len(todo)
 
 
-def update(plut_dir: str, log=None) -> dict:
-    """Fetch once, sync plut_dir if its revision differs, return info."""
+# Budget for the pre-launch update: it runs between Play and the game starting.
+# It had no total limit -- after a big Plutonium release on slow Wi-Fi, Play
+# showed nothing for minutes (LCD: no outer limit at all; OLED: prelaunch.sh
+# kills it at 120 s, so every launch waited 2 minutes and finished nothing).
+LAUNCH_BUDGET = 45
+
+
+def update(plut_dir: str, log=None, budget: float = None) -> dict:
+    """Fetch once, sync plut_dir if its revision differs, return info.
+    budget -- seconds; when the update can't finish in time it stops, the
+    game launches on the current revision and the rest is fetched (resumed)
+    on the next launch."""
     log = log or (lambda *a: None)
+    deadline = time.monotonic() + budget if budget else None
     # One quick try so being offline costs a few seconds at most.
     prod, info = fetch(timeout=5, tries=1)
     local = local_revision(plut_dir)
     if local != info["revision"]:
         log(f"Plutonium: r{local}, server r{info['revision']}, updating")
-        sync_master(plut_dir, prod, info, log)
+        try:
+            sync_master(plut_dir, prod, info, log, deadline=deadline)
+        except OutOfTime:
+            log(f"Plutonium: update didn't finish in {budget:.0f}s, launching r{local}; "
+                "the rest downloads on the next launch")
     else:
         log(f"Plutonium r{local}: up to date")
     return info

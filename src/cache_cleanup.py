@@ -275,7 +275,7 @@ def main():
         from plutonium_lcd import get_shared_plut_dir
         d = get_shared_plut_dir()
         if os.path.isdir(d):
-            pu.update(d, _log.info)
+            pu.update(d, _log.info, budget=pu.LAUNCH_BUDGET)
     except Exception as ex:
         _log.warning("Plutonium update skipped: %s", ex)
 

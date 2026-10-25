@@ -22,6 +22,14 @@ MAX_HOLD = "6h"
 
 _proc = None
 _cookie = None
+# Why the locks were asked for, even if none could be taken: the window asks
+# before quitting while a long operation runs (see ui_qt closeEvent).
+_busy = None
+
+
+def busy():
+    """The reason passed to start() while an operation runs, else None."""
+    return _busy
 
 
 def _ss_iface():
@@ -58,7 +66,8 @@ def _ss_uninhibit(cookie):
 
 def start(why="DeckOps is installing"):
     """Take the locks. Safe to call when they are already held."""
-    global _proc, _cookie
+    global _proc, _cookie, _busy
+    _busy = why
     if _proc is None:
         try:
             # Deliberately NOT detached. Every other subprocess here uses
@@ -81,7 +90,8 @@ def start(why="DeckOps is installing"):
 
 def stop():
     """Release both locks. Safe to call when nothing is held."""
-    global _proc, _cookie
+    global _proc, _cookie, _busy
+    _busy = None
     if _proc is not None:
         try:
             _proc.terminate()

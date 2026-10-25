@@ -11,7 +11,7 @@ All screen classes are imported from split modules:
 
 import sys, os, threading
 
-from qt import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QWidget
+from qt import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QWidget, QMessageBox
 from qt import Qt, QTimer
 
 import bootstrap as _bootstrap
@@ -158,6 +158,18 @@ class DeckOpsWindow(QMainWindow):
         self._mute_btn.raise_()
 
     def closeEvent(self, e):
+        # Workers are daemon threads: quitting mid-install killed them in the
+        # middle of writes (half-built prefixes, half-copied files, unsaved
+        # setup state) without a word. Ask while a long operation runs.
+        why = inhibit.busy()
+        if why and QMessageBox.question(
+                self, "Quit DeckOps?",
+                f"{why.rstrip('.')}.\n\nQuitting now stops it part way and can leave "
+                "games half set up.\n\nQuit anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            e.ignore()
+            return
         _kill_audio()
         inhibit.stop()
         super().closeEvent(e)

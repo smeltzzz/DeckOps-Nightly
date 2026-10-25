@@ -25,6 +25,8 @@ OK, WARN, BLOCK = "ok", "warn", "block"
 # Mirrors _DG_KEY_MAP in ui_install._run_inner. Kept here so preflight
 # stays a leaf module; update both if the depot game list changes.
 DOWNGRADE_KEYS = {"iw5mp", "iw5mp_ds", "iw5sp", "iw6mp", "iw6sp", "s1mp", "s1sp"}
+DOWNGRADE_GAME = {"iw5mp": "iw5", "iw5mp_ds": "iw5", "iw5sp": "iw5",
+                  "iw6mp": "iw6", "iw6sp": "iw6", "s1mp": "s1", "s1sp": "s1"}
 
 
 def free_gb(path: str) -> float:
@@ -88,7 +90,8 @@ def check(selected, iw4x_dlc=False, zd=False, downgrade_keys=()):
     downgrade_keys -- selected keys that will need a depot downgrade
     Returns a list of Check(level, title, detail); empty means nothing to say.
     """
-    from depot_downgrade import REQUIRED_FREE_SPACE_GB
+    from depot_downgrade import estimate_space_gb
+    from steam_common import STEAM_ROOT
     from iw4x import DLC_SIZE_GB
     from zombies_declassified import PACK_SIZE_GB
 
@@ -102,14 +105,16 @@ def check(selected, iw4x_dlc=False, zd=False, downgrade_keys=()):
         entry[0] += gb
 
     dg = {k for k in downgrade_keys if k in DOWNGRADE_KEYS}
-    dg_devs = set()
+    dg_games = set()
     for key, client, install_dir in selected:
-        # The downgrade stages a second copy beside the game it belongs to.
+        # The downgrade stages a second copy beside the game it belongs to,
+        # sized from that game's depots (Ghosts / AW need far more than the
+        # old flat 15 GB), once per game and added up per drive.
         if key in dg and install_dir:
-            dev = _probe(install_dir)[0]
-            if dev not in dg_devs:
-                dg_devs.add(dev)
-                add(install_dir, REQUIRED_FREE_SPACE_GB)
+            game_id = DOWNGRADE_GAME.get(key)
+            if game_id not in dg_games:
+                dg_games.add(game_id)
+                add(install_dir, estimate_space_gb(game_id, STEAM_ROOT))
         if client == "iw4x" and iw4x_dlc:
             add(install_dir, DLC_SIZE_GB)
     if zd:
