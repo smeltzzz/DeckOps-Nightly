@@ -167,10 +167,6 @@ Steam artwork from [SteamGridDB](https://www.steamgriddb.com) - thanks to [Mooho
 
 > DeckOps is not affiliated with Activision, Infinity Ward, Treyarch, or Valve. All trademarks belong to their respective owners. A legitimate copy of each game is required. DeckOps does not provide or distribute game files.
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the lint and test checks.
-
 ## License
 
 [MIT License](LICENSE)

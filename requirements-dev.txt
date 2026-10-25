@@ -1,6 +1,0 @@
-# Tools for working on DeckOps (not needed to run it).
-#   pip install -r requirements-dev.txt
-#   ruff check .
-#   pytest
-pytest>=8
-ruff>=0.6
