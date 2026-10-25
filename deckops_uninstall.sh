@@ -301,13 +301,161 @@ if [ -n "$STEAM_ROOT" ]; then
 fi
 echo ""
 
+# Helpers for reading Steam's binary shortcuts.vdf, shared by the Python blocks
+# below that decide which shortcuts and game folders are DeckOps'. Those blocks cannot import from
+# src/ (it is already gone by now), so the helpers are written to a temp dir and
+# put on PYTHONPATH.
+DECKOPS_PY_HELPERS="$(mktemp -d)"
+export PYTHONPATH="$DECKOPS_PY_HELPERS${PYTHONPATH:+:$PYTHONPATH}"
+cat > "$DECKOPS_PY_HELPERS/deckops_vdf.py" <<'PYEOF'
+"""Read Steam's binary shortcuts.vdf and tell DeckOps' shortcuts from the user's.
+
+A shortcut counts as DeckOps' if its tags section contains "DeckOps" (every
+shortcut DeckOps has written carries that tag), or if its exe, start dir or
+launch options point into a place DeckOps manages. A shortcut that merely shares
+a title with one of DeckOps' (a user's own Call of Duty shortcut, say) is not.
+"""
+
+import os
+
+# Where DeckOps' shortcuts point: its install dirs (Stable and Nightly), its data
+# dir, and the launchers and wrappers it generates.
+DECKOPS_PATHS = (
+    "/DeckOps-Nightly/", "/DeckOps/", "/deckops/",
+    "cache_cleanup.py", "/lcd_wrappers/", "DeckOps-T7X", "DeckOps_Offline", "launcher_offline.sh",
+)
+
+
+def split_entries(raw):
+    """The shortcut entries of a shortcuts.vdf body, found by walking the typed
+    binary format (0x08 also occurs inside integers, so splitting on it breaks).
+    Each entry comes back whole: its 0x00 <index> 0x00 start up to its closing
+    0x08. Returns None if the data is not the expected shape."""
+    entries, pos = [], 0
+    try:
+        while raw[pos] != 0x08:                    # 0x08 ends the outer map
+            if raw[pos] != 0x00:
+                return None
+            start = pos
+            pos = raw.index(b'\x00', pos + 1) + 1  # skip 0x00 <index> 0x00
+            depth = 1
+            while depth:
+                t = raw[pos]
+                pos += 1
+                if t == 0x08:
+                    depth -= 1
+                    continue
+                pos = raw.index(b'\x00', pos) + 1  # the field's key
+                if t == 0x00:
+                    depth += 1
+                elif t == 0x01:
+                    pos = raw.index(b'\x00', pos) + 1
+                elif t in (0x02, 0x03, 0x04, 0x06):
+                    pos += 4
+                elif t in (0x07, 0x0A):
+                    pos += 8
+                else:
+                    return None
+            entries.append(raw[start:pos])
+    except (IndexError, ValueError):
+        return None
+    return entries if raw[pos:] == b'\x08\x08' else None
+
+
+def _read_map(b, pos):
+    out = {}
+    while True:
+        t = b[pos]
+        pos += 1
+        if t == 0x08:
+            return out, pos
+        k_end = b.index(b'\x00', pos)
+        key = b[pos:k_end].decode("utf-8", "replace")
+        pos = k_end + 1
+        if t == 0x00:
+            out[key], pos = _read_map(b, pos)
+        elif t == 0x01:
+            v_end = b.index(b'\x00', pos)
+            out[key] = b[pos:v_end].decode("utf-8", "replace")
+            pos = v_end + 1
+        elif t in (0x02, 0x03, 0x04, 0x06):
+            out[key] = b[pos:pos + 4]
+            pos += 4
+        elif t in (0x07, 0x0A):
+            out[key] = b[pos:pos + 8]
+            pos += 8
+        else:
+            raise ValueError("unknown field type")
+
+
+def entry_fields(blob):
+    """{key: value} of one entry (top-level keys lower-cased, nested maps as
+    dicts), or None if it does not parse cleanly."""
+    try:
+        fields, pos = _read_map(blob, blob.index(b'\x00', 1) + 1)
+    except (IndexError, ValueError):
+        return None
+    if pos != len(blob):
+        return None
+    return {k.lower(): v for k, v in fields.items()}
+
+
+def is_deckops(fields):
+    tags = fields.get("tags")
+    if isinstance(tags, dict) and "DeckOps" in tags.values():
+        return True
+    where = " ".join(fields[k] for k in ("exe", "startdir", "launchoptions")
+                     if isinstance(fields.get(k), str))
+    return any(p in where for p in DECKOPS_PATHS)
+
+
+def is_deckops_entry(blob):
+    """True only for an entry that parses and is DeckOps'. One that does not
+    parse is not, so it is left alone."""
+    fields = entry_fields(blob)
+    return fields is not None and is_deckops(fields)
+
+
+def has_sentinel(folder):
+    """True if a DeckOps installer left its deckops_*.json marker file in folder.
+    They write one only where they installed something."""
+    try:
+        return any(n.startswith("deckops_") and n.endswith(".json") for n in os.listdir(folder))
+    except OSError:
+        return False
+
+
+def readable(data):
+    """True if data is a shortcuts.vdf that entries() can read."""
+    header = b'\x00shortcuts\x00'
+    pos = data.find(header)
+    return pos >= 0 and split_entries(data[pos + len(header):]) is not None
+
+
+def entries(data):
+    """(fields, is_deckops) for each shortcut in a whole shortcuts.vdf file.
+    Yields nothing if the file is not in the expected shape."""
+    header = b'\x00shortcuts\x00'
+    pos = data.find(header)
+    if pos < 0:
+        return
+    for blob in split_entries(data[pos + len(header):]) or ():
+        fields = entry_fields(blob)
+        if fields is not None:
+            yield fields, is_deckops(fields)
+PYEOF
+
+trap 'rm -rf "$DECKOPS_PY_HELPERS"' EXIT
+
 info "Restoring non-Steam (My Own) game executables..."
 
 # Scan shortcuts.vdf for games added via the My Own flow. These were
 # detected by exe name and may have had their exes replaced with wrapper
 # scripts. We restore from .bak the same way we do for Steam games.
 python3 - << 'PYEOF'
-import os, re
+import os
+
+import deckops_vdf
 
 STEAM_DIR    = os.path.expanduser("~/.local/share/Steam")
 USERDATA_DIR = os.path.join(STEAM_DIR, "userdata")
@@ -327,7 +475,9 @@ KNOWN_EXES = [
 ]
 
 def parse_shortcuts(path):
-    """Pull exe and start_dir from shortcuts.vdf entries."""
+    """Exe paths of the shortcuts DeckOps made, plus those of any shortcut in a
+    folder a DeckOps installer left its marker in. The user's own shortcut to the
+    same game is not ours, and neither is a .bak file next to it."""
     if not os.path.exists(path):
         return []
     try:
@@ -335,10 +485,14 @@ def parse_shortcuts(path):
             data = f.read()
     except Exception:
         return []
+    if not deckops_vdf.readable(data):
+        print(f"  {path} is not in the expected format, skipping")
+        return []
     results = []
-    for m in re.finditer(b'\x01(?:exe|Exe)\x00([^\x00]+)\x00', data):
-        exe = m.group(1).decode("utf-8", errors="replace").strip('"')
-        results.append(exe)
+    for fields, mine in deckops_vdf.entries(data):
+        exe = fields.get("exe", "").strip('"')
+        if exe and (mine or deckops_vdf.has_sentinel(os.path.dirname(exe))):
+            results.append(exe)
     return results
 
 if not os.path.isdir(USERDATA_DIR):
@@ -654,7 +808,9 @@ info "Removing mod client files from non-Steam (My Own) game folders..."
 # library. We find them by scanning shortcuts.vdf for known exe names and
 # cleaning up the same files we would for Steam installs.
 python3 - << 'PYEOF'
-import os, re, shutil, filecmp
+import os, shutil, filecmp
+
+import deckops_vdf
 
 STEAM_DIR    = os.path.expanduser("~/.local/share/Steam")
 USERDATA_DIR = os.path.join(STEAM_DIR, "userdata")
@@ -835,9 +991,13 @@ for uid in os.listdir(USERDATA_DIR):
     except Exception:
         continue
 
+    if not deckops_vdf.readable(data):
+        print(f"  uid {uid}: shortcuts.vdf is not in the expected format, skipping")
+        continue
+
     # Pull exe paths and start dirs from shortcuts.vdf
-    for exe_m in re.finditer(b'\x01(?:exe|Exe)\x00([^\x00]+)\x00', data):
-        exe_raw = exe_m.group(1).decode("utf-8", errors="replace")
+    for _fields, _mine in deckops_vdf.entries(data):
+        exe_raw = _fields.get("exe", "")
         exe_path = exe_raw.strip('"')
         exe_name = os.path.basename(exe_path).lower()
 
@@ -850,6 +1010,12 @@ for uid in os.listdir(USERDATA_DIR):
         if not install_dir or (install_dir, exe_name) in cleaned:
             continue
         if not os.path.isdir(install_dir):
+            continue
+        # Only clean a folder DeckOps installed into: its shortcut is DeckOps' (tag or
+        # path), or an installer left its deckops_*.json marker here. Someone else's
+        # IW4x, CoD4x, d3d11.dll or t7x beside a shortcut of their own is not ours.
+        if not (_mine or deckops_vdf.has_sentinel(install_dir)):
+            print(f"  Kept {install_dir} (not set up by DeckOps)")
             continue
         cleaned.add((install_dir, exe_name))
 
@@ -2337,132 +2503,6 @@ for uid in os.listdir(userdata):
 
 PYEOF
 }
-
-# Helpers for reading Steam's binary shortcuts.vdf, shared by the Python blocks
-# below that decide which shortcuts are DeckOps'. Those blocks cannot import from
-# src/ (it is already gone by now), so the helpers are written to a temp dir and
-# put on PYTHONPATH.
-DECKOPS_PY_HELPERS="$(mktemp -d)"
-export PYTHONPATH="$DECKOPS_PY_HELPERS${PYTHONPATH:+:$PYTHONPATH}"
-cat > "$DECKOPS_PY_HELPERS/deckops_vdf.py" <<'PYEOF'
-"""Read Steam's binary shortcuts.vdf and tell DeckOps' shortcuts from the user's.
-
-A shortcut counts as DeckOps' if its tags section contains "DeckOps" (every
-shortcut DeckOps has written carries that tag), or if its exe, start dir or
-launch options point into a place DeckOps manages. A shortcut that merely shares
-a title with one of DeckOps' (a user's own Call of Duty shortcut, say) is not.
-"""
-
-# Where DeckOps' shortcuts point: its install dirs (Stable and Nightly), its data
-# dir, and the launchers and wrappers it generates.
-DECKOPS_PATHS = (
-    "/DeckOps-Nightly/", "/DeckOps/", "/deckops/",
-    "cache_cleanup.py", "/lcd_wrappers/", "DeckOps-T7X", "DeckOps_Offline", "launcher_offline.sh",
-)
-
-
-def split_entries(raw):
-    """The shortcut entries of a shortcuts.vdf body, found by walking the typed
-    binary format (0x08 also occurs inside integers, so splitting on it breaks).
-    Each entry comes back whole: its 0x00 <index> 0x00 start up to its closing
-    0x08. Returns None if the data is not the expected shape."""
-    entries, pos = [], 0
-    try:
-        while raw[pos] != 0x08:                    # 0x08 ends the outer map
-            if raw[pos] != 0x00:
-                return None
-            start = pos
-            pos = raw.index(b'\x00', pos + 1) + 1  # skip 0x00 <index> 0x00
-            depth = 1
-            while depth:
-                t = raw[pos]
-                pos += 1
-                if t == 0x08:
-                    depth -= 1
-                    continue
-                pos = raw.index(b'\x00', pos) + 1  # the field's key
-                if t == 0x00:
-                    depth += 1
-                elif t == 0x01:
-                    pos = raw.index(b'\x00', pos) + 1
-                elif t in (0x02, 0x03, 0x04, 0x06):
-                    pos += 4
-                elif t in (0x07, 0x0A):
-                    pos += 8
-                else:
-                    return None
-            entries.append(raw[start:pos])
-    except (IndexError, ValueError):
-        return None
-    return entries if raw[pos:] == b'\x08\x08' else None
-
-
-def _read_map(b, pos):
-    out = {}
-    while True:
-        t = b[pos]
-        pos += 1
-        if t == 0x08:
-            return out, pos
-        k_end = b.index(b'\x00', pos)
-        key = b[pos:k_end].decode("utf-8", "replace")
-        pos = k_end + 1
-        if t == 0x00:
-            out[key], pos = _read_map(b, pos)
-        elif t == 0x01:
-            v_end = b.index(b'\x00', pos)
-            out[key] = b[pos:v_end].decode("utf-8", "replace")
-            pos = v_end + 1
-        elif t in (0x02, 0x03, 0x04, 0x06):
-            out[key] = b[pos:pos + 4]
-            pos += 4
-        elif t in (0x07, 0x0A):
-            out[key] = b[pos:pos + 8]
-            pos += 8
-        else:
-            raise ValueError("unknown field type")
-
-
-def entry_fields(blob):
-    """{key: value} of one entry (top-level keys lower-cased, nested maps as
-    dicts), or None if it does not parse cleanly."""
-    try:
-        fields, pos = _read_map(blob, blob.index(b'\x00', 1) + 1)
-    except (IndexError, ValueError):
-        return None
-    if pos != len(blob):
-        return None
-    return {k.lower(): v for k, v in fields.items()}
-
-
-def is_deckops(fields):
-    tags = fields.get("tags")
-    if isinstance(tags, dict) and "DeckOps" in tags.values():
-        return True
-    where = " ".join(fields[k] for k in ("exe", "startdir", "launchoptions")
-                     if isinstance(fields.get(k), str))
-    return any(p in where for p in DECKOPS_PATHS)
-
-
-def is_deckops_entry(blob):
-    """True only for an entry that parses and is DeckOps'. One that does not
-    parse is not, so it is left alone."""
-    fields = entry_fields(blob)
-    return fields is not None and is_deckops(fields)
-
-
-def entries(data):
-    """(fields, is_deckops) for each shortcut in a whole shortcuts.vdf file.
-    Yields nothing if the file is not in the expected shape."""
-    header = b'\x00shortcuts\x00'
-    pos = data.find(header)
-    if pos < 0:
-        return
-    for blob in split_entries(data[pos + len(header):]) or ():
-        fields = entry_fields(blob)
-        if fields is not None:
-            yield fields, is_deckops(fields)
-PYEOF
 
 # Snapshot every shortcuts.vdf BEFORE removing anything. The artwork,
 # controller-config and LCD appid scans further down work out which appids
