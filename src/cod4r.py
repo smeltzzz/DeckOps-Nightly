@@ -55,6 +55,12 @@ _log = get_logger(__name__)
 # the manifest is checked against the launcher's signing key below.
 _CDN = "http://74.208.200.240"
 
+# Where the manifest is fetched from, in order. iw3x.com is the project's
+# site and serves the same signed manifest over HTTPS; unlike the bare IP it
+# follows the project if the update host ever moves (the manifest's base_url
+# then points file downloads at the new one). The IP is the fallback.
+_MANIFEST_HOSTS = ("https://iw3x.com", _CDN)
+
 # Public key embedded in CoD4R-Launcher.exe. manifest.json.sig is a
 # base64 RSA SHA-256 signature over manifest.json.
 _MANIFEST_KEY = """-----BEGIN PUBLIC KEY-----
@@ -229,6 +235,35 @@ def _verify_cod4r_files(install_dir: str, on_progress=None) -> bool:
     return True
 
 
+def _fetch_manifest(log, fetch_timeout: int, tries: int) -> dict:
+    """The signed manifest from the first host in _MANIFEST_HOSTS that serves
+    one whose signature verifies. The manifest and its signature always come
+    from the same host.
+
+    The time budget is split between the hosts so a dead first host doesn't
+    double the wait before a launch. Every host but the last gets one try;
+    the last gets the caller's `tries`. Each host works in its own folder so
+    a half-fetched .part from one is never resumed against another."""
+    per_host = max(3, fetch_timeout // len(_MANIFEST_HOSTS))
+    last_ex = None
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, host in enumerate(_MANIFEST_HOSTS):
+            d = os.path.join(tmp, str(i))
+            os.makedirs(d)
+            try:
+                for name in ("manifest.json", "manifest.json.sig"):
+                    _download(f"{host}/{name}", os.path.join(d, name),
+                              label=f"CoD4R {name}", timeout=per_host,
+                              tries=tries if i == len(_MANIFEST_HOSTS) - 1 else 1)
+                _check_signature(d, log)
+                with open(os.path.join(d, "manifest.json")) as f:
+                    return json.load(f)
+            except Exception as ex:
+                last_ex = ex
+                log(f"  CoD4R manifest from {host} failed: {ex}")
+    raise last_ex
+
+
 # -- public API ---------------------------------------------------------------
 
 def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
@@ -245,13 +280,7 @@ def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
     """
     log = log or (lambda *a: None)
     prog = prog or (lambda *a: None)
-    with tempfile.TemporaryDirectory() as tmp:
-        for name in ("manifest.json", "manifest.json.sig"):
-            _download(f"{_CDN}/{name}", os.path.join(tmp, name),
-                      label=f"CoD4R {name}", timeout=fetch_timeout, tries=tries)
-        _check_signature(tmp, log)
-        with open(os.path.join(tmp, "manifest.json")) as f:
-            m = json.load(f)
+    m = _fetch_manifest(log, fetch_timeout, tries)
 
     base = m.get("base_url", _CDN).rstrip("/")
     files = _manifest_files(m, install_dir, compatdata_path)
