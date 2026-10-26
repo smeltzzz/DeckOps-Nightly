@@ -1094,5 +1094,54 @@ class LaunchOptionRestoreTests(unittest.TestCase):
         self.assertEqual(sb.describe_backup({}, []), "No save data found to back up.")
 
 
+class MergedMpTileTests(unittest.TestCase):
+    """CoD4R MP and WaW MP (non-LCD) run from the main Steam tile, so their
+    old non-Steam shortcuts are dropped, but only once the tile can launch MP."""
+
+    def _setup(self, cod4_client="cod4r"):
+        return {"cod4mp": {"client": cod4_client, "source": "steam"},
+                "t4mp": {"client": "plutonium", "source": "steam"}}
+
+    def test_decision_follows_client_and_device(self):
+        import shortcut
+        with patch("config.get_setup_games", return_value=self._setup("cod4r")), \
+             patch("config.is_lcd", return_value=False):
+            self.assertTrue(shortcut.mp_on_main_tile("cod4mp"))
+            self.assertTrue(shortcut.mp_on_main_tile("t4mp"))
+            self.assertFalse(shortcut.mp_on_main_tile("t7x"))
+        with patch("config.get_setup_games", return_value=self._setup("cod4x")), \
+             patch("config.is_lcd", return_value=True):
+            self.assertFalse(shortcut.mp_on_main_tile("cod4mp"))   # CoD4x keeps its shortcut
+            self.assertFalse(shortcut.mp_on_main_tile("t4mp"))     # LCD keeps its Heroic shortcut
+
+    def _remove(self, files):
+        import shortcut
+        with tempfile.TemporaryDirectory() as d:
+            for n in files:
+                Path(d, n).write_text("x")
+            games = {"cod4mp": {"install_dir": d}, "t4mp": {"install_dir": d}}
+            with patch("config.get_setup_games", return_value=self._setup()), \
+                 patch("config.is_lcd", return_value=False), \
+                 patch("detect_games.parse_library_folders", return_value=[]), \
+                 patch("detect_games.find_installed_games", return_value=games), \
+                 patch.object(shortcut, "get_shortcut_appid", return_value=123), \
+                 patch.object(shortcut, "remove_shortcut") as rm, \
+                 patch.object(shortcut, "_clear_compat_tool") as clear:
+                removed = shortcut.remove_merged_mp_shortcuts("steam")
+        return removed, rm, clear
+
+    def test_shortcuts_removed_when_main_tile_is_ready(self):
+        removed, rm, clear = self._remove(["deckops_cod4r.json", "t4plutmp.exe"])
+        self.assertEqual(sorted(removed), ["Call of Duty 4: Modern Warfare - Multiplayer",
+                                           "Call of Duty: World at War - Multiplayer"])
+        self.assertEqual(rm.call_count, 2)
+        clear.assert_called_with("123")
+
+    def test_shortcut_kept_while_main_tile_is_not_ready(self):
+        removed, rm, _ = self._remove(["deckops_cod4r.json"])
+        self.assertEqual(removed, ["Call of Duty 4: Modern Warfare - Multiplayer"])
+        self.assertEqual(rm.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

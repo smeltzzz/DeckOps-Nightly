@@ -251,7 +251,9 @@ EXTERNAL_CONFIGSET_NAMES = {
 
 # ── Non-Steam shortcut definitions ────────────────────────────────────────────
 #
-# DeckOps creates non-Steam shortcuts for CoD4 MP and WaW MP. These have
+# DeckOps creates non-Steam shortcuts for CoD4x MP, WaW MP (LCD only) and T7x.
+# CoD4R MP and WaW MP on OLED / Other run from the main Steam tile instead
+# (shortcut.mp_on_main_tile). These have
 # dynamically calculated appids based on exe path + name. We need to find
 # the install dirs and calculate the appids at runtime so we can assign
 # controller profiles to them too. Without this, re-applying profiles from
@@ -445,7 +447,12 @@ def _steam_shortcut_appids(prog) -> dict:
         steam_root = find_steam_root()
         if steam_root:
             installed = find_installed_games(parse_library_folders(steam_root))
+            from shortcut import mp_on_main_tile
             for key, sdef in SHORTCUT_DEFS.items():
+                # CoD4 MP (CoD4R) and WaW MP (OLED) have no shortcut now; the
+                # main tile's own profile covers them
+                if mp_on_main_tile(key):
+                    continue
                 game = installed.get(key)
                 if not game:
                     continue

@@ -1,9 +1,11 @@
 """
 shortcut.py — DeckOps non-Steam shortcut creator
 
-Creates non-Steam game shortcuts in Steam for CoD4 Multiplayer (CoD4x) and
-World at War Multiplayer. These shortcuts point to the original game exes
-in the Steam library and use the original compatdata prefixes.
+Creates non-Steam game shortcuts in Steam for CoD4 Multiplayer (CoD4x only),
+World at War Multiplayer (LCD only) and T7x. These shortcuts point to the
+original game exes in the Steam library and use the original compatdata
+prefixes. CoD4R MP and WaW MP on OLED / Other run from the game's own Steam
+tile instead (see mp_on_main_tile).
 
 Shortcuts include:
   - Proper artwork (icon, grid, wide, hero, logo) from SteamGridDB
@@ -1204,6 +1206,80 @@ def cleanup_orphan_shortcuts(on_progress=None):
         prog("No orphan shortcuts found")
 
 
+# ── MP on the main Steam tile ────────────────────────────────────────────────
+#
+# CoD4 MP (CoD4R) and WaW MP (OLED / Other) no longer get their own non-Steam
+# shortcut. The game's Steam tile carries both modes in its launch menu:
+#   CoD4 (7940):  stock Singleplayer / Multiplayer entries. CoD4R replaces
+#                 iw3mp.exe in place and prelaunch.sh updates it first.
+#   WaW (10090):  "Play Plutonium SP/ZM ..." and "Play Plutonium Multiplayer ..."
+#                 entries added by plutonium._setup_steam_menu.
+# Both use the same prefix the shortcut used, so nothing moves. CoD4x keeps its
+# shortcut (it needs the KB+M controller layout), and so does WaW on LCD
+# (Heroic flatpak launch).
+
+# File that must exist in the game folder before the old shortcut is removed,
+# so the shortcut is never dropped while the tile can't launch MP yet.
+_MAIN_TILE_PROOF = {
+    "cod4mp": "deckops_cod4r.json",
+    "t4mp":   "t4plutmp.exe",
+}
+
+
+def mp_on_main_tile(key: str) -> bool:
+    """True if this Steam game's MP launches from the game's own Steam tile
+    (no separate non-Steam shortcut)."""
+    try:
+        import config as cfg
+        if key == "cod4mp":
+            return cfg.get_setup_games().get("cod4mp", {}).get("client") == "cod4r"
+        if key == "t4mp":
+            return not cfg.is_lcd()
+    except Exception:
+        _log.debug("mp_on_main_tile(%s) failed", key, exc_info=True)
+    return False
+
+
+def remove_merged_mp_shortcuts(steam_root: str = None, on_progress=None) -> list:
+    """Remove the old CoD4 MP / WaW MP shortcuts (Steam-sourced games only)
+    once their main tile can launch MP. Also clears each shortcut's compat
+    tool entry. Safe to call repeatedly. Steam must be closed. Returns the
+    names removed."""
+    import config as cfg
+
+    prog = on_progress or (lambda *a: None)
+    sr = steam_root or STEAM_ROOT
+    setup = cfg.get_setup_games()
+    todo = [k for k in ("cod4mp", "t4mp")
+            if setup.get(k, {}).get("source", "steam") == "steam"
+            and k in setup and mp_on_main_tile(k)]
+    if not todo:
+        return []
+
+    from detect_games import parse_library_folders, find_installed_games
+    games = find_installed_games(parse_library_folders(sr), sr)
+
+    removed = []
+    for key in todo:
+        sdef = SHORTCUTS[key]
+        game = games.get(key) or {}
+        install_dir = game.get("install_dir") or game.get("path")
+        if not install_dir:
+            continue
+        if not os.path.exists(os.path.join(install_dir, _MAIN_TILE_PROOF[key])):
+            prog(f"  {sdef['name']}: main tile not ready, shortcut kept")
+            continue
+        appid = get_shortcut_appid(sdef["name"])
+        if appid is None:
+            continue
+        remove_shortcut(sdef["name"], os.path.join(install_dir, sdef["exe_name"]),
+                        sdef, on_progress=on_progress)
+        _clear_compat_tool(str(appid))
+        removed.append(sdef["name"])
+        prog(f"  ✓ {sdef['name']} now launches from its main Steam tile")
+    return removed
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def create_shortcuts(installed_games: dict, selected_keys: list,
@@ -1217,12 +1293,21 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
                   STEAM_ROOT if not provided.
     """
     prog = on_progress or (lambda *a: None)
-    
+
+    # CoD4 MP (CoD4R) and WaW MP (OLED / Other) run from the game's own Steam
+    # tile now. Drop their old shortcuts instead of writing them again.
+    try:
+        remove_merged_mp_shortcuts(steam_root, on_progress)
+    except Exception as ex:
+        _log.warning("merged MP shortcut cleanup failed: %s", ex)
+
     to_create = []
     for key, shortcut_def in SHORTCUTS.items():
         if key not in selected_keys:
             continue
         if key not in installed_games:
+            continue
+        if mp_on_main_tile(key):
             continue
         game = installed_games[key]
         install_dir = game.get("install_dir") or game.get("path")
@@ -2154,7 +2239,7 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
     expected = {}
     for key, entry in setup.items():
         src = entry.get("source", "steam")
-        if src == "steam" and key in SHORTCUTS and key != "t7x":
+        if src == "steam" and key in SHORTCUTS and key != "t7x" and not mp_on_main_tile(key):
             expected[key] = ("steam", SHORTCUTS[key]["name"])
         elif src == "own" and lcd and key in HEROIC_PLUT_GAMES:
             expected[key] = ("heroic", HEROIC_PLUT_GAMES[key]["title"])
@@ -2169,6 +2254,8 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
         return []
 
     readded = []
+    # Old CoD4 MP / WaW MP shortcuts go once their main tile launches MP
+    remove_merged_mp_shortcuts(sr, on_progress)
     if setup.get("t6sp", {}).get("source") == "own":
         g = find_own_installed().get("t6sp")
         if g and migrate_own_t6sp(g, on_progress):

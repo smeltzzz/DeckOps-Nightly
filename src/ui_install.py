@@ -2440,6 +2440,8 @@ class _BaseInstallScreen(QWidget):
         steam_keys = [k for k, _, _ in steam_sel]
         # CoD4 MP and WaW MP shortcuts are written every run, so a game set up
         # by an earlier run that stopped before this step still gets one.
+        # (Not CoD4R MP, or WaW MP off LCD: those run from the main Steam tile,
+        # and create_shortcuts removes their old shortcuts instead.)
         _setup = cfg.get_setup_games()
         sc_extra = [k for k in ("cod4mp", "t4mp") if k not in steam_keys
                     and _setup.get(k, {}).get("source") == "steam"]
@@ -2468,9 +2470,17 @@ class _BaseInstallScreen(QWidget):
                                 for k in steam_keys)
             has_waw_steam = any(k in ("t4sp", "t4mp") for k in steam_keys)
             defaults = {}
+            clear_picker = []
             if has_cod4_steam:
-                defaults["7940"] = ("7a722f97", "1")   # CoD4 -> Singleplayer
+                from shortcut import mp_on_main_tile
+                if mp_on_main_tile("cod4mp"):
+                    # CoD4R MP is on this tile too: keep Steam's SP/MP picker
+                    clear_picker.append("7940")
+                else:
+                    defaults["7940"] = ("7a722f97", "1")   # CoD4 -> Singleplayer
             # WaW keeps Steam's picker for its Plutonium entries
+            if has_waw_steam:
+                clear_picker.append("10090")
             if defaults:
                 try:
                     from wrapper import set_default_launch_option
@@ -2478,12 +2488,12 @@ class _BaseInstallScreen(QWidget):
                     self._s.log.emit("✓  Default launch options set (SP mode)")
                 except Exception as ex:
                     self._s.log.emit(f"  Launch options skipped: {ex}")
-            if has_waw_steam:
+            if clear_picker:
                 try:
                     from wrapper import clear_default_launch_option
-                    clear_default_launch_option(self.steam_root, ["10090"])
+                    clear_default_launch_option(self.steam_root, clear_picker)
                 except Exception as ex:
-                    self._s.log.emit(f"  WaW launch picker reset skipped: {ex}")
+                    self._s.log.emit(f"  Launch picker reset skipped: {ex}")
 
         # --- Steam artwork
         if steam_sel:
