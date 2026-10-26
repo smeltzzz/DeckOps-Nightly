@@ -116,13 +116,16 @@ SAVE_GROUPS = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _load_config() -> dict:
-    """Load deckops.json, return empty dict on failure."""
+def _load_config() -> dict | None:
+    """Load deckops.json; None if it is missing, unreadable or not an object.
+    (It used to be {}, which a backup reported as "no games, nothing to back
+    up" -- and the uninstaller then offered to delete Plutonium player data.)"""
     try:
         with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError, OSError):
-        return {}
+            data = json.load(f)
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _find_all_compatdata_dirs(steam_root: str) -> list:
@@ -463,7 +466,16 @@ def backup_saves(steam_root: str = None, on_progress=None,
         on_progress = lambda msg: None
 
     config = _load_config()
-    setup_games = config.get("setup_games", {})
+    if config is None and not installed_games:
+        # Which games are set up is only known from deckops.json. Not knowing
+        # is a failed backup, never "nothing to back up".
+        on_progress(f"  ⚠ Could not read DeckOps's settings ({CONFIG_PATH}), "
+                    "so it cannot tell which games to back up.")
+        failed.append("settings")
+        return {}
+    setup_games = (config or {}).get("setup_games") or {}
+    if not isinstance(setup_games, dict):
+        setup_games = {}
 
     if not setup_games and not installed_games:
         on_progress("No installed games found — nothing to back up.")
@@ -597,8 +609,10 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
     if not groups_to_restore:
         return {}
 
-    config = _load_config()
-    setup_games = config.get("setup_games", {})
+    config = _load_config() or {}
+    setup_games = config.get("setup_games") or {}
+    if not isinstance(setup_games, dict):
+        setup_games = {}
 
     restored = {}
     on_progress("Checking for save data backups...")
@@ -692,6 +706,9 @@ def describe_backup(backed_up: dict, failures: list) -> str:
     if failures:
         if "*" in failures:
             return f"⚠  Could not create the backup folder ({BACKUP_ROOT}). Nothing was backed up."
+        if "settings" in failures:
+            return ("⚠  Could not read DeckOps's settings (deckops.json), so it could not tell which "
+                    "games to back up. Nothing was backed up.")
         return (f"⚠  Backup incomplete for: {', '.join(failures)}. Earlier backups of those were kept. "
                 "Check your free space and the log.")
     if backed_up:

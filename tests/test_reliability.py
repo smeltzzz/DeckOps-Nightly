@@ -355,6 +355,39 @@ class SaveBackupFailureTests(unittest.TestCase):
                 self.assertEqual((backup / "cod4" / "profile.cfg").read_text(), "stats")
 
 
+class SaveBackupWithoutSettingsTests(unittest.TestCase):
+    """No readable deckops.json must never be reported as a complete backup:
+    the uninstaller would then offer to delete Plutonium player data."""
+
+    def _cli(self, config_text):
+        import save_backup as sb
+        with tempfile.TemporaryDirectory() as home:
+            install = Path(home, "DeckOps-Nightly")
+            install.mkdir()
+            if config_text is not None:
+                (install / "deckops.json").write_text(config_text)
+            env = dict(os.environ, HOME=home, USERPROFILE=home, PYTHONIOENCODING="utf-8")
+            return subprocess.run([sys.executable, sb.__file__, "backup", home],
+                                  cwd=str(Path(sb.__file__).parent), env=env,
+                                  capture_output=True, text=True)
+
+    def test_missing_or_broken_settings_fail_the_backup(self):
+        for text in (None, '{"setup_games": {"t6mp"', "[1, 2]", ""):
+            with self.subTest(config=text):
+                r = self._cli(text)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("NOT backed up: settings", r.stdout)
+
+    def test_readable_settings_without_games_is_fine(self):
+        r = self._cli('{"setup_games": {}}')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("No saves to back up", r.stdout)
+
+    def test_message_explains_unreadable_settings(self):
+        import save_backup as sb
+        self.assertIn("could not tell which games", sb.describe_backup({}, ["settings"]))
+
+
 class DepotLoginTests(unittest.TestCase):
     def test_cleanup_removes_only_private_login(self):
         with tempfile.TemporaryDirectory() as tmp:
