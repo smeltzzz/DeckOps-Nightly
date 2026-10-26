@@ -554,6 +554,61 @@ def clear_launch_options(steam_root, appid):
         _record_localconfig(uid, appid, "LaunchOptions", "")
 
 
+def snapshot_launch_options(steam_root, appids):
+    """
+    {appid: {uid: raw value}} of the non-empty LaunchOptions each user has
+    now, for restore_launch_options. Values are kept exactly as written in
+    localconfig.vdf (already escaped). Unreadable entries are left out.
+    """
+    snap = {}
+    for uid, _, content in _localconfigs(steam_root):
+        for appid in appids:
+            appid = str(appid)
+            block = _app_block(content, appid)
+            if not block:
+                continue
+            try:
+                found = _flat_values(content, block, "LaunchOptions")
+            except ValueError:
+                continue
+            if found:
+                value = content[found[0][1]:found[0][2]]
+                if value.strip():
+                    snap.setdefault(appid, {})[uid] = value
+    return snap
+
+
+def restore_launch_options(steam_root, snapshot, appid):
+    """
+    Put back the LaunchOptions snapshot_launch_options saw for appid, but only
+    for users whose entry is empty now: whatever was written since (a later
+    successful install) wins. Returns the uids restored. Steam must be closed.
+    """
+    appid = str(appid)
+    saved = (snapshot or {}).get(appid) or {}
+    restored = []
+    for uid, vdf_path, content in _localconfigs(steam_root):
+        value = saved.get(uid)
+        if not value:
+            continue
+        block = _app_block(content, appid)
+        if not block:
+            continue
+        try:
+            found = _flat_values(content, block, "LaunchOptions")
+            if found and any(content[vs:ve].strip() for _, vs, ve in found):
+                continue
+            content = (_set_flat_value(content, found, value) if found
+                       else _insert_flat(content, block, "LaunchOptions", value))
+        except ValueError as ex:
+            _log.warning("LaunchOptions not restored for %s (uid %s): %s", appid, uid, ex)
+            continue
+        if _write_and_validate_vdf(vdf_path, content, errors="replace"):
+            _record_localconfig(uid, appid, "LaunchOptions", value)
+            restored.append(uid)
+    return restored
+
+
 def _reapply_launch_menus():
     # Steam refreshes appinfo.vdf from Valve's servers now and then, which
     # drops our launch menu entries. Put them back whenever Steam is closed.

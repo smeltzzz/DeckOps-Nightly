@@ -2120,11 +2120,35 @@ class UpdateScreen(QWidget):
             _log.error("update failed:\n%s", traceback.format_exc())
             if self.selected and not self._failed_games:
                 self._failed_games = list(self.selected)
+            self._restore_failed_launch_options()
             self._s.log.emit(f"✗  Update failed: {ex}")
             self._s.progress.emit(100, "Update failed.")
             self._s.done.emit(False)
 
+    def _restore_failed_launch_options(self):
+        """Put back the launch options cleared for games that then failed.
+        Appids a successful game also uses (CoD4 MP/SP) were just rewritten
+        and are left alone; restore_launch_options also skips any entry that
+        is no longer empty. Runs once per snapshot."""
+        snap, self._lo_snapshot = getattr(self, "_lo_snapshot", None), None
+        if not snap or not self._failed_games:
+            return
+        try:
+            from wrapper import restore_launch_options
+            from detect_games import GAMES
+            failed = {k for k, _, _ in self._failed_games}
+            ok_appids = {str(GAMES[k]["appid"]) for k, _, _ in self.selected
+                         if k in GAMES and k not in failed}
+            for k in failed:
+                appid = str(GAMES.get(k, {}).get("appid", ""))
+                if appid and appid in snap and appid not in ok_appids:
+                    if restore_launch_options(self.steam_root, snap, appid):
+                        self._s.log.emit(f"  Kept the previous launch options for {GAMES[k].get('name', k)}")
+        except Exception as ex:
+            self._s.log.emit(f"  Could not restore launch options: {ex}")
+
     def _run_steps(self):
+        self._lo_snapshot = None
         task, self.task = self.task, None
         if task:
             try:
@@ -2302,10 +2326,17 @@ class UpdateScreen(QWidget):
         # Launch options only for the Steam games in this update, so a
         # per-game update doesn't wipe other games' options.
         try:
-            from wrapper import clear_launch_options, clear_compat_tool
+            from wrapper import clear_launch_options, clear_compat_tool, snapshot_launch_options
             from detect_games import GAMES
             run_appids = {GAMES[k]["appid"] for k, _, g in self.selected
                           if k in GAMES and (g or {}).get("source") != "own"}
+            # A game that fails below never gets its options written again;
+            # keep what it had so it can be put back (_restore_failed_launch_options)
+            try:
+                self._lo_snapshot = snapshot_launch_options(
+                    self.steam_root, [a for a in MANAGED_APPIDS if a in run_appids])
+            except Exception as ex:
+                self._s.log.emit(f"  Could not save current launch options: {ex}")
             for appid in MANAGED_APPIDS:
                 if appid in run_appids:
                     clear_launch_options(self.steam_root, appid)
@@ -2431,6 +2462,8 @@ class UpdateScreen(QWidget):
             except Exception as ex:
                 self._failed_games.append((key, gd, game))
                 self._s.log.emit(f"✗  {base_name} ({key}) failed: {ex}")
+
+        self._restore_failed_launch_options()
 
         # ── Re-apply GE-Proton compat + Steam Input ──────────────────
         if ge_version:

@@ -422,5 +422,102 @@ class ZombiesRepairTests(unittest.TestCase):
         self.assertEqual(self.file.read_bytes(), b"good")
 
 
+_LOCALCONFIG = '''"UserLocalConfigStore"
+{
+\t"Software"
+\t{
+\t\t"Valve"
+\t\t{
+\t\t\t"Steam"
+\t\t\t{
+\t\t\t\t"apps"
+\t\t\t\t{
+\t\t\t\t\t"10190"
+\t\t\t\t\t{
+\t\t\t\t\t\t"LaunchOptions"\t\t"MINE=1 \\"quoted\\" %command%"
+\t\t\t\t\t}
+\t\t\t\t\t"42690"
+\t\t\t\t\t{
+\t\t\t\t\t\t"LaunchOptions"\t\t"other %command%"
+\t\t\t\t\t}
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t}
+}
+'''
+
+
+class LaunchOptionRestoreTests(unittest.TestCase):
+    """A game that fails during Update Games must keep its launch options."""
+
+    def setUp(self):
+        import wrapper
+        self.wrapper = wrapper
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        self.vdf = Path(self.root, "userdata", "123", "config", "localconfig.vdf")
+        self.vdf.parent.mkdir(parents=True)
+        self.vdf.write_text(_LOCALCONFIG)
+        ledger = patch.object(wrapper, "LEDGER_PATH", str(Path(self.root, "ledger.json")))
+        ledger.start()
+        self.addCleanup(ledger.stop)
+
+    def _options(self, appid):
+        import wrapper
+        content = self.vdf.read_text()
+        found = wrapper._flat_values(content, wrapper._app_block(content, appid), "LaunchOptions")
+        return content[found[0][1]:found[0][2]] if found else None
+
+    def test_snapshot_and_restore_round_trip(self):
+        w = self.wrapper
+        snap = w.snapshot_launch_options(self.root, ["10190", "42690", "7940"])
+        self.assertEqual(snap, {"10190": {"123": 'MINE=1 \\"quoted\\" %command%'},
+                                "42690": {"123": "other %command%"}})
+        w.clear_launch_options(self.root, "10190")
+        self.assertEqual(self._options("10190"), "")
+        self.assertEqual(w.restore_launch_options(self.root, snap, "10190"), ["123"])
+        self.assertEqual(self._options("10190"), 'MINE=1 \\"quoted\\" %command%')
+
+    def test_restore_never_overwrites_a_newer_value(self):
+        w = self.wrapper
+        snap = w.snapshot_launch_options(self.root, ["10190"])
+        w.clear_launch_options(self.root, "10190")
+        w.set_launch_options(self.root, "10190", "new %command%")
+        self.assertEqual(w.restore_launch_options(self.root, snap, "10190"), [])
+        self.assertEqual(self._options("10190"), "new %command%")
+
+    def test_failed_game_in_update_games_keeps_its_launch_options(self):
+        try:
+            import os
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        app = QApplication.instance() or QApplication([])
+        import ui_manage
+        from ui_constants import ALL_GAMES
+        gd = next(g for g in ALL_GAMES if "iw4mp" in g.get("keys", []))
+        screen = ui_manage.UpdateScreen(None)
+        screen.steam_root = self.root
+        screen.selected = [("iw4mp", gd, {"install_dir": str(Path(self.root, "mw2")), "source": "steam"})]
+        with patch.object(ui_manage, "_log_to_file"), \
+             patch.object(ui_manage, "inhibit"), \
+             patch.object(ui_manage.cfg, "is_lcd", return_value=False), \
+             patch.object(ui_manage.cfg, "get_setup_games", return_value={"iw4mp": {"client": "iw4x"}}), \
+             patch("wrapper.kill_steam"), patch("wrapper.get_proton_path", return_value="proton"), \
+             patch("wrapper.find_compatdata", return_value=self.root), \
+             patch("wrapper.set_compat_tool"), patch("wrapper.set_steam_input_enabled"), \
+             patch("ge_proton.install_ge_proton", side_effect=OSError("offline")), \
+             patch("ge_proton.resolve_ge_version", return_value=None), \
+             patch("iw4x.install_iw4x", side_effect=RuntimeError("download failed")):
+            screen._run()
+        app.processEvents()
+        self.assertEqual([k for k, _, _ in screen._failed_games], ["iw4mp"])
+        self.assertEqual(self._options("10190"), 'MINE=1 \\"quoted\\" %command%')
+        self.assertEqual(self._options("42690"), "other %command%")
+
+
 if __name__ == "__main__":
     unittest.main()
