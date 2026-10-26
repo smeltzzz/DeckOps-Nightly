@@ -1378,6 +1378,15 @@ class ConfigureScreen(QWidget):
         sc_fix_btn.setFixedWidth(220); sc_fix_btn.clicked.connect(self._repair_shortcuts)
         left.addWidget(sc_fix_btn)
 
+        # ── Left: Save Backup ─────────────────────────────────────────────
+        _head(left, "Save Backup")
+        left.addWidget(_lbl("Copies your saves, stats and Plutonium mods to a safe folder that "
+                            "survives uninstalling. Steam can stay open.",
+                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        backup_btn = _btn("Back Up My Saves Now", C_DARK_BTN, size=12, h=40)
+        backup_btn.setFixedWidth(220); backup_btn.clicked.connect(self._backup_saves_now)
+        left.addWidget(backup_btn)
+
         # ── Left: Player Name ─────────────────────────────────────────────
         _head(left, "Player Name")
         nr = QHBoxLayout(); nr.setSpacing(12)
@@ -1681,6 +1690,26 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✓  Player name set to \"{name}\" ({count} config(s) updated).")
             except Exception as ex:
                 s.log.emit(f"✗  Failed: {ex}")
+            finally:
+                s.done.emit(True)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _backup_saves_now(self):
+        s = _Sigs()
+        if not self._settings_task(s):
+            return
+        self.status.setText("Backing up your saves...")
+        s.log.connect(lambda msg: self.status.setText(msg))
+        def _run():
+            try:
+                from save_backup import backup_saves, describe_backup
+                failures = []
+                backed_up = backup_saves(find_steam_root(), failures=failures,
+                                         on_progress=lambda m: _log.info("save backup: %s", m.strip()))
+                s.log.emit(describe_backup(backed_up, failures))
+            except Exception as ex:
+                _log.error("save backup failed", exc_info=True)
+                s.log.emit(f"✗  Save backup failed: {ex}")
             finally:
                 s.done.emit(True)
         threading.Thread(target=_run, daemon=True).start()
@@ -2052,6 +2081,55 @@ class UpdateScreen(QWidget):
         self._s.done.connect(self._on_done)
         self._s.plut_wait.connect(lambda: self.steam_btn.setVisible(True))
         self._s.plut_go.connect(lambda: self.steam_btn.setVisible(False))
+        self._s.ask.connect(self._ask_continue)
+        self._ask_event = threading.Event()
+        self._ask_yes = False
+        self._cancelled = False
+
+    def _ask_continue(self, text):
+        """UI thread: answer a worker's Yes/No question (see _confirm)."""
+        try:
+            self._ask_yes = QMessageBox.question(self, "Save Backup", text) == QMessageBox.StandardButton.Yes
+        finally:
+            self._ask_event.set()
+
+    def _confirm(self, text):
+        """Worker thread: ask the player and wait for the answer."""
+        self._ask_yes = False
+        self._ask_event.clear()
+        self._s.ask.emit(text)
+        self._ask_event.wait()
+        return self._ask_yes
+
+    def _backup_first(self):
+        """Back up saves before anything is changed. If the backup is
+        incomplete the player decides whether to go on; No ends the update
+        with nothing touched. Returns True to continue."""
+        self._s.progress.emit(1, "Backing up your saves...")
+        self._s.log.emit("Backing up your saves before updating...")
+        failures = []
+        try:
+            from save_backup import backup_saves, describe_backup
+            backed_up = backup_saves(self.steam_root, failures=failures,
+                                     on_progress=lambda m: self._s.log.emit(f"  {m.strip()}"),
+                                     installed_games={k: g for k, _, g in self.selected if g})
+            self._s.log.emit(describe_backup(backed_up, failures))
+        except Exception as ex:
+            _log.error("save backup before update failed", exc_info=True)
+            failures.append("all")
+            self._s.log.emit(f"⚠  Save backup failed: {ex}")
+        if not failures:
+            return True
+        if self._confirm("Your saves could not be fully backed up (see the log).\n\n"
+                         "Updating does not normally touch saves, but without a backup a problem "
+                         "could not be undone.\n\nContinue updating anyway?"):
+            self._s.log.emit("  Continuing without a complete save backup.")
+            return True
+        self._cancelled = True
+        self._s.log.emit("Update cancelled. Nothing was changed.")
+        self._s.progress.emit(100, "Update cancelled.")
+        self._s.done.emit(False)
+        return False
 
     def _append_log(self, text):
         self.log.appendHtml(_log_html(text))
@@ -2074,6 +2152,7 @@ class UpdateScreen(QWidget):
         self._failed_games = []
         self._failed_zd = False
         self._zd_missing = False
+        self._cancelled = False
         self._steam_closed.clear()
         inhibit.start("DeckOps is updating")
         _log_to_file("── Update started ──")
@@ -2084,6 +2163,9 @@ class UpdateScreen(QWidget):
         self.back_btn.setVisible(True)
         if ok:
             self.cur.setText("Update complete. It is now safe to open Steam.")
+            return
+        if self._cancelled:
+            self.cur.setText("Update cancelled. Nothing was changed.")
             return
         if self._failed_games:
             names = ", ".join(dict.fromkeys(gd["base"] for _, gd, _ in self._failed_games))
@@ -2160,6 +2242,8 @@ class UpdateScreen(QWidget):
                 return
             self._s.progress.emit(100, "All done!")
             self._s.done.emit(True)
+            return
+        if not self._backup_first():
             return
         from wrapper import get_proton_path, find_compatdata, kill_steam, set_compat_tool
         from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS

@@ -687,6 +687,18 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
     return restored
 
 
+def describe_backup(backed_up: dict, failures: list) -> str:
+    """One line for the player about a backup_saves() run."""
+    if failures:
+        if "*" in failures:
+            return f"⚠  Could not create the backup folder ({BACKUP_ROOT}). Nothing was backed up."
+        return (f"⚠  Backup incomplete for: {', '.join(failures)}. Earlier backups of those were kept. "
+                "Check your free space and the log.")
+    if backed_up:
+        return f"✓  Saves backed up for {len(backed_up)} game group(s) to {BACKUP_ROOT}."
+    return "No save data found to back up."
+
+
 def has_backups() -> bool:
     """Return True if any save backups exist."""
     meta_path = os.path.join(BACKUP_ROOT, "backup_info.json")

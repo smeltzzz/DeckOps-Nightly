@@ -586,9 +586,11 @@ class LaunchOptionRestoreTests(unittest.TestCase):
         self.assertEqual(w.restore_launch_options(self.root, snap, "10190"), [])
         self.assertEqual(self._options("10190"), "new %command%")
 
-    def test_failed_game_in_update_games_keeps_its_launch_options(self):
+    def _run_update_games(self, backup=None, confirm=None):
+        """Run UpdateScreen's real Update Games steps for MW2 MP with Steam,
+        downloads and the MW2 installer (which fails) faked. Returns
+        (screen, order of the backup / Steam-close / install steps)."""
         try:
-            import os
             os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
             from PyQt6.QtWidgets import QApplication
         except ImportError:
@@ -600,21 +602,59 @@ class LaunchOptionRestoreTests(unittest.TestCase):
         screen = ui_manage.UpdateScreen(None)
         screen.steam_root = self.root
         screen.selected = [("iw4mp", gd, {"install_dir": str(Path(self.root, "mw2")), "source": "steam"})]
+        order = []
+
+        def fake_backup(*a, failures=None, **kw):
+            order.append("backup")
+            return backup(failures) if backup else {}
+
+        def fake_install(*a, **kw):
+            order.append("install")
+            raise RuntimeError("download failed")
         with patch.object(ui_manage, "_log_to_file"), \
              patch.object(ui_manage, "inhibit"), \
              patch.object(ui_manage.cfg, "is_lcd", return_value=False), \
              patch.object(ui_manage.cfg, "get_setup_games", return_value={"iw4mp": {"client": "iw4x"}}), \
-             patch("wrapper.kill_steam"), patch("wrapper.get_proton_path", return_value="proton"), \
+             patch.object(screen, "_confirm", create=True, side_effect=lambda text: confirm), \
+             patch("save_backup.backup_saves", side_effect=fake_backup), \
+             patch("wrapper.kill_steam", side_effect=lambda **kw: order.append("close steam")), \
+             patch("wrapper.get_proton_path", return_value="proton"), \
              patch("wrapper.find_compatdata", return_value=self.root), \
              patch("wrapper.set_compat_tool"), patch("wrapper.set_steam_input_enabled"), \
              patch("ge_proton.install_ge_proton", side_effect=OSError("offline")), \
              patch("ge_proton.resolve_ge_version", return_value=None), \
-             patch("iw4x.install_iw4x", side_effect=RuntimeError("download failed")):
+             patch("iw4x.install_iw4x", side_effect=fake_install):
             screen._run()
         app.processEvents()
+        return screen, order
+
+    def test_failed_game_in_update_games_keeps_its_launch_options(self):
+        screen, _ = self._run_update_games()
         self.assertEqual([k for k, _, _ in screen._failed_games], ["iw4mp"])
         self.assertEqual(self._options("10190"), 'MINE=1 \\"quoted\\" %command%')
         self.assertEqual(self._options("42690"), "other %command%")
+
+    def test_update_games_backs_up_saves_before_changing_anything(self):
+        _, order = self._run_update_games()
+        self.assertEqual(order, ["backup", "close steam", "install"])
+
+    def test_incomplete_backup_and_player_says_no_changes_nothing(self):
+        before = self.vdf.read_text()
+        screen, order = self._run_update_games(backup=lambda f: f.append("cod4") or {}, confirm=False)
+        self.assertEqual(order, ["backup"])
+        self.assertEqual(self.vdf.read_text(), before)
+        self.assertEqual(screen.cur.text(), "Update cancelled. Nothing was changed.")
+
+    def test_incomplete_backup_and_player_says_yes_continues(self):
+        _, order = self._run_update_games(backup=lambda f: f.append("cod4") or {}, confirm=True)
+        self.assertEqual(order, ["backup", "close steam", "install"])
+
+    def test_backup_message_is_honest(self):
+        import save_backup as sb
+        self.assertIn("incomplete for: cod4", sb.describe_backup({"mw2": "x"}, ["cod4"]))
+        self.assertIn("Could not create", sb.describe_backup({}, ["*"]))
+        self.assertTrue(sb.describe_backup({"mw2": "x"}, []).startswith("✓"))
+        self.assertEqual(sb.describe_backup({}, []), "No save data found to back up.")
 
 
 if __name__ == "__main__":

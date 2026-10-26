@@ -537,6 +537,8 @@ class _Sigs(QObject):
     done        = pyqtSignal(bool)
     plut_wait   = pyqtSignal()
     plut_go     = pyqtSignal()
+    # Yes/No question from a worker thread (UpdateScreen: incomplete save backup)
+    ask         = pyqtSignal(str)
     pulse_start = pyqtSignal(str)
     pulse_stop  = pyqtSignal()
     # Download retry dialog: (label, error_msg)
