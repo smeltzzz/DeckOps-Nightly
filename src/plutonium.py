@@ -891,6 +891,78 @@ def add_steam_menu(game: dict, game_key: str, steam_root: str, prog):
     added = add_launch_entries(steam_root, appid, entries)
     prog(92, "  ✓ Launch menu: " + " / ".join(e["description"] for e in entries if "tag" not in e) if added
              else "  ⚠ Launch menu not added yet, will retry next time Steam is closed")
+    try:
+        add_host_menu(game, game_key, steam_root, lambda m: prog(92, m))
+    except Exception as ex:
+        _log.warning("host tile menu skipped for %s: %s", game_key, ex)
+
+
+# MW3, BO1 and BO2 have their SP and MP / ZM on separate Steam appids. On OLED /
+# Other the SP tile's launch menu also gets the Plutonium MP / ZM entries, so one
+# tile (the "host") covers the whole game. The MP / ZM tiles are left as they are;
+# hide them in Steam if you don't want them.
+#   key -> (host appid, host key, menu label)
+# Online only: the Offline entry's file is run through prelaunch.sh, which the
+# host tile's launch option doesn't include. The online wrapper scripts export
+# their own prefix, so they run from any tile.
+HOST_MENU = {
+    "iw5mp": (42680,  "iw5sp", "Play Plutonium Multiplayer Online"),
+    "t5mp":  (42700,  "t5sp",  "Play Plutonium Multiplayer Online"),
+    "t6mp":  (202970, "t6sp",  "Play Plutonium Multiplayer Online"),
+    "t6zm":  (202970, "t6sp",  "Play Plutonium Zombies Online"),
+}
+
+
+def add_host_menu(game: dict, game_key: str, steam_root: str, log=lambda m: None,
+                  installed: dict = None) -> bool:
+    """Add game_key's online Plutonium entry to its host SP tile's launch menu
+    (see HOST_MENU). OLED / Other, Steam games only. The entry is a file name
+    relative to the host's install folder, so it is only added when the host
+    game is in the same folder as the MP / ZM files. Returns True if added."""
+    host = HOST_MENU.get(game_key)
+    if not host:
+        return False
+    import config as _cfg
+    if _cfg.is_lcd():
+        return False
+    appid, host_key, label = host
+    online = STEAM_MENU_EXES[game_key][0]
+    d = game.get("install_dir", "")
+    if not d or not os.path.isfile(os.path.join(d, online)):
+        return False
+
+    if installed is None:
+        from detect_games import parse_library_folders, find_installed_games
+        installed = find_installed_games(parse_library_folders(steam_root), steam_root)
+    host_dir = (installed.get(host_key) or {}).get("install_dir", "")
+    if not host_dir or os.path.realpath(host_dir) != os.path.realpath(d):
+        log(f"  ⚠ {label}: {host_key} is not in the same folder, SP tile menu skipped")
+        return False
+
+    from steam_appinfo import add_launch_entries
+    if add_launch_entries(steam_root, appid, [{"executable": online, "description": label}]):
+        log(f"  ✓ {label} added to the {host_key} tile ({appid})")
+        return True
+    log(f"  ⚠ {label} not added to {appid} yet, will retry next time Steam is closed")
+    return False
+
+
+def ensure_host_menus(steam_root: str, log=lambda m: None) -> list:
+    """add_host_menu for every set-up Plutonium Steam game that has a host
+    tile. Safe to repeat (entries are matched by executable). Steam must be
+    closed. Returns the keys that got an entry."""
+    import config as _cfg
+    if _cfg.is_lcd():
+        return []
+    setup = _cfg.get_setup_games()
+    keys = [k for k in HOST_MENU if setup.get(k, {}).get("client") == "plutonium"
+            and setup[k].get("source", "steam") == "steam"]
+    if not keys:
+        return []
+    from detect_games import parse_library_folders, find_installed_games
+    installed = find_installed_games(parse_library_folders(steam_root), steam_root)
+    return [k for k in keys if k in installed
+            and add_host_menu(installed[k], k, steam_root, log, installed)]
 
 
 def remove_offline_files(game: dict, game_key: str):

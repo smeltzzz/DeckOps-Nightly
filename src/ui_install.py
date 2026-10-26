@@ -2470,17 +2470,11 @@ class _BaseInstallScreen(QWidget):
                                 for k in steam_keys)
             has_waw_steam = any(k in ("t4sp", "t4mp") for k in steam_keys)
             defaults = {}
-            clear_picker = []
             if has_cod4_steam:
-                from shortcut import mp_on_main_tile
-                if mp_on_main_tile("cod4mp"):
-                    # CoD4R MP is on this tile too: keep Steam's SP/MP picker
-                    clear_picker.append("7940")
-                else:
-                    defaults["7940"] = ("7a722f97", "1")   # CoD4 -> Singleplayer
+                # CoD4 -> Singleplayer. With CoD4R, MP is the main menu's
+                # Multiplayer button on this same tile.
+                defaults["7940"] = ("7a722f97", "1")
             # WaW keeps Steam's picker for its Plutonium entries
-            if has_waw_steam:
-                clear_picker.append("10090")
             if defaults:
                 try:
                     from wrapper import set_default_launch_option
@@ -2488,12 +2482,12 @@ class _BaseInstallScreen(QWidget):
                     self._s.log.emit("✓  Default launch options set (SP mode)")
                 except Exception as ex:
                     self._s.log.emit(f"  Launch options skipped: {ex}")
-            if clear_picker:
+            if has_waw_steam:
                 try:
                     from wrapper import clear_default_launch_option
-                    clear_default_launch_option(self.steam_root, clear_picker)
+                    clear_default_launch_option(self.steam_root, ["10090"])
                 except Exception as ex:
-                    self._s.log.emit(f"  Launch picker reset skipped: {ex}")
+                    self._s.log.emit(f"  WaW launch picker reset skipped: {ex}")
 
         # --- Steam artwork
         if steam_sel:

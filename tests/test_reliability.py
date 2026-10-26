@@ -1143,5 +1143,46 @@ class MergedMpTileTests(unittest.TestCase):
         self.assertEqual(rm.call_count, 1)
 
 
+class HostMenuTests(unittest.TestCase):
+    """MW3 / BO1 / BO2: the MP and ZM Plutonium entries also go on the SP
+    tile's launch menu, but only when the SP game is in the same folder."""
+
+    def _add(self, key, files, host_dir=None, lcd=False):
+        import plutonium
+        with tempfile.TemporaryDirectory() as d:
+            for n in files:
+                Path(d, n).write_text("x")
+            host_key = plutonium.HOST_MENU[key][1]
+            installed = {host_key: {"install_dir": d if host_dir is None else host_dir}}
+            with patch("config.is_lcd", return_value=lcd), \
+                 patch("steam_appinfo.add_launch_entries", return_value=True) as add:
+                ok = plutonium.add_host_menu({"install_dir": d}, key, "steam", installed=installed)
+        return ok, add
+
+    def test_entry_goes_on_the_sp_appid(self):
+        for key, appid, exe in (("iw5mp", 42680, "iw5plutmp.exe"), ("t5mp", 42700, "t5plutmp.exe"),
+                                ("t6mp", 202970, "t6plutmp.exe"), ("t6zm", 202970, "t6plutzm.exe")):
+            ok, add = self._add(key, [exe])
+            self.assertTrue(ok, key)
+            args = add.call_args[0]
+            self.assertEqual(args[1], appid)
+            self.assertEqual(args[2][0]["executable"], exe)
+
+    def test_skipped_when_wrapper_is_missing(self):
+        ok, add = self._add("t6mp", [])
+        self.assertFalse(ok)
+        add.assert_not_called()
+
+    def test_skipped_when_sp_is_in_another_folder(self):
+        ok, add = self._add("iw5mp", ["iw5plutmp.exe"], host_dir=os.path.join(tempfile.gettempdir(), "elsewhere"))
+        self.assertFalse(ok)
+        add.assert_not_called()
+
+    def test_skipped_on_lcd(self):
+        ok, add = self._add("iw5mp", ["iw5plutmp.exe"], lcd=True)
+        self.assertFalse(ok)
+        add.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
