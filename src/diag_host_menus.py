@@ -1,0 +1,107 @@
+"""
+diag_host_menus.py - why is (or isn't) a Plutonium MP/ZM entry on an SP tile?
+
+    .venv/bin/python3 src/diag_host_menus.py           read-only report
+    .venv/bin/python3 src/diag_host_menus.py --apply   also run ensure_host_menus
+                                                       (close Steam first)
+
+The report is printed and saved to ~/deckops-diag.txt.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import config as c
+import steam_appinfo as a
+from detect_games import parse_library_folders, find_installed_games, find_steam_root
+
+OUT = os.path.expanduser("~/deckops-diag.txt")
+LINES = []
+
+
+def say(*parts):
+    line = " ".join(str(p) for p in parts)
+    print(line)
+    LINES.append(line)
+
+
+def launch_entries(ai, appid):
+    span = ai.find_app(appid)
+    if not span:
+        return "NOT in appinfo.vdf"
+    st, en = span
+    node, _ = ai.parse_kv(bytes(ai.data[st + 8 + a._HDR.size:en]))
+    launch = a._dict(a._dict(a._dict(node, "appinfo") or [], "config") or [], "launch")
+    if not launch:
+        return "no launch entries"
+    return [(i[1], a._get(i[2], "executable")[2].decode(),
+             (a._get(i[2], "description") or [0, 0, b""])[2].decode()) for i in launch]
+
+
+def main():
+    cfg = c.load()
+    sr = cfg.get("steam_root") or find_steam_root()
+    say("steam_root:", sr)
+    say("deck_model:", cfg.get("deck_model"), "| is_lcd:", c.is_lcd())
+    say("VERSION:", open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")).read().strip())
+
+    setup = c.get_setup_games()
+    for k in ("iw5mp", "t5mp", "t6mp", "t6zm"):
+        e = setup.get(k)
+        say("setup", k, "->", {x: e.get(x) for x in ("client", "source")} if e else None)
+
+    inst = find_installed_games(parse_library_folders(sr), sr)
+    for k in ("iw5sp", "iw5mp", "t5sp", "t5mp", "t6sp", "t6mp", "t6zm"):
+        d = (inst.get(k) or {}).get("install_dir")
+        say("dir", k, "->", d)
+
+    from plutonium import HOST_MENU, STEAM_MENU_EXES
+    for k, (appid, host_key, label) in HOST_MENU.items():
+        d = (inst.get(k) or {}).get("install_dir", "")
+        wrapper = os.path.join(d, STEAM_MENU_EXES[k][0]) if d else ""
+        say("wrapper", k, "->", STEAM_MENU_EXES[k][0], "exists:", bool(wrapper and os.path.isfile(wrapper)),
+            "| same folder as", host_key + ":",
+            bool(d and (inst.get(host_key) or {}).get("install_dir")
+                 and os.path.realpath(d) == os.path.realpath(inst[host_key]["install_dir"])))
+
+    try:
+        ai = a._AppInfo(open(a.appinfo_path(sr), "rb").read())
+        for appid in (42680, 42700, 202970):
+            say("appinfo", appid, "->", launch_entries(ai, appid))
+    except Exception as ex:
+        say("appinfo unreadable:", ex)
+
+    say("recorded launch_menus:",
+        {k: [e["executable"] for e in v] for k, v in cfg.get("launch_menus", {}).items()})
+
+    if "--apply" in sys.argv:
+        import plutonium
+        say("--- ensure_host_menus ---")
+        say("added:", plutonium.ensure_host_menus(sr, say))
+        try:
+            ai = a._AppInfo(open(a.appinfo_path(sr), "rb").read())
+            for appid in (42680, 42700, 202970):
+                say("appinfo after", appid, "->", launch_entries(ai, appid))
+        except Exception as ex:
+            say("appinfo unreadable:", ex)
+
+    try:
+        from identity import LOG_DIR
+        log = os.path.join(LOG_DIR, "install.log")
+        with open(log, errors="replace") as f:
+            hits = [l.rstrip() for l in f if any(w in l.lower() for w in ("launch menu", "appinfo", "host tile"))]
+        say("--- install.log (last 15 menu lines) ---")
+        for l in hits[-15:]:
+            say(l)
+    except Exception as ex:
+        say("install.log not read:", ex)
+
+    with open(OUT, "w") as f:
+        f.write("\n".join(LINES) + "\n")
+    print("\nSaved to", OUT)
+
+
+if __name__ == "__main__":
+    main()
