@@ -1387,6 +1387,15 @@ class ConfigureScreen(QWidget):
         backup_btn.setFixedWidth(220); backup_btn.clicked.connect(self._backup_saves_now)
         left.addWidget(backup_btn)
 
+        # ── Left: Check My Setup ──────────────────────────────────────────
+        _head(left, "Check My Setup")
+        left.addWidget(_lbl("Checks each game's folder, mod files, GE-Proton and Steam launch option. "
+                            "Changes nothing; Fix runs that game's Update.",
+                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        check_btn = _btn("Check My Setup", C_DARK_BTN, size=12, h=40)
+        check_btn.setFixedWidth(220); check_btn.clicked.connect(self._check_setup)
+        left.addWidget(check_btn)
+
         # ── Left: Player Name ─────────────────────────────────────────────
         _head(left, "Player Name")
         nr = QHBoxLayout(); nr.setSpacing(12)
@@ -1736,6 +1745,81 @@ class ConfigureScreen(QWidget):
             finally:
                 s.done.emit(True)
         threading.Thread(target=_run, daemon=True).start()
+
+    def _check_setup(self):
+        """Run setup_check in the background, then show the report."""
+        s = _Sigs()
+        if not self._settings_task(s):
+            return
+        self.status.setText("Checking your setup...")
+        self._setup_results = None
+
+        def _run():
+            try:
+                from setup_check import check_setup
+                mgmt = get_screen(self.stack, "ManagementScreen")
+                installed = (getattr(mgmt, "installed", None) or find_all_games())
+                self._setup_results = (check_setup(find_steam_root(), installed, cfg.get_setup_games()),
+                                       installed)
+                s.log.emit("Setup check finished.")
+            except Exception as ex:
+                _log.error("setup check failed", exc_info=True)
+                s.log.emit(f"✗  Setup check failed: {ex}")
+            finally:
+                s.done.emit(True)
+
+        def _show(msg):
+            self.status.setText(msg)
+            if self._setup_results:
+                self._show_setup_report(*self._setup_results)
+        s.log.connect(_show)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _show_setup_report(self, results, installed):
+        self._setup_installed = installed
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Check My Setup")
+        dlg.resize(720, 480)
+        vl = QVBoxLayout(dlg); vl.setContentsMargins(12,12,12,12); vl.setSpacing(8)
+        bad = [r for r in results if r["problems"]]
+        vl.addWidget(_lbl("No games are set up yet." if not results else
+                          "Everything looks fine." if not bad else
+                          f"{len(bad)} of {len(results)} game(s) need attention.",
+                          13, "#CCC", bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        inner = QWidget(); rows = QVBoxLayout(inner); rows.setSpacing(8)
+        for r in results:
+            row = QHBoxLayout()
+            text = f"✓  {r['name']}" if not r["problems"] else \
+                f"⚠  {r['name']}\n" + "\n".join("     • " + p for p in r["problems"])
+            row.addWidget(_lbl(text, 11, C_DIM if not r["problems"] else "#E0B050",
+                               align=Qt.AlignmentFlag.AlignLeft), stretch=1)
+            if r["fixable"]:
+                fix = _btn("Fix", C_IW, size=11, h=36); fix.setFixedWidth(90)
+                fix.clicked.connect(lambda _c=False, k=r["key"]: (dlg.accept(), self._fix_game(k)))
+                row.addWidget(fix)
+            rows.addLayout(row)
+        rows.addStretch()
+        scroll.setWidget(inner)
+        vl.addWidget(scroll, stretch=1)
+        close = _btn("Close", C_DARK_BTN, size=11, h=40); close.setFixedWidth(130)
+        close.clicked.connect(dlg.reject)
+        br = QHBoxLayout(); br.addStretch(); br.addWidget(close); br.addStretch()
+        vl.addLayout(br)
+        self._setup_dialog = dlg
+        dlg.exec()
+
+    def _fix_game(self, key):
+        """Fix = the game's normal Update (reinstalls the client, GE-Proton,
+        launch options; closes Steam itself)."""
+        gd = next((g for g in ALL_GAMES if key in g.get("keys", [])), None)
+        mgmt = get_screen(self.stack, "ManagementScreen")
+        if not mgmt.installed:          # My Games hasn't scanned yet: use the check's scan
+            mgmt.installed = dict(getattr(self, "_setup_installed", None) or {})
+        if not gd or not mgmt.installed.get(key):
+            self.status.setText("That game could not be found; open My Games and try again.")
+            return
+        mgmt._update(gd, [key])
 
     def _view_log(self):
         from ui_constants import LOG_PATH

@@ -15,6 +15,16 @@ import depot_downgrade as depot
 import update_manifest
 import zombies_declassified as zd
 
+_QAPP = []
+
+
+def _qapp(QApplication):
+    """One QApplication for the whole run. A test-local one could be garbage
+    collected when the test's helper returned, deleting every widget with it."""
+    if not _QAPP:
+        _QAPP.append(QApplication.instance() or QApplication([]))
+    return _QAPP[0]
+
 
 class UpdateManifestTests(unittest.TestCase):
     def test_renames_and_deletions_are_explicit(self):
@@ -417,7 +427,7 @@ class InstallStopsWhenSteamStaysOpenTests(unittest.TestCase):
             from PyQt6.QtWidgets import QApplication
         except ImportError:
             self.skipTest("PyQt6 not installed")
-        app = QApplication.instance() or QApplication([])
+        app = _qapp(QApplication)
         import ui_install
         screen = ui_install.InstallScreen(None)
         screen.steam_selected, screen.own_selected = [], {}
@@ -633,6 +643,133 @@ _LOCALCONFIG = '''"UserLocalConfigStore"
 '''
 
 
+class SetupCheckTests(unittest.TestCase):
+    """Check My Setup: read-only, and only reports real problems."""
+
+    CONFIG = ('"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+              '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n%s\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+    MAP = '\t\t\t\t\t"%s"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"%s"\n\t\t\t\t\t\t"config"\t\t""\n\t\t\t\t\t}\n'
+    LOCAL = ('"UserLocalConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+             '\t\t\t\t"apps"\n\t\t\t\t{\n%s\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+    APP = '\t\t\t\t\t"%s"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LaunchOptions"\t\t"%s"\n\t\t\t\t\t}\n'
+
+    def setUp(self):
+        import setup_check
+        self.sc = setup_check
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name, "Steam")
+        self.inst = Path(self.tmp.name, "DeckOps-Nightly")
+        self.inst.mkdir()
+        (self.inst / "prelaunch.sh").write_text("#!/bin/bash\n")
+        p = patch("identity.INSTALL_DIR", self.inst.as_posix())
+        p.start(); self.addCleanup(p.stop)
+        (self.root / "config").mkdir(parents=True)
+        (self.root / "userdata" / "1" / "config").mkdir(parents=True)
+        (self.root / "compatibilitytools.d" / "GE-Proton10-1").mkdir(parents=True)
+        self.mw2 = Path(self.tmp.name, "games", "MW2")
+        self.mw2.mkdir(parents=True)
+        (self.mw2 / "iw4x-launcher.exe").write_text("x")
+        self.setup = {"iw4mp": {"client": "iw4x", "source": "steam"}}
+        self.installed = {"iw4mp": {"install_dir": str(self.mw2)}}
+        self.write(tool="GE-Proton10-1",
+                   option='DECKOPS_MENU=\\"x\\" bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix())
+
+    def write(self, tool=None, option="", appid="10190"):
+        maps = self.MAP % (appid, tool) if tool is not None else ""
+        (self.root / "config" / "config.vdf").write_text(self.CONFIG % maps)
+        (self.root / "userdata" / "1" / "config" / "localconfig.vdf").write_text(
+            self.LOCAL % (self.APP % (appid, option)))
+
+    def check(self):
+        [r] = self.sc.check_setup(str(self.root), self.installed, self.setup)
+        return r
+
+    def test_healthy_game_has_no_problems(self):
+        r = self.check()
+        self.assertEqual(r["problems"], [])
+        self.assertFalse(r["fixable"])
+
+    def test_missing_launch_option_is_reported_and_fixable(self):
+        self.write(tool="GE-Proton10-1", option="")
+        r = self.check()
+        self.assertTrue(any("launch option is missing" in p for p in r["problems"]), r)
+        self.assertTrue(r["fixable"])
+
+    def test_launch_option_calling_a_missing_deckops_file(self):
+        (self.inst / "prelaunch.sh").unlink()
+        r = self.check()
+        self.assertTrue(any("no longer exists" in p and "prelaunch.sh" in p for p in r["problems"]), r)
+
+    def test_ge_proton_mapping(self):
+        opt = 'bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix()
+        self.write(tool="GE-Proton9-99", option=opt)
+        self.assertTrue(any("not installed" in p for p in self.check()["problems"]))
+        self.write(tool=None, option=opt)
+        self.assertTrue(any("GE-Proton" in p for p in self.check()["problems"]))
+        self.write(tool="proton_9", option=opt)            # the player's own choice
+        self.assertEqual(self.check()["problems"], [])
+
+    def test_missing_mod_files_and_missing_folder(self):
+        (self.mw2 / "iw4x-launcher.exe").unlink()
+        r = self.check()
+        self.assertTrue(any("iw4x files are missing" in p for p in r["problems"]) and r["fixable"], r)
+        self.installed = {}
+        r = self.check()
+        self.assertTrue(any("Game folder not found" in p for p in r["problems"]), r)
+        self.assertFalse(r["fixable"])
+
+    def test_cod4x_alone_needs_no_launch_option(self):
+        cod4 = Path(self.tmp.name, "games", "CoD4"); cod4.mkdir()
+        (cod4 / "deckops_cod4x.json").write_text("{}")
+        self.installed = {"cod4mp": {"install_dir": str(cod4)}}
+        self.setup = {"cod4mp": {"client": "cod4x", "source": "steam"}}
+        self.write(tool="GE-Proton10-1", option="", appid="7940")
+        self.assertEqual(self.check()["problems"], [])
+        self.setup = {"cod4mp": {"client": "cod4r", "source": "steam"}}
+        (cod4 / "deckops_cod4r.json").write_text("{}")
+        self.assertTrue(any("launch option is missing" in p for p in self.check()["problems"]))
+
+    def test_own_copy_skips_steam_checks(self):
+        self.setup = {"iw4mp": {"client": "iw4x", "source": "own"}}
+        self.write(tool=None, option="")
+        self.assertEqual(self.check()["problems"], [])
+
+    def test_check_writes_nothing(self):
+        files = sorted(self.root.rglob("*"))
+        before = {p: p.read_bytes() for p in files if p.is_file()}
+        self.write(tool="GE-Proton9-99", option="")
+        before = {p: p.read_bytes() for p in sorted(self.root.rglob("*")) if p.is_file()}
+        self.check()
+        after = {p: p.read_bytes() for p in sorted(self.root.rglob("*")) if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_report_window_and_fix_button(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication, QPushButton
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        app = _qapp(QApplication)
+        import ui_manage
+        screen = ui_manage.ConfigureScreen(None)
+        mgmt = type("M", (), {})()
+        mgmt.installed = {}
+        mgmt._update = unittest.mock.MagicMock()
+        results = [{"key": "iw4mp", "name": "MW2 MP", "problems": ["Its Steam launch option is missing."], "fixable": True},
+                   {"key": "t6mp", "name": "BO2 MP", "problems": [], "fixable": False}]
+        with patch.object(ui_manage, "get_screen", return_value=mgmt), \
+             patch.object(ui_manage.QDialog, "exec", return_value=0):
+            screen._show_setup_report(results, self.installed)
+            fixes = [b for b in screen._setup_dialog.findChildren(QPushButton) if b.text() == "Fix"]
+            self.assertEqual(len(fixes), 1)
+            fixes[0].click()
+        app.processEvents()
+        gd, keys = mgmt._update.call_args[0]
+        self.assertEqual(keys, ["iw4mp"])
+        self.assertIn("iw4mp", gd["keys"])
+
+
 class SteamFileSafetyTests(unittest.TestCase):
     """Steam's files are replaced all at once, checked before writing, keep
     bytes that aren't UTF-8, and keep the player's original copy."""
@@ -760,7 +897,7 @@ class LaunchOptionRestoreTests(unittest.TestCase):
             from PyQt6.QtWidgets import QApplication
         except ImportError:
             self.skipTest("PyQt6 not installed")
-        app = QApplication.instance() or QApplication([])
+        app = _qapp(QApplication)
         import ui_manage
         from ui_constants import ALL_GAMES
         gd = next(g for g in ALL_GAMES if "iw4mp" in g.get("keys", []))
