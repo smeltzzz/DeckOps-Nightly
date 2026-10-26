@@ -9,18 +9,17 @@ All screen classes are imported from split modules:
     ui_manage     — post-install (Management, Configure, SetupComplete, Update)
 """
 
-import sys, os, threading
+import sys, os
 
 from qt import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QWidget, QMessageBox
 from qt import Qt, QTimer
 
-import bootstrap as _bootstrap
 import config as cfg
 import inhibit
 from identity import APP_TITLE
 
 from ui_constants import (
-    C_DIM, C_DARK_BTN, font, _lbl, _title_block, _Sigs,
+    C_DIM, C_DARK_BTN, font, _lbl, _title_block,
     _load_font, _app_style, _start_audio, _kill_audio,
     _set_audio_enabled,
     go_to,
@@ -40,7 +39,7 @@ class BootstrapScreen(QWidget):
         lay.addStretch()
         _title_block(lay)
         lay.addStretch()
-        self.status = _lbl("Preparing...", 13, C_DIM)
+        self.status = _lbl("Opening DeckOps...", 13, C_DIM)
         lay.addWidget(self.status)
         self.bar = QProgressBar(); self.bar.setMaximum(100); self.bar.setTextVisible(False)
         self.bar.setFixedHeight(14)
@@ -54,21 +53,14 @@ class BootstrapScreen(QWidget):
         if e.spontaneous():
             return
         _start_audio()
-        if _bootstrap.all_ready():
-            QTimer.singleShot(300, self._proceed); return
-        self._s = _Sigs()
-        self._s.progress.connect(lambda p,m: (self.bar.setValue(p), self.status.setText(m)))
-        self._s.done.connect(lambda _: QTimer.singleShot(300, self._proceed))
-        threading.Thread(target=lambda: _bootstrap.run(
-            on_progress=lambda p,m: self._s.progress.emit(p,m),
-            on_complete=lambda ok: self._s.done.emit(ok),
-        ), daemon=True).start()
+        # Game artwork is optional and ManagementCard fetches it as needed.
+        # Waiting for every remote image here kept offline users on the splash
+        # screen through repeated network timeouts before they could use DeckOps.
+        QTimer.singleShot(300, self._proceed)
 
     def _proceed(self):
-        # Re-load font and re-apply stylesheet now that bootstrap has completed.
-        # This is a no-op if the font was already loaded at startup, but ensures
-        # the correct font is applied even on a fresh install where bootstrap
-        # runs for the first time.
+        # Load the bundled font if available, then enter the app without
+        # waiting for optional artwork or a network connection.
         try:
             _load_font()
             QApplication.instance().setStyleSheet(_app_style())
@@ -130,6 +122,8 @@ class DeckOpsWindow(QMainWindow):
             f"QPushButton:hover{{background:#444455;}}"
         )
         self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mute_btn.setToolTip("Unmute music" if self._muted else "Mute music")
+        self._mute_btn.setAccessibleName("Unmute music" if self._muted else "Mute music")
         self._mute_btn.clicked.connect(self._toggle_mute)
         self._mute_btn.raise_()
 
@@ -149,6 +143,9 @@ class DeckOpsWindow(QMainWindow):
             _set_audio_enabled(True)
             _start_audio()
             self._mute_btn.setText("\U0001F50A")
+        label = "Unmute music" if self._muted else "Mute music"
+        self._mute_btn.setToolTip(label)
+        self._mute_btn.setAccessibleName(label)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)

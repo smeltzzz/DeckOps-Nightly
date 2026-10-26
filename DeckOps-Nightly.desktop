@@ -2,7 +2,7 @@
 [Desktop Entry]
 Comment[en_US]=
 Comment=
-Exec=bash -c 'TMPFILE=$(mktemp /tmp/deckops_XXXXXX.sh) && curl -fsSL https://raw.githubusercontent.com/smeltzzz/DeckOps-Nightly/main/launcher.sh -o "$TMPFILE" && chmod +x "$TMPFILE" && bash "$TMPFILE"; rm -f "$TMPFILE"'
+Exec=bash -c 'if [ -f "$HOME/DeckOps-Nightly/launcher.sh" ]; then bash "$HOME/DeckOps-Nightly/launcher.sh"; else TMPFILE=$(mktemp /tmp/deckops_XXXXXX.sh) && curl -fsSL https://raw.githubusercontent.com/smeltzzz/DeckOps-Nightly/main/launcher.sh -o "$TMPFILE" && bash "$TMPFILE"; rm -f "$TMPFILE"; fi'
 GenericName[en_US]=
 GenericName=
 MimeType=

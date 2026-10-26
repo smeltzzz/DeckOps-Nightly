@@ -6,7 +6,7 @@ Screens: ManagementCard, ManagementScreen, SetupCompleteScreen,
 Extracted from ui_qt.py — all hardcoded stack indices replaced with named lookups.
 """
 
-import os, subprocess, sys, shutil, stat, threading, json, urllib.request, urllib.error, urllib.parse, compileall
+import os, subprocess, sys, shutil, threading, json, urllib.request, urllib.error, urllib.parse, compileall
 
 from qt import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea,
@@ -274,6 +274,7 @@ class ManagementCard(QFrame):
         try:
             from net import download
             dest = _header_path(appid)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
             download(url, dest, timeout=10)
             self._img_sigs.log.emit(dest)
         except Exception:
@@ -728,7 +729,7 @@ class ManagementScreen(QWidget):
             info = cfg.get_zd_info()
             tag = info.get("release_tag", "unknown")
             msg.setText(f"Zombies Declassified {tag} is installed.\nWhat would you like to do?")
-            upd_btn = msg.addButton("Check for Updates", QMessageBox.ButtonRole.AcceptRole)
+            upd_btn = msg.addButton("Check and Repair", QMessageBox.ButtonRole.AcceptRole)
             rm_btn  = msg.addButton("Uninstall", QMessageBox.ButtonRole.DestructiveRole)
         else:
             msg.setText(
@@ -779,12 +780,12 @@ class ManagementScreen(QWidget):
             pd.setCancelButtonText("OK")
             pd.canceled.connect(pd.close)
             pd.show()       # if Escape hid it while the worker ran
-            if action == "install":
+            if action == "install" and result_msg == "Zombies Declassified installed!":
                 from zombies_declassified import get_zd_info as _get_info
                 info = _get_info(_st6)
                 if info.get("manifest_hash"):
                     cfg.mark_zd_installed(info["manifest_hash"])
-            elif action == "uninstall":
+            elif action == "uninstall" and result_msg == "Zombies Declassified removed.":
                 cfg.unmark_zd_installed()
         sigs.done.connect(_on_done)
 
@@ -804,9 +805,9 @@ class ManagementScreen(QWidget):
                         info = _get_info(_st6)
                         if info.get("manifest_hash"):
                             cfg.mark_zd_installed(info["manifest_hash"])
-                        sigs.done.emit("Updated!")
+                        sigs.done.emit("Zombies Declassified checked and repaired!")
                     else:
-                        sigs.done.emit("Already up to date.")
+                        sigs.done.emit("Files checked; no changes needed.")
                 elif action == "uninstall":
                     uninstall_zd(_st6, lambda p, m: sigs.progress.emit(p, m))
                     sigs.done.emit("Zombies Declassified removed.")
@@ -1846,12 +1847,26 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=self._apply_worker, daemon=True).start()
 
     def _apply_worker(self):
-        """Download every file that differs from GitHub main, stage, check, apply, then signal relaunch."""
+        from update_manifest import update_lock
+        try:
+            with update_lock(PROJECT_ROOT):
+                self._apply_worker_locked()
+        except BlockingIOError:
+            self._apply_sig.log.emit("FAIL|Another DeckOps update is running. Wait for it to finish and try again.")
+        except OSError as ex:
+            _log.error("Cannot lock DeckOps update", exc_info=True)
+            self._apply_sig.log.emit(f"FAIL|Could not start DeckOps update: {ex}")
+
+    def _apply_worker_locked(self):
+        """Download differing files, then apply them as a recoverable update."""
         from net import download
         from steam_common import git_blob_sha
+        from update_manifest import apply_update, recover_update
         install_dir = PROJECT_ROOT
         update_dir = os.path.join(install_dir, ".update")
         try:
+            if recover_update(install_dir):
+                _log.warning("Rolled back an interrupted DeckOps update before retrying")
             local_sha, remote_sha, stale, gone = _remote_changes(removed=True)
             if not stale and not gone and local_sha == remote_sha:
                 self._apply_sig.log.emit("FAIL|Already up to date.")
@@ -1886,32 +1901,13 @@ class ConfigureScreen(QWidget):
             if not compileall.compile_dir(update_dir, quiet=1):
                 raise RuntimeError("update has Python errors, nothing applied")
 
-            # Copied over the old file, not renamed: offline copies hard-link some of these
-            for path, (_, mode, _) in stale.items():
-                target = os.path.join(install_dir, path)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                shutil.copy2(os.path.join(update_dir, path), target)
-                if mode == "100755":
-                    os.chmod(target, 0o755)
-
-            # Delete files removed or renamed away upstream, so stale modules can never shadow current ones
-            for path in gone:
-                target = os.path.join(install_dir, path)
-                if os.path.isfile(target):
-                    os.remove(target)
-                    _log.info("Removed stale file: %s", path)
-
+            # Stage is complete: back up every touched file, then install as
+            # one recoverable operation. VERSION changes only after all files
+            # are in place. A failed apply restores the old installation.
+            changes = [("M", path, sha) for path, (sha, _, _) in stale.items()]
+            changes.extend(("D", path, "-") for path in gone)
+            apply_update(install_dir, update_dir, remote_sha, changes)
             shutil.rmtree(update_dir, ignore_errors=True)
-
-            # chmod +x shell scripts
-            for script in ("launcher.sh", "deckops_uninstall.sh", "install.sh"):
-                spath = os.path.join(install_dir, script)
-                if os.path.isfile(spath):
-                    os.chmod(spath, os.stat(spath).st_mode | stat.S_IEXEC)
-
-            # Last, so an update that failed part way is retried in full
-            with open(os.path.join(install_dir, "VERSION"), "w") as f:
-                f.write(remote_sha)
 
             # Clean up stale flag file if present
             flag = os.path.expanduser("~/.deckops_update_requested")
@@ -1923,8 +1919,13 @@ class ConfigureScreen(QWidget):
 
         except Exception as ex:
             _log.error("Update failed: %s", ex)
-            shutil.rmtree(update_dir, ignore_errors=True)
-            self._apply_sig.log.emit(f"FAIL|Update failed: {ex}")
+            if os.path.isfile(os.path.join(update_dir, "transaction.json")):
+                # Do not keep offering an app with a possibly mixed install.
+                # The next launch will attempt the rollback again.
+                self._apply_sig.log.emit(f"ROLLBACK|Could not restore the previous DeckOps version: {ex}")
+            else:
+                shutil.rmtree(update_dir, ignore_errors=True)
+                self._apply_sig.log.emit(f"FAIL|Update failed: {ex}")
 
     def _on_apply_signal(self, msg):
         kind, text = msg.split("|", 1)
@@ -1936,6 +1937,15 @@ class ConfigureScreen(QWidget):
             self._update_status.setStyleSheet(f"color:{C_IW};")
             _kill_audio()
             QTimer.singleShot(1000, self._relaunch)
+        elif kind == "ROLLBACK":
+            self._update_pd.close()
+            self._update_btn.setEnabled(False)
+            QMessageBox.critical(self, "DeckOps update needs recovery",
+                f"{text}\n\nDeckOps will close to avoid using a partial update. "
+                "Open it again to retry recovery. Your data has been kept; "
+                "contact DeckOps support if it still cannot open.")
+            _kill_audio()
+            QApplication.instance().quit()
         else:
             # FAIL
             self._update_pd.close()
@@ -1992,6 +2002,9 @@ class UpdateScreen(QWidget):
         # (title, fn(sigs)) run in place of the game updates, e.g. adding Offline Mode
         self.task = None
         self._steam_closed = threading.Event()
+        self._failed_games = []
+        self._failed_zd = False
+        self._zd_missing = False
 
         lay = QVBoxLayout(self); lay.setContentsMargins(80,60,80,60); lay.setSpacing(20)
         self.title = QLabel("UPDATE"); self.title.setFont(font(36, True))
@@ -2026,7 +2039,11 @@ class UpdateScreen(QWidget):
         self.back_btn = _btn("<< Back to My Games", C_DARK_BTN, h=48)
         self.back_btn.setFixedWidth(220); self.back_btn.setVisible(False)
         self.back_btn.clicked.connect(self._go_back)
-        bk = QHBoxLayout(); bk.addStretch(); bk.addWidget(self.back_btn); bk.addStretch()
+        self.retry_btn = _btn("Retry Failed Games", C_IW, h=48)
+        self.retry_btn.setFixedWidth(220); self.retry_btn.setVisible(False)
+        self.retry_btn.clicked.connect(self._retry_failed)
+        bk = QHBoxLayout(); bk.addStretch(); bk.addWidget(self.back_btn)
+        bk.addWidget(self.retry_btn); bk.addStretch()
         lay.addLayout(bk)
 
         self._s = _Sigs()
@@ -2045,20 +2062,48 @@ class UpdateScreen(QWidget):
         super().showEvent(e)
         # Spontaneous = window restored / re-mapped, not a screen change: that
         # used to clear the log and start a second update thread
-        if e.spontaneous():
-            return
+        if not e.spontaneous():
+            self._start_update()
+
+    def _start_update(self):
         self.bar.setValue(0); self.log.clear()
+        self.cur.setText("Preparing...")
         self.title.setText(self.task[0] if self.task else "UPDATE")
         self.steam_btn.setVisible(False); self.back_btn.setVisible(False)
+        self.retry_btn.setVisible(False)
+        self._failed_games = []
+        self._failed_zd = False
+        self._zd_missing = False
         self._steam_closed.clear()
         inhibit.start("DeckOps is updating")
         _log_to_file("── Update started ──")
         QTimer.singleShot(400, lambda: threading.Thread(target=self._run, daemon=True).start())
 
-    def _on_done(self, _):
+    def _on_done(self, ok):
         inhibit.stop()
-        self.cur.setText("Done! It is now safe to open Steam.")
         self.back_btn.setVisible(True)
+        if ok:
+            self.cur.setText("Update complete. It is now safe to open Steam.")
+            return
+        if self._failed_games:
+            names = ", ".join(dict.fromkeys(gd["base"] for _, gd, _ in self._failed_games))
+            if self._zd_missing:
+                self.cur.setText(f"Update incomplete: {names}. Zombies Declassified is missing; reinstall it from BO2 Options.")
+            else:
+                self.cur.setText(f"Update incomplete: {names}. Retry the failed games or check the log.")
+            self.retry_btn.setVisible(bool(self._retryable_games()))
+        else:
+            self.cur.setText("Update failed. Check the log above, then try again from My Games.")
+
+    def _retryable_games(self):
+        return [item for item in self._failed_games
+                if not (self._zd_missing and item[0] == "t6zm")]
+
+    def _retry_failed(self):
+        self.selected = self._retryable_games()
+        retry_zd = self._failed_zd and not self._zd_missing
+        self._start_update()
+        self.update_zd = retry_zd
 
     def _go_back(self):
         go_to(self.stack, "ManagementScreen")
@@ -2073,6 +2118,8 @@ class UpdateScreen(QWidget):
         except Exception as ex:
             import traceback
             _log.error("update failed:\n%s", traceback.format_exc())
+            if self.selected and not self._failed_games:
+                self._failed_games = list(self.selected)
             self._s.log.emit(f"✗  Update failed: {ex}")
             self._s.progress.emit(100, "Update failed.")
             self._s.done.emit(False)
@@ -2084,6 +2131,9 @@ class UpdateScreen(QWidget):
                 task[1](self._s)
             except Exception as ex:
                 self._s.log.emit(f"✗  {task[0].title()} failed: {ex}")
+                self._s.progress.emit(100, "Update failed.")
+                self._s.done.emit(False)
+                return
             self._s.progress.emit(100, "All done!")
             self._s.done.emit(True)
             return
@@ -2173,13 +2223,15 @@ class UpdateScreen(QWidget):
                     )
             except DownloadError as dl_ex:
                 self._s.log.emit(f"✗  {dl_ex.label} download failed: {dl_ex}")
+                self._failed_games = list(self.selected)
                 self._s.progress.emit(100, "Update failed.")
-                self._s.done.emit(True)
+                self._s.done.emit(False)
                 return
             except Exception as ex:
                 self._s.log.emit(f"✗  Plutonium launch failed: {ex}")
+                self._failed_games = list(self.selected)
                 self._s.progress.emit(100, "Update failed.")
-                self._s.done.emit(True)
+                self._s.done.emit(False)
                 return
 
             self._s.plut_wait.emit()
@@ -2193,8 +2245,9 @@ class UpdateScreen(QWidget):
                     "✗  Plutonium does not appear to be fully set up.\n"
                     "   Make sure you let it finish updating."
                 )
+                self._failed_games = list(self.selected)
                 self._s.progress.emit(100, "Update incomplete.")
-                self._s.done.emit(True)
+                self._s.done.emit(False)
                 return
 
             self._s.log.emit("✓  Plutonium updated.")
@@ -2231,7 +2284,8 @@ class UpdateScreen(QWidget):
             kill_steam(on_progress=lambda msg: self._s.log.emit(f"  {msg}"))
             self._s.log.emit("  ✓ Steam closed.")
         except Exception as ex:
-            self._s.log.emit(f"  Could not close Steam: {ex}")
+            self._s.log.emit(f"✗  Could not close Steam: {ex}")
+            raise RuntimeError("Close Steam manually, then retry this update; game configuration was not continued.") from ex
 
         # ── Clean slate: clear launch options and compat tools ─────────
         # Same clean-slate approach as InstallScreen.
@@ -2365,6 +2419,7 @@ class UpdateScreen(QWidget):
                                     wrapper_path=entry.get("wrapper_path"),
                                     lan_wrapper_path=entry.get("lan_wrapper_path"))
             except Exception as ex:
+                self._failed_games.append((key, gd, game))
                 self._s.log.emit(f"✗  {base_name} ({key}) failed: {ex}")
 
         # ── Re-apply GE-Proton compat + Steam Input ──────────────────
@@ -2395,7 +2450,8 @@ class UpdateScreen(QWidget):
 
         # Zombies Declassified: only when the user opted in on the Update Games prompt
         _do_zd = self.update_zd; self.update_zd = False
-        if _do_zd and cfg.is_zd_installed() and any(k == "t6zm" for k, _, _ in self.selected):
+        zd_game = next((item for item in self.selected if item[0] == "t6zm"), None)
+        if _do_zd and cfg.is_zd_installed() and zd_game:
             try:
                 self._s.log.emit("Checking Zombies Declassified for updates...")
                 from zombies_declassified import resolve_zd_storage
@@ -2403,7 +2459,10 @@ class UpdateScreen(QWidget):
 
                 from zombies_declassified import is_zd_installed as _zd_at
                 if not _zd_storage or not _zd_at(_zd_storage):
-                    self._s.log.emit(f"⚠  Zombies Declassified not found in {_zd_storage}, skipped (nothing downloaded).")
+                    self._s.log.emit(f"✗  Zombies Declassified not found in {_zd_storage}; reinstall it from BO2 Options.")
+                    self._zd_missing = True
+                    if zd_game not in self._failed_games:
+                        self._failed_games.append(zd_game)
                 else:
                     from zombies_declassified import update_zd
                     updated = update_zd(_zd_storage,
@@ -2417,7 +2476,10 @@ class UpdateScreen(QWidget):
                     else:
                         self._s.log.emit("✓  Zombies Declassified is up to date")
             except Exception as ex:
-                self._s.log.emit(f"⚠  Zombies Declassified update skipped: {ex}")
+                self._s.log.emit(f"✗  Zombies Declassified update failed: {ex}")
+                self._failed_zd = True
+                if zd_game not in self._failed_games:
+                    self._failed_games.append(zd_game)
 
         # Clean up ZD files leaked into non-t6zm prefixes by older versions
         if has_plut and not is_lcd:
@@ -2446,5 +2508,6 @@ class UpdateScreen(QWidget):
             except Exception as ex:
                 self._s.log.emit(f"  Plutonium cleanup skipped: {ex}")
 
-        self._s.progress.emit(100, "All done!")
-        self._s.done.emit(True)
+        failed = len(self._failed_games)
+        self._s.progress.emit(100, "Update complete." if not failed else f"{failed} game(s) failed to update.")
+        self._s.done.emit(not failed)

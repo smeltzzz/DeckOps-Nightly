@@ -707,57 +707,42 @@ def ensure_depotdownloader(on_progress=None) -> str:
     return DEPOTDOWNLOADER_BIN
 
 
-def _isolated_storage_roots() -> list:
-    """Where .NET keeps per-user IsolatedStorage on Linux (current runtime,
-    plus the old Mono location)."""
-    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
-    return [os.path.join(data_home, "IsolatedStorage"),
-            os.path.expanduser("~/.config/.isolated-storage")]
+def _depot_env() -> dict:
+    """Keep .NET's saved Steam login inside this DeckOps download, not in
+    another app's shared IsolatedStorage directory."""
+    home = os.path.join(DEPOTDOWNLOADER_DIR, ".home")
+    data = os.path.join(home, ".local", "share")
+    config = os.path.join(home, ".config")
+    os.makedirs(data, exist_ok=True)
+    os.makedirs(config, exist_ok=True)
+    return {**os.environ, "HOME": home, "XDG_DATA_HOME": data,
+            "XDG_CONFIG_HOME": config}
 
 
 def _remove_saved_logins(since: float | None) -> int:
-    """
-    Delete DepotDownloader's saved Steam login. With -remember-password it
-    stores the login token as account.config in .NET IsolatedStorage --
-    NOT in DEPOTDOWNLOADER_DIR, so removing that folder never removed it.
-    Another .NET app could keep a file of the same name there, so with
-    `since` only files changed during this session are removed.
-    Returns how many were removed.
-    """
-    removed = 0
-    for root in _isolated_storage_roots():
-        for dirpath, _, files in os.walk(root):
-            if "account.config" not in files:
-                continue
-            p = os.path.join(dirpath, "account.config")
-            try:
-                if since is not None and os.path.getmtime(p) < since - 60:
-                    continue
-                os.remove(p)
-                removed += 1
-                _log.info("Removed saved DepotDownloader login %s", p)
-            except OSError as ex:
-                _log.warning("Could not remove %s: %s", p, ex)
-    return removed
+    """Count only logins in DepotDownloader's private home before removing it.
+    `since` is kept for callers but must never authorize deleting a different
+    app's account.config on the basis of its modification time."""
+    home = os.path.join(DEPOTDOWNLOADER_DIR, ".home")
+    count = 0
+    for root in (os.path.join(home, ".local", "share", "IsolatedStorage"),
+                 os.path.join(home, ".config", ".isolated-storage")):
+        for _, _, files in os.walk(root):
+            count += files.count("account.config")
+    return count
 
 
 def cleanup_depotdownloader(since: float | None = None) -> int:
-    """
-    Remove DepotDownloader and the Steam login token it saved. `since` is
-    the time.time() the download session started (see _remove_saved_logins).
-    Returns the number of saved logins removed.
-    """
-    try:
-        if os.path.isdir(DEPOTDOWNLOADER_DIR):
-            shutil.rmtree(DEPOTDOWNLOADER_DIR, ignore_errors=True)
+    """Remove the downloader and its private login storage, never shared .NET data."""
+    count = _remove_saved_logins(since)
+    if os.path.isdir(DEPOTDOWNLOADER_DIR):
+        try:
+            shutil.rmtree(DEPOTDOWNLOADER_DIR)
             _log.info("Removed DepotDownloader at %s", DEPOTDOWNLOADER_DIR)
-    except Exception as ex:
-        _log.warning("Failed to clean up DepotDownloader: %s", ex)
-    try:
-        return _remove_saved_logins(since)
-    except Exception as ex:
-        _log.warning("Failed to remove DepotDownloader's saved login: %s", ex)
-        return 0
+        except OSError as ex:
+            _log.warning("Could not remove DepotDownloader and saved login: %s", ex)
+            return -1
+    return count
 
 
 # --- QR-based depot download
@@ -937,6 +922,7 @@ def run_depot_download_qr(
                 text=True,
                 bufsize=1,
                 cwd=DEPOTDOWNLOADER_DIR,
+                env=_depot_env(),
             )
             threading.Thread(target=_watch_stall, daemon=True,
                              args=(proc, staging_dir, last_output, stalled, stop_watch)).start()

@@ -1801,8 +1801,12 @@ class _BaseInstallScreen(QWidget):
                 if self._dg_qr_started is not None:
                     self._s.log.emit("  Removing DepotDownloader and its saved Steam login...")
                     n = cleanup_depotdownloader(since=self._dg_qr_started)
-                    self._s.log.emit("  ✓  DepotDownloader removed, saved Steam login deleted." if n
-                                     else "  ✓  DepotDownloader removed (no saved Steam login found).")
+                    if n < 0:
+                        self._s.log.emit("✗  Could not remove DepotDownloader's private login data. Check ~/.local/share/deckops/depotdownloader.")
+                    elif n:
+                        self._s.log.emit("  ✓  DepotDownloader and its private Steam login removed.")
+                    else:
+                        self._s.log.emit("  ✓  DepotDownloader removed (no private Steam login found).")
             if _dg_res is None:
                 _dg_res = {j[0]: "depot downgrade failed" for j in _dg_jobs}
             for _gid, _why in _dg_res.items():

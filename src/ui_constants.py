@@ -569,6 +569,7 @@ QProgressBar {{ background:#252535; border-radius:7px; border:none; }}
 QProgressBar::chunk {{ background:{C_ACCENT}; border-radius:7px; }}
 QCheckBox::indicator {{ width:22px; height:22px; border:2px solid #555568; border-radius:4px; background:#252535; }}
 QCheckBox::indicator:checked {{ background:{C_IW}; border-color:{C_IW}; }}
+QPushButton:focus, QCheckBox:focus {{ border:2px solid #FFFFFF; }}
 """
 
 

@@ -219,16 +219,19 @@ def _etag_matches(path: str, etag: str):
     if not parts.isdigit():
         return None
     n, size = int(parts), os.path.getsize(path)
+    checked = False
     for part_size in (8 << 20, 16 << 20, 5 << 20, 15 << 20, 64 << 20, 100 << 20):
         if -(-size // part_size) != n:
             continue
+        checked = True
         md5s = []
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(part_size), b""):
                 md5s.append(hashlib.md5(chunk).digest())
         if hashlib.md5(b"".join(md5s)).hexdigest() == digest:
             return True
-    return False
+    # An unfamiliar multipart chunk size cannot prove the file is bad.
+    return False if checked else None
 
 
 def _metadata_path(plut_storage_t6: str) -> str:
@@ -272,7 +275,7 @@ def _write_metadata(plut_storage_t6: str, manifest_files: list, failed=()):
     os.replace(tmp, mp)
 
 
-def install_zd(plut_storage_t6: str, on_progress=None):
+def install_zd(plut_storage_t6: str, on_progress=None, manifest_files=None, results=None):
     """
     Download and install Zombies Declassified.
 
@@ -281,8 +284,11 @@ def install_zd(plut_storage_t6: str, on_progress=None):
     """
     prog = on_progress or (lambda *a: None)
 
-    files = fetch_manifest(on_progress)
+    files = manifest_files if manifest_files is not None else fetch_manifest(on_progress)
     total = len(files)
+    if results is not None:
+        results["downloaded"] = 0
+        results["unverified"] = 0
 
     prog(2, f"Installing Zombies Declassified ({total} files)...")
 
@@ -292,13 +298,23 @@ def install_zd(plut_storage_t6: str, on_progress=None):
         url = _file_url(relpath)
         size, etag = _remote_info(url)
 
-        # Keep a file that's already there when its size matches the CDN's
-        # (or the CDN gave none): a truncated or stale file is replaced now,
-        # where "exists and isn't empty" used to keep it forever.
-        if os.path.isfile(dest) and os.path.getsize(dest) > 0 and \
-                (size is None or os.path.getsize(dest) == size):
+        # Check existing files too: an unchanged list of filenames does not
+        # mean the installed maps are still present or uncorrupted. When the
+        # CDN exposes a reproducible ETag, a same-sized damaged file is repaired.
+        prog(2 + int(idx / total * 96), f"Checking {idx + 1}/{total}: {relpath}")
+        try:
+            present = os.path.isfile(dest) and os.path.getsize(dest) > 0
+            same_size = size is None or (present and os.path.getsize(dest) == size)
+            checksum = _etag_matches(dest, etag) if present and same_size and etag else None
+        except OSError:
+            present, same_size, checksum = False, False, None
+        if present and same_size and checksum is not False:
             pct = 2 + int((idx + 1) / total * 96)
-            prog(pct, f"Verified {idx + 1}/{total}: {relpath}")
+            if results is not None and size is None and checksum is not True:
+                results["unverified"] += 1
+                prog(pct, f"Could not verify {idx + 1}/{total}: {relpath} (kept existing file)")
+            else:
+                prog(pct, f"Checked {idx + 1}/{total}: {relpath}")
             continue
 
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -334,6 +350,8 @@ def install_zd(plut_storage_t6: str, on_progress=None):
                 os.remove(dest)
             except OSError:
                 pass
+        elif results is not None:
+            results["downloaded"] += 1
 
     _write_metadata(plut_storage_t6, files, errors)
 
@@ -347,7 +365,7 @@ def install_zd(plut_storage_t6: str, on_progress=None):
 
 
 def update_zd(plut_storage_t6: str, on_progress=None):
-    """Check for updates and apply if available. Returns True if updated."""
+    """Check and repair installed files. Returns True if anything changed."""
     prog = on_progress or (lambda *a: None)
 
     current = get_zd_info(plut_storage_t6)
@@ -359,15 +377,16 @@ def update_zd(plut_storage_t6: str, on_progress=None):
         return False
 
     files = fetch_manifest(on_progress)
-    new_hash = _manifest_hash(files)
-
-    if current_hash and current_hash == new_hash:
-        prog(100, "Zombies Declassified is up to date.")
-        return False
-
-    prog(2, "Updating Zombies Declassified...")
-    install_zd(plut_storage_t6, on_progress)
-    return True
+    results = {}
+    errors = install_zd(plut_storage_t6, on_progress, manifest_files=files, results=results)
+    if errors:
+        raise RuntimeError(f"{len(errors)} Zombies Declassified file(s) could not be repaired; try again")
+    if results["unverified"]:
+        raise RuntimeError(f"Could not verify {results['unverified']} Zombies Declassified file(s); existing files were kept. Try again when the CDN is available")
+    changed = current_hash != _manifest_hash(files) or results["downloaded"] > 0
+    if not changed:
+        prog(100, "Zombies Declassified files checked; no changes needed.")
+    return changed
 
 
 def uninstall_zd(plut_storage_t6: str, on_progress=None):

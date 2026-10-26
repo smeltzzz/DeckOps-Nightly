@@ -69,7 +69,11 @@ echo ""
 # Only an explicit "Yes, Uninstall" goes ahead. The buttons used to be swapped
 # (OK labelled "Cancel"), so Escape, the window's X or a zenity failure -- all
 # non-zero -- started the uninstall, and without zenity it ran unasked.
-CONFIRM_TEXT="This will clear all DeckOps launch options, remove client files, and remove ALL DeckOps and Plutonium data from your Wine prefixes.\n\nContinue?"
+if [ -n "$KEEP_OTHER" ]; then
+    CONFIRM_TEXT="This removes only $APP_TITLE. Shared games, Steam entries, Plutonium data and $OTHER_TITLE stay in place. If a Steam entry still points to Nightly afterward, use Repair in $OTHER_TITLE.\n\nContinue?"
+else
+    CONFIRM_TEXT="This will remove DeckOps' client files, shortcuts and launch options. Your Steam games and backed-up saves will be kept. Unrelated Plutonium data will be left alone.\n\nContinue?"
+fi
 if command -v zenity >/dev/null 2>&1; then
     zenity --question \
         --title="$APP_TITLE Uninstaller" \
@@ -94,8 +98,24 @@ fi
 echo ""
 
 if [ -n "$KEEP_OTHER" ]; then
-    info "$OTHER_TITLE is also installed ($OTHER_DIR) -- its install, config and shortcuts are left alone."
-    echo ""
+    info "$OTHER_TITLE is also installed ($OTHER_DIR)."
+    info "Keeping shared game files, Steam settings and Plutonium data for $OTHER_TITLE."
+    # Both branches configure the same games and Steam profiles. Removing
+    # shared files or reversing Steam edits here would break the other branch.
+    # Only remove this branch's own app and desktop shortcuts.
+    for shortcut in "$HOME/.local/share/applications/${XDG_ID}.desktop" \
+                    "$HOME/Desktop/${INSTALL_DIR_NAME}.desktop"; do
+        [ ! -f "$shortcut" ] || rm -f "$shortcut" || warn "Could not remove $shortcut"
+    done
+    rm -rf "$INSTALL_DIR" "$HOME/.config/$XDG_ID" \
+        || { warn "Could not fully remove $APP_TITLE; check $INSTALL_DIR"; exit 1; }
+    if [ "$XDG_ID" != "deckops" ]; then
+        rm -rf "$HOME/.local/share/$XDG_ID" \
+            || warn "Could not remove $HOME/.local/share/$XDG_ID"
+    fi
+    success "$APP_TITLE removed. $OTHER_TITLE and shared game setup were kept."
+    info "Steam entries shared by both branches were left alone. If one still points to Nightly, run Repair in $OTHER_TITLE."
+    exit 0
 fi
 
 info "Closing Steam..."
@@ -2078,7 +2098,7 @@ for leftover in (path + ".bak",):
 PYEOF
     echo ""
 
-    info "Removing Plutonium data from all Wine prefixes..."
+    info "Removing DeckOps-managed Plutonium from Wine prefixes..."
 
     # Build list of all compatdata dirs (internal + SD card + any extra libraries)
     COMPAT_DIRS=()
@@ -2114,26 +2134,46 @@ PYEOF
     [ $? -eq 0 ] && KEEP_PLUT_STORAGE=false
 
     found_any=0
-    for COMPATDATA in "${COMPAT_DIRS[@]}"; do
-        for prefix_dir in "$COMPATDATA"/*/; do
-            plut_dir="$prefix_dir/pfx/drive_c/users/steamuser/AppData/Local/Plutonium"
-            if [ -d "$plut_dir" ]; then
+    if [ -n "$KEEP_OTHER" ]; then
+        skip "Wine-prefix Plutonium kept -- $OTHER_TITLE still uses these files"
+    else
+        master_plut="$HOME/.local/share/deckops/plutonium_prefix/pfx/drive_c/users/steamuser/AppData/Local/Plutonium"
+        [ ! -d "$master_plut" ] || master_plut="$(readlink -f "$master_plut")"
+        for COMPATDATA in "${COMPAT_DIRS[@]}"; do
+            for prefix_dir in "$COMPATDATA"/*/; do
+                plut_dir="$prefix_dir/pfx/drive_c/users/steamuser/AppData/Local/Plutonium"
+                [ -d "$plut_dir" ] || continue
+                # DeckOps links the client binaries back to its dedicated master.
+                # A Plutonium folder without one of those links may belong to
+                # another install; never delete it just because of its name.
+                owned=false
+                for shared in bin launcher games; do
+                    link="$plut_dir/$shared"
+                    if [ -L "$link" ] && [ "$(readlink -f "$link")" = "$master_plut/$shared" ]; then
+                        owned=true
+                        break
+                    fi
+                done
+                if ! $owned; then
+                    skip "Unidentified Plutonium in $(basename "$prefix_dir") -- left alone"
+                    continue
+                fi
                 prefix_id=$(basename "$prefix_dir")
                 if $KEEP_PLUT_STORAGE && [ -d "$plut_dir/storage" ]; then
                     # Links point into the master copy, which is removed below.
                     find "$plut_dir/storage" -type l -delete 2>/dev/null
                     find "$plut_dir" -mindepth 1 -maxdepth 1 ! -name storage -exec rm -rf {} + \
-                        && success "Removed Plutonium from prefix $prefix_id (kept storage/)" \
-                        || warn "Failed to remove Plutonium from prefix $prefix_id"
+                        && success "Removed DeckOps Plutonium from prefix $prefix_id (kept storage/)" \
+                        || warn "Failed to clean Plutonium from prefix $prefix_id"
                     skip "Kept: $plut_dir/storage"
                 else
-                    rm -rf "$plut_dir" && success "Removed Plutonium from prefix $prefix_id" || warn "Failed to remove Plutonium from prefix $prefix_id"
+                    rm -rf "$plut_dir" && success "Removed DeckOps Plutonium from prefix $prefix_id" || warn "Failed to remove Plutonium from prefix $prefix_id"
                 fi
                 found_any=1
-            fi
+            done
         done
-    done
-    [ "$found_any" -eq 0 ] && skip "No Plutonium folders found in any prefix"
+        [ "$found_any" -eq 0 ] && skip "No identifiable DeckOps Plutonium folders found in Wine prefixes"
+    fi
 
     for appid in 42690 42750 10090 42700 202990 212910; do
         game_dir=$(find_install_dir "$appid") || true
@@ -3387,42 +3427,11 @@ else
 fi
 echo ""
 
-# ── Broad sweep: known Plutonium data dirs ───────────────────────────────────
-# Catches dirs outside Wine prefixes that the earlier compatdata walk misses.
-
-info "Sweeping residual Plutonium data dirs..."
-
-SWEEP_ROOTS=(
-    "$HOME/.local/share/Plutonium"
-    "$HOME/.local/share/plutonium"
-    "$HOME/.config/Plutonium"
-    "$HOME/.config/plutonium"
-    "$HOME/.cache/Plutonium"
-    "$HOME/.cache/plutonium"
-)
-
-sweep_hits=0
-for path in "${SWEEP_ROOTS[@]}"; do
-    if ${KEEP_PLUT_STORAGE:-false} && [ -d "$path/storage" ]; then
-        find "$path" -mindepth 1 -maxdepth 1 ! -name storage -exec rm -rf {} + \
-            && success "Removed $path (kept storage/)" && sweep_hits=$((sweep_hits + 1))
-    elif [ -e "$path" ]; then
-        rm -rf "$path" && success "Removed $path" && sweep_hits=$((sweep_hits + 1))
-    fi
-done
-
-# /tmp residue
-shopt -s nullglob
-for f in /tmp/plutonium* /tmp/Plutonium*; do
-    if [ -e "$f" ]; then
-        rm -rf "$f" 2>/dev/null && sweep_hits=$((sweep_hits + 1))
-    fi
-done
-shopt -u nullglob
-
-if [ "$sweep_hits" -eq 0 ]; then
-    skip "No residual Plutonium data dirs."
-fi
+# ── Unowned Plutonium data ────────────────────────────────────────────────────
+# ~/.config/Plutonium, ~/.cache/Plutonium and /tmp/plutonium* are generic
+# locations. Their names alone cannot prove DeckOps created them; sweeping
+# them could erase a standalone Plutonium install or somebody else's session.
+info "Leaving unowned Plutonium settings and cache untouched."
 
 # Clean up temp file
 rm -f "$LCD_APPIDS_FILE" 2>/dev/null
@@ -3444,11 +3453,8 @@ sweep_parts() {
     done < <(find "$dir" -maxdepth 5 -type f \( -name '*.part' -o -name '*.part.meta' \) -print0 2>/dev/null)
 }
 
-if [ -n "$STEAM_ROOT" ]; then
-    for _appid in 7940 10190 202970 209160 209650 311210; do
-        sweep_parts "$(find_install_dir "$_appid" || true)"
-    done
-fi
+# Game directories can contain another downloader's *.part files. Without an
+# ownership marker, deleting them would discard the user's unrelated download.
 sweep_parts "$HOME/.local/share/deckops"
 sweep_parts "$HOME/Games/Heroic/deckops_plutonium"
 
@@ -3549,7 +3555,7 @@ echo ""
 echo -e "${GREEN}${BOLD}  DeckOps fully uninstalled.${CLEAR}"
 echo ""
 echo "  Your Steam games are untouched."
-echo "  All Plutonium data removed from Wine prefixes."
+echo "  Unrelated Plutonium data and backed-up saves were kept."
 echo "  All LCD HGL state and shortcuts removed."
 echo "  All IW3SP-MOD and IW4x client files removed."
 echo "  All DeckOps controller templates and profiles removed."
@@ -3569,7 +3575,7 @@ echo ""
 # Show summary dialog in background while countdown runs in terminal
 zenity --info \
     --title="$APP_TITLE Uninstaller" \
-    --text="DeckOps fully uninstalled.\n\nYour Steam games are untouched.\nAll Plutonium data removed from Wine prefixes.\nAll LCD HGL state and shortcuts removed.\nAll IW3SP-MOD and IW4x client files removed.\nAll DeckOps controller templates and profiles removed.${COD4_VERIFY_TEXT}\n\nPlease restart Steam for changes to take effect." \
+    --text="DeckOps uninstalled.\n\nYour Steam games, unrelated Plutonium data and backed-up saves were kept.\nDeckOps-managed game files, shortcuts and controller profiles were cleaned where identifiable.${COD4_VERIFY_TEXT}\n\nPlease restart Steam for changes to take effect." \
     --timeout=12 \
     2>/dev/null &
 

@@ -89,13 +89,28 @@ command -v curl    &>/dev/null || die "curl is not installed."
 command -v unzip   &>/dev/null || die "unzip is not installed."
 
 PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
+    || die "Python 3.10 or newer is required (found $PYTHON_VER)."
 success "Python $PYTHON_VER found."
 
-# ── step 2: download latest release ──────────────────────────────────────────
+# ── step 2: download one immutable commit ────────────────────────────────────
 info "Downloading DeckOps..."
 
+# Pin the archive before downloading. Asking for main.zip first and the
+# current main SHA after copying it can mark old files as a newer build when
+# a push happens between requests; the launcher would then skip the update.
+INITIAL_SHA=$(curl -sf --max-time 10 \
+    "https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/commits/main" \
+    | grep -m1 '"sha"' | cut -d'"' -f4)
+if [[ "$INITIAL_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    ARCHIVE_REF="$INITIAL_SHA"
+else
+    INITIAL_SHA=""
+    ARCHIVE_REF="refs/heads/main"
+    warn "Could not pin a version; DeckOps will verify it on the next update."
+fi
 TMPZIP="$(mktemp /tmp/deckops_XXXXXX.zip)"
-curl -fL --progress-bar "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/refs/heads/main.zip" -o "$TMPZIP" \
+curl -fL --progress-bar "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$ARCHIVE_REF.zip" -o "$TMPZIP" \
     || die "Download failed. Check your internet connection."
 success "Download complete."
 
@@ -110,7 +125,7 @@ EXTRACTED=$(find "$TMPDIR_EXTRACT" -maxdepth 1 -mindepth 1 -type d | head -1)
 [ -z "$EXTRACTED" ] && EXTRACTED="$TMPDIR_EXTRACT"
 
 mkdir -p "$INSTALL_DIR"
-cp -r "$EXTRACTED"/. "$INSTALL_DIR"/
+cp -r "$EXTRACTED"/. "$INSTALL_DIR"/ || die "Could not copy DeckOps into $INSTALL_DIR."
 rm -rf "$TMPDIR_EXTRACT"
 
 chmod +x "$ENTRY_POINT" 2>/dev/null || true
@@ -265,17 +280,14 @@ else
     success "No stale plut_lan.sh sidecars found."
 fi
 
-# ── step 8: write initial version SHA ─────────────────────────────────────────
-# So the first launch doesn't redundantly re-download everything.
+# ── step 8: record the SHA of the archive actually installed ─────────────────
 info "Recording current version..."
-INITIAL_SHA=$(curl -sf --max-time 10 \
-    "https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/commits/main" \
-    | grep -m1 '"sha"' | cut -d'"' -f4)
 if [ -n "$INITIAL_SHA" ]; then
     echo "$INITIAL_SHA" > "$INSTALL_DIR/VERSION"
     success "Version recorded."
 else
-    warn "Could not fetch version SHA — will be set on first update."
+    echo "0" > "$INSTALL_DIR/VERSION"
+    warn "Version unknown — DeckOps will refresh its files on the next update."
 fi
 
 # ── step 9: done ─────────────────────────────────────────────────────────────

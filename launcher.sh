@@ -52,7 +52,7 @@ run_remote_script() {
             2>/dev/null
         return 1
     fi
-    bash "$dir/$name"
+    bash "$dir/$name" 9>&-
     rc=$?
     rm -rf "$dir"
     return $rc
@@ -66,9 +66,37 @@ if [ ! -d "$INSTALL_DIR" ] || [ -f "$LOCKFILE" ]; then
     exit 0
 fi
 
+# A running DeckOps update owns .update. A second launch must not delete its
+# staging area or mistake its live journal for an interrupted update.
+UPDATE_LOCKED=false
+if command -v flock >/dev/null 2>&1; then
+    exec 9> "$INSTALL_DIR/.deckops_update.lock" || exit 1
+    if ! flock -n 9; then
+        zenity --warning --title="$APP_TITLE" \
+            --text="DeckOps is updating in another window. Wait for it to finish before launching again." 2>/dev/null
+        exit 1
+    fi
+    UPDATE_LOCKED=true
+fi
+
+# Roll back an update interrupted by a crash or power loss before reading its
+# version or starting the app. Never erase .update while its journal is live.
+if [ -f "$UPDATE_DIR/transaction.json" ]; then
+    RECOVERY_SCRIPT="$INSTALL_DIR/src/update_manifest.py"
+    [ -f "$RECOVERY_SCRIPT" ] || RECOVERY_SCRIPT="$UPDATE_DIR/files/src/update_manifest.py"
+    if [ ! -f "$RECOVERY_SCRIPT" ] || \
+       ! python3 "$RECOVERY_SCRIPT" recover "$INSTALL_DIR"; then
+        zenity --error --title="$APP_TITLE" \
+            --text="An interrupted update could not be restored. Your files were kept. Please contact DeckOps support before reinstalling." 2>/dev/null
+        exit 1
+    fi
+    zenity --info --title="$APP_TITLE" \
+        --text="An interrupted update was rolled back. Your previous DeckOps version is ready; you can retry the update later." 2>/dev/null
+fi
+
 # ── Update check ──────────────────────────────────────────────────────────────
 check_for_updates() {
-    local LOCAL_SHA REMOTE_SHA CHANGED_FILES FILE_COUNT RESET_HINT=""
+    local LOCAL_SHA REMOTE_SHA CHANGED_FILES PARSED FILE_COUNT RESET_HINT="" UPDATE_TEXT=""
     local FORCE="${1:-}"
 
     # Read local version (commit SHA). "0" means never updated.
@@ -81,22 +109,25 @@ check_for_updates() {
         | grep -m1 '"sha"' | cut -d'"' -f4)
 
     # If fetch failed or same version, skip
-    [ -z "$REMOTE_SHA" ] && return 0
+    [[ "$REMOTE_SHA" =~ ^[0-9a-f]{40}$ ]] || return 0
     [ "$LOCAL_SHA" = "$REMOTE_SHA" ] && return 0
 
-    # First install from install.sh won't have a real SHA — do a full refresh
-    if [ "$LOCAL_SHA" = "0" ]; then
-        FILE_COUNT="unknown number of"
+    # Older installs have no parser, and GitHub comparisons can fail or be
+    # truncated. In either case a pinned full archive is safer than guessing.
+    if [[ "$LOCAL_SHA" =~ ^[0-9a-f]{40}$ ]] && \
+       [ -f "$INSTALL_DIR/src/update_manifest.py" ]; then
+        PARSED=$(set -o pipefail; curl -sf --max-time 15 \
+            "https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/compare/${LOCAL_SHA}...${REMOTE_SHA}" \
+            | python3 "$INSTALL_DIR/src/update_manifest.py" compare) || PARSED=""
+    fi
+    if [ -z "$PARSED" ]; then
+        LOCAL_SHA="0"
+        UPDATE_TEXT="An update is available. DeckOps needs to refresh its files."
         CHANGED_FILES=""
     else
-        # Get list of changed files from GitHub compare API
-        CHANGED_FILES=$(curl -sf --max-time 15 \
-            "https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/compare/${LOCAL_SHA}...${REMOTE_SHA}" \
-            | grep '"filename"' | cut -d'"' -f4)
-
-        [ -z "$CHANGED_FILES" ] && return 0
-
-        FILE_COUNT=$(echo "$CHANGED_FILES" | wc -l)
+        CHANGED_FILES=$(printf '%s\n' "$PARSED" | awk -F '\t' '$1 == "M" {print $2}')
+        FILE_COUNT=$(printf '%s\n' "$PARSED" | wc -l)
+        UPDATE_TEXT="An update is available. ${FILE_COUNT} file(s) changed."
         # Mirrors ui_manage._reset_hint: config.py or more than 3 src/ files changed
         if echo "$CHANGED_FILES" | grep -qx 'src/config.py' || \
            [ "$(echo "$CHANGED_FILES" | grep -c '^src/')" -gt 3 ]; then
@@ -108,7 +139,7 @@ check_for_updates() {
     if [ "$FORCE" != "force" ]; then
         zenity --question \
             --title="$APP_TITLE Update" \
-            --text="An update is available.\n${FILE_COUNT} file(s) changed.\n\nUpdate now?" \
+            --text="${UPDATE_TEXT}\n\nUpdate now?" \
             --ok-label="Update" \
             --cancel-label="Skip" \
             --width=300 \
@@ -122,9 +153,8 @@ check_for_updates() {
     mkdir -p "$UPDATE_DIR"
 
     local FAILED=0
-    local REMOVED_FILES=""
 
-    if [ "$LOCAL_SHA" = "0" ] || [ -z "$CHANGED_FILES" ]; then
+    if [ "$LOCAL_SHA" = "0" ]; then
         # No compare available — download full repo zip
         local TMPZIP
         TMPZIP="$(mktemp /tmp/deckops_update_XXXXXX.zip)"
@@ -161,53 +191,27 @@ check_for_updates() {
         EXTRACTED=$(find "$TMPDIR_EXTRACT" -maxdepth 1 -mindepth 1 -type d | head -1)
         [ -z "$EXTRACTED" ] && EXTRACTED="$TMPDIR_EXTRACT"
 
-        cp -r "$EXTRACTED"/. "$UPDATE_DIR"/
+        mkdir -p "$UPDATE_DIR/files"
+        cp -r "$EXTRACTED"/. "$UPDATE_DIR/files"/ || FAILED=1
         rm -rf "$TMPDIR_EXTRACT"
     else
-        # Download only changed files
-        while IFS= read -r filepath; do
-            # Skip protected paths
+        # The comparison identifies deletions explicitly. A raw-file 404 is a
+        # failed download, never evidence that a local file should be deleted.
+        while IFS=$'\t' read -r action filepath blob_sha; do
+            [ "$action" = "M" ] || continue
             case "$filepath" in
-                logs/*) continue ;;
-                assets/music/background.mp3) continue ;;
+                logs/*|deckops.json|VERSION|assets/music/background.mp3) continue ;;
             esac
-
-            local DEST_DIR
-            DEST_DIR="$UPDATE_DIR/$(dirname "$filepath")"
-            mkdir -p "$DEST_DIR"
-
-            # From the commit itself, not main: raw.githubusercontent caches a
-            # branch for minutes after a push, so updating right after one got
-            # the old files and still recorded REMOTE_SHA as installed -- those
-            # changes were skipped for good. (Same fix as the in-app updater.)
-            #
-            # The status code alone isn't enough: a stream cut off after the
-            # headers still reports 200, and that truncated file used to be
-            # installed and recorded as the new version. curl's own exit
-            # status says whether the whole body arrived.
-            local HTTP_CODE CURL_RC
-            HTTP_CODE=$(curl -s --max-time 30 -w '%{http_code}' \
+            mkdir -p "$UPDATE_DIR/files/$(dirname "$filepath")"
+            if ! curl -fLsS --retry 2 --max-time 120 \
                 "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$REMOTE_SHA/$filepath" \
-                -o "$UPDATE_DIR/$filepath")
-            CURL_RC=$?
-
-            if [ "$HTTP_CODE" = "404" ]; then
-                # File was deleted or renamed upstream. The compare API lists
-                # removed files (and old names of renamed files, via the
-                # previous_filename key which the filename grep also matches),
-                # and those 404 on raw.githubusercontent. Previously this
-                # aborted the whole update, permanently bricking incremental
-                # updates for any commit that deleted or renamed a file.
-                # Skip the download and delete the local copy at apply time.
-                rm -f "$UPDATE_DIR/$filepath"
-                REMOVED_FILES="${REMOVED_FILES}${filepath}
-"
-                continue
-            elif [ "$HTTP_CODE" != "200" ] || [ "$CURL_RC" -ne 0 ]; then
+                -o "$UPDATE_DIR/files/$filepath" || \
+               ! python3 "$INSTALL_DIR/src/update_manifest.py" verify \
+                "$UPDATE_DIR/files/$filepath" "$blob_sha"; then
                 FAILED=1
                 break
             fi
-        done < <(echo "$CHANGED_FILES")
+        done < <(printf '%s\n' "$PARSED")
     fi
 
     if [ "$FAILED" -ne 0 ]; then
@@ -218,67 +222,33 @@ check_for_updates() {
         return 0
     fi
 
-    # ── Apply staged files ────────────────────────────────────────────────
-    # Protected paths are never overwritten
-    if [ "$LOCAL_SHA" = "0" ] || [ -z "$CHANGED_FILES" ]; then
-        # Full update — copy everything except protected paths
-        # Preserve user config
-        # cp + mv (atomic rename) so a power loss can't leave a truncated config
-        local SAVED_CONFIG=""
-        if [ -f "$INSTALL_DIR/deckops.json" ]; then
-            SAVED_CONFIG="$INSTALL_DIR/deckops.json.bak"
-            cp "$INSTALL_DIR/deckops.json" "$SAVED_CONFIG"
-        fi
-        local SAVED_MUSIC=""
-        if [ -f "$INSTALL_DIR/assets/music/background.mp3" ]; then
-            SAVED_MUSIC="$INSTALL_DIR/assets/music/background.mp3.bak"
-            cp "$INSTALL_DIR/assets/music/background.mp3" "$SAVED_MUSIC"
-        fi
-
-        # Copy updated files
-        cp -r "$UPDATE_DIR"/. "$INSTALL_DIR"/
-
-        # Restore protected files
-        if [ -n "$SAVED_CONFIG" ] && [ -f "$SAVED_CONFIG" ]; then
-            mv "$SAVED_CONFIG" "$INSTALL_DIR/deckops.json"
-        fi
-        if [ -n "$SAVED_MUSIC" ] && [ -f "$SAVED_MUSIC" ]; then
-            mv "$SAVED_MUSIC" "$INSTALL_DIR/assets/music/background.mp3"
-        fi
-    else
-        # Partial update — copy only changed files
-        while IFS= read -r filepath; do
-            case "$filepath" in
-                logs/*) continue ;;
-                assets/music/background.mp3) continue ;;
-            esac
-
-            if [ -f "$UPDATE_DIR/$filepath" ]; then
-                mkdir -p "$INSTALL_DIR/$(dirname "$filepath")"
-                cp "$UPDATE_DIR/$filepath" "$INSTALL_DIR/$filepath"
-            fi
-        done < <(echo "$CHANGED_FILES")
-
-        # Delete local copies of files removed (or renamed away) upstream.
-        # Only paths that the compare API listed AND that 404 at HEAD reach
-        # this list; protected paths are never touched.
-        if [ -n "$REMOVED_FILES" ]; then
-            while IFS= read -r filepath; do
-                [ -z "$filepath" ] && continue
-                case "$filepath" in
-                    logs/*) continue ;;
-                    assets/music/background.mp3) continue ;;
-                    deckops.json) continue ;;
-                esac
-                rm -f "$INSTALL_DIR/$filepath"
-            done < <(echo "$REMOVED_FILES")
-        fi
+    # ── Apply all staged files as one recoverable transaction ────────────
+    # Both a full archive and a partial update back up every replaced file
+    # before writing a journal. If the process dies, the next launch rolls
+    # back before reading VERSION or running any updated Python code.
+    local APPLY_SCRIPT="$UPDATE_DIR/files/src/update_manifest.py"
+    local CHANGES="full"
+    if [ "$LOCAL_SHA" != "0" ]; then
+        APPLY_SCRIPT="$INSTALL_DIR/src/update_manifest.py"
+        CHANGES="$UPDATE_DIR/changes.tsv"
+        printf '%s\n' "$PARSED" > "$CHANGES"
     fi
-
+    if [ ! -f "$APPLY_SCRIPT" ] || \
+       ! python3 "$APPLY_SCRIPT" apply "$INSTALL_DIR" "$UPDATE_DIR/files" "$REMOTE_SHA" "$CHANGES"; then
+        # A failed rollback leaves its journal for recovery on the next launch.
+        # Do not run a potentially mixed installation in that case.
+        if [ -f "$UPDATE_DIR/transaction.json" ]; then
+            zenity --error --title="$APP_TITLE" \
+                --text="Update was interrupted and rollback could not finish. DeckOps will not launch until its previous files are restored. Please contact support." 2>/dev/null
+            return 1
+        fi
+        rm -rf "$UPDATE_DIR"
+        zenity --error --title="$APP_TITLE" \
+            --text="Update could not be installed. Your previous version was restored; please retry later or use Check for Updates in DeckOps." \
+            2>/dev/null
+        return 0
+    fi
     rm -rf "$UPDATE_DIR"
-
-    # Save new version SHA
-    echo "$REMOTE_SHA" > "$VERSION_FILE"
 
     # Make scripts executable
     chmod +x "$INSTALL_DIR/launcher.sh" 2>/dev/null
@@ -294,27 +264,30 @@ check_for_updates() {
 }
 
 # ── Already installed — ask what to do ───────────────────────────────────────
-choice=$(zenity \
-    --list \
-    --title="$APP_TITLE" \
-    --text="$APP_TITLE is already installed.\nWhat would you like to do?" \
-    --column="Action" \
-    --hide-header \
-    "Launch DeckOps" \
-    "Uninstall" \
-    --width=300 --height=200 \
-    2>/dev/null)
-
-[ $? -ne 0 ] && exit 0
+if command -v zenity >/dev/null 2>&1; then
+    choice=$(zenity \
+        --list \
+        --title="$APP_TITLE" \
+        --text="$APP_TITLE is already installed.\nWhat would you like to do?" \
+        --column="Action" \
+        --hide-header \
+        "Launch DeckOps" \
+        "Uninstall" \
+        --width=300 --height=200 \
+        2>/dev/null) || exit 0
+else
+    # Some supported desktops do not ship zenity. They should still launch.
+    choice="Launch DeckOps"
+fi
 
 case "$choice" in
     "Launch DeckOps")
-        # Installs from before the PyQt6 move: rerun the installer in this terminal so
-        # the download shows. It keeps deckops.json and the venv and launches DeckOps itself
+        # Repair only when neither Qt version can launch the app. A working
+        # PyQt5 install must not require network access just to open DeckOps.
         if ! "$INSTALL_DIR/.venv/bin/python3" -c "import PyQt6.QtWidgets" &>/dev/null \
-           && [ ! -f "$INSTALL_DIR/.venv/.qt6_unsupported" ]; then
+           && ! "$INSTALL_DIR/.venv/bin/python3" -c "import PyQt5.QtWidgets" &>/dev/null; then
             zenity --info --title="$APP_TITLE Update" --width=360 \
-                --text="DeckOps needs a one-time update (PyQt6, about 100 MB).\n\nIt downloads in the terminal window and can take several minutes.\n\nDo not close the terminal. DeckOps opens when it is done." \
+                --text="DeckOps needs to repair its window components.\n\nIt downloads in the terminal window and can take several minutes.\n\nDo not close the terminal. DeckOps opens when it is done." \
                 2>/dev/null
             touch "$LOCKFILE"
             run_remote_script install.sh
@@ -322,8 +295,13 @@ case "$choice" in
             exit 0
         fi
 
-        # Check for updates before launching
-        check_for_updates
+        # Check for updates before launching; do not launch if rollback failed.
+        check_for_updates || exit 1
+        # Release the launcher lock before main.py checks for a running update.
+        if $UPDATE_LOCKED; then
+            flock -u 9
+            exec 9>&-
+        fi
 
         VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3"
         ENTRY_POINT="$INSTALL_DIR/src/main.py"

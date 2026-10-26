@@ -73,7 +73,7 @@ Plutonium Offline uses a separate instance of Plutonium. It does not interact wi
    - **First time:** DeckOps installs and launches automatically.
    - **Already installed:** A menu appears with Launch and Uninstall options.
 
-DeckOps checks for updates on every launch. Updates download only the changed files. Your config, logs, and music are never overwritten.
+DeckOps checks for updates when you launch it. An existing installation can still open without internet. Updates normally download only changed files; if the change list cannot be verified, DeckOps downloads a complete update instead. Your config, logs, and music are preserved. If an update is interrupted, reopen DeckOps to restore the previous version before trying again.
 
 ---
 
@@ -112,7 +112,7 @@ DeckOps installs a controller profile for every game. Choose your gyro mode duri
 | Player Name | Change your in-game name for CoD4R, CoD4x, IW4x, and Plutonium offline |
 | Shader Cache (LCD only) | Clear shader cache data for all set-up games |
 | Check for Updates | Check for and apply DeckOps updates |
-| Full Uninstall | Remove everything DeckOps installed (backs up saves first) |
+| Full Uninstall | Remove DeckOps-managed files while preserving save backups and unrelated Plutonium data. If Stable is also installed, shared game files and Steam settings stay in place. |
 | Reset DeckOps Config | Wipe config and run setup again |
 | Links | Discord, Stable repo, and Nightly repo |
 
