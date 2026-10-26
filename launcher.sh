@@ -298,11 +298,23 @@ check_for_updates() {
     fi
     if [ ! -f "$APPLY_SCRIPT" ] || \
        ! python3 "$APPLY_SCRIPT" apply "$INSTALL_DIR" "$UPDATE_DIR/files" "$REMOTE_SHA" "$CHANGES" "${APPLY_EXTRA[@]}"; then
-        # A failed rollback leaves its journal for recovery on the next launch.
-        # Do not run a potentially mixed installation in that case.
+        # A journal left behind means the update stopped part way (the apply
+        # process was killed, or its own rollback failed). Roll back now, the
+        # same way the next launch would, and say what actually happened.
         if [ -f "$UPDATE_DIR/transaction.json" ]; then
+            local RECOVER="$INSTALL_DIR/src/update_manifest.py"
+            [ -f "$RECOVER" ] || RECOVER="$UPDATE_DIR/files/src/update_manifest.py"
+            if [ -f "$RECOVER" ] && python3 "$RECOVER" recover "$INSTALL_DIR" \
+               && [ ! -f "$UPDATE_DIR/transaction.json" ]; then
+                rm -rf "$UPDATE_DIR"
+                zenity --error --title="$APP_TITLE" \
+                    --text="Update could not be installed. Your previous version was restored; please retry later or use Check for Updates in DeckOps." \
+                    2>/dev/null
+                return 0
+            fi
+            # Never run a possibly mixed installation; the journal stays for the next try
             zenity --error --title="$APP_TITLE" \
-                --text="Update was interrupted and rollback could not finish. DeckOps will not launch until its previous files are restored. Please contact support." 2>/dev/null
+                --text="Update was interrupted and DeckOps could not restore its previous files yet. Your files were kept.\n\nOpen DeckOps again to retry the restore. If this message keeps appearing, please contact support." 2>/dev/null
             return 1
         fi
         rm -rf "$UPDATE_DIR"
