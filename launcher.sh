@@ -72,7 +72,7 @@ fi
 repair_failed() {
     $DESKTOP_MODE || return 0
     zenity --error --title="$APP_TITLE" --width=380 \
-        --text="DeckOps could not finish repairing itself.\n\nCheck your internet connection, then open DeckOps again to retry." \
+        --text="DeckOps could not finish repairing itself.\n\nCheck your internet connection, then open DeckOps again to retry. If your connection works, GitHub may be limiting downloads; try again in about an hour." \
         2>/dev/null
 }
 
@@ -89,9 +89,9 @@ run_remote_script() {
     if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
             -o "$dir/$name" "$GITHUB_RAW/$name"; then
         rm -rf "$dir"
-        echo "DeckOps: could not download $name. Check your internet connection." >&2
+        echo "DeckOps: could not download $name. Check your internet connection, or try again in an hour (GitHub may be limiting downloads)." >&2
         zenity --error --title="$APP_TITLE" \
-            --text="Could not download $name.\nCheck your internet connection and try again." \
+            --text="Could not download $name.\nCheck your internet connection and try again.\n\nIf your connection works, GitHub may be limiting downloads for a while; try again in about an hour." \
             2>/dev/null
         return 1
     fi

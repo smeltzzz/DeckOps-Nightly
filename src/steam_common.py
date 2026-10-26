@@ -123,11 +123,18 @@ def atomic_write(path: str, data: bytes):
 
 
 def write_json(path: str, data, indent: int = 2):
-    # tmp + rename so a crash or sleep mid-write can't leave a half-written file
+    # tmp + rename so a crash or sleep mid-write can't leave a half-written file;
+    # fsync so a power cut right after the rename can't leave an empty one
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        except OSError:
+            pass                # new file: mkstemp's 0600 is fine
         os.replace(tmp, path)
     except BaseException:
         try: os.unlink(tmp)

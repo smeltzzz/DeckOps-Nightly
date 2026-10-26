@@ -1,6 +1,7 @@
 """Regressions for update and repair paths that must never report false success."""
 
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -641,6 +642,140 @@ _LOCALCONFIG = '''"UserLocalConfigStore"
 \t}
 }
 '''
+
+
+class _FakeResponse:
+    def __init__(self, data): self.data = data
+    def read(self): return json.dumps(self.data).encode()
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def _http_error(code):
+    import urllib.error
+    return urllib.error.HTTPError("https://api.github.com/x", code, "rate limit exceeded", {}, None)
+
+
+class UpdateNoticeAndRateLimitTests(unittest.TestCase):
+    def _ui(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        _qapp(QApplication)
+        import ui_manage
+        return ui_manage
+
+    def test_quick_check_compares_one_request_with_version(self):
+        ui = self._ui()
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "VERSION").write_text("a" * 40 + "\n")
+            calls = []
+
+            def opener(req, timeout=0):
+                calls.append(req.full_url)
+                return _FakeResponse({"sha": sha})
+            with patch.object(ui, "PROJECT_ROOT", root), patch("urllib.request.urlopen", side_effect=opener):
+                sha = "a" * 40
+                self.assertIs(ui._quick_update_check(), False)
+                sha = "b" * 40
+                self.assertIs(ui._quick_update_check(), True)
+                sha = "not-a-sha"
+                self.assertIsNone(ui._quick_update_check())
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(u.endswith("/commits/main") for u in calls))
+            with patch.object(ui, "PROJECT_ROOT", root), \
+                 patch("urllib.request.urlopen", side_effect=_http_error(403)):
+                self.assertIsNone(ui._quick_update_check())
+
+    def test_startup_notice_shown_once_and_never_over_a_running_check(self):
+        ui = self._ui()
+        screen = ui.ManagementScreen(None)
+        screen._on_startup_update_check(False)
+        self.assertEqual(screen._deckops_update_status.text(), "")
+        screen._on_startup_update_check(True)
+        self.assertIn("update is available", screen._deckops_update_status.text())
+        screen._deckops_update_status.setText("Checking...")
+        screen._on_startup_update_check(True)
+        self.assertEqual(screen._deckops_update_status.text(), "Checking...")
+
+    def test_rate_limit_is_named_not_blamed_on_the_connection(self):
+        ui = self._ui()
+        for code in (403, 429):
+            with patch.object(ui, "_remote_changes", side_effect=_http_error(code)):
+                msg = ui._check_update_status()
+            self.assertTrue(msg.startswith("FAIL|") and "limiting requests" in msg, msg)
+        with patch.object(ui, "_remote_changes", side_effect=OSError("Network is unreachable")):
+            self.assertIn("internet connection", ui._check_update_status())
+
+    def test_release_lookups_are_reused_within_a_session(self):
+        import net
+        calls = []
+
+        release = {"assets": [{"name": "a.exe", "browser_download_url": "u1", "digest": "d1"},
+                              {"name": "b.dll", "browser_download_url": "u2", "digest": "d2"}]}
+
+        def opener(req, timeout=0):
+            calls.append(req.full_url)
+            return _FakeResponse(release)
+        with patch.dict(net._LATEST_RELEASES, clear=True), patch("urllib.request.urlopen", side_effect=opener):
+            self.assertEqual(net.github_asset("o/r", "a.exe"), ("u1", "d1"))
+            self.assertEqual(net.github_asset("o/r", "b.dll"), ("u2", "d2"))
+        self.assertEqual(len(calls), 1)
+        with patch.dict(net._LATEST_RELEASES, clear=True), \
+             patch("urllib.request.urlopen", side_effect=[_http_error(403), _FakeResponse(release)]) as op:
+            self.assertEqual(net.github_asset("o/r", "a.exe", fallback="pin"), ("pin", None))
+            self.assertEqual(net.github_asset("o/r", "a.exe", fallback="pin"), ("u1", "d1"))   # failures aren't kept
+            self.assertEqual(op.call_count, 2)
+
+
+class SettingsFileSafetyTests(unittest.TestCase):
+    def test_settings_save_is_flushed_before_it_replaces_the_file(self):
+        from steam_common import write_json
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, "deckops.json")
+            path.write_text('{"setup_games": {"t6mp": {}}}')
+            with patch("os.fsync", side_effect=OSError(5, "I/O error")):
+                with self.assertRaises(OSError):
+                    write_json(str(path), {"setup_games": {}})
+            self.assertEqual(json.loads(path.read_text()), {"setup_games": {"t6mp": {}}})
+            self.assertEqual([n for n in os.listdir(d) if n.endswith(".tmp")], [])
+
+    def test_damaged_settings_are_reported_once_and_kept(self):
+        import config
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "deckops.json")
+            Path(path).write_text('{"setup_games": {"t6')
+            with patch.object(config, "CONFIG_PATH", path), patch.object(config, "_cache", None):
+                self.assertEqual(config.load().get("setup_games"), config.DEFAULTS.get("setup_games"))
+                damaged = config.unnoticed_corrupt_files()
+                self.assertEqual(len(damaged), 1)
+                self.assertEqual(Path(damaged[0]).read_text(), '{"setup_games": {"t6')
+                config.mark_corrupt_noticed(damaged)
+                self.assertEqual(config.unnoticed_corrupt_files(), [])
+                self.assertTrue(os.path.isfile(damaged[0] + ".noticed"))
+
+
+class DamagedSettingsNoticeWiringTests(unittest.TestCase):
+    def test_startup_tells_the_player_then_continues_to_setup(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        _qapp(QApplication)
+        import ui_qt
+        screen = ui_qt.BootstrapScreen(None)
+        with patch.object(ui_qt, "go_to") as go, patch.object(ui_qt, "_load_font"), \
+             patch.object(ui_qt.cfg, "is_first_run", return_value=True), \
+             patch.object(ui_qt.cfg, "unnoticed_corrupt_files", return_value=["/x/deckops.json.corrupt-1"]), \
+             patch.object(ui_qt.cfg, "mark_corrupt_noticed") as mark, \
+             patch.object(ui_qt.QMessageBox, "warning") as warn:
+            screen._proceed()
+        self.assertIn("/x/deckops.json.corrupt-1", warn.call_args[0][2])
+        mark.assert_called_once_with(["/x/deckops.json.corrupt-1"])
+        self.assertEqual(go.call_args[0][1], "SetupFlowScreen")
 
 
 class SetupCheckTests(unittest.TestCase):

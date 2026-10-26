@@ -111,7 +111,7 @@ else
 fi
 TMPZIP="$(mktemp /tmp/deckops_XXXXXX.zip)"
 curl -fL --progress-bar "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$ARCHIVE_REF.zip" -o "$TMPZIP" \
-    || die "Download failed. Check your internet connection."
+    || die "Download failed. Check your internet connection, or try again in about an hour (GitHub may be limiting downloads)."
 success "Download complete."
 
 # ── step 3: extract ───────────────────────────────────────────────────────────

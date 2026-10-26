@@ -108,6 +108,38 @@ def _reset_hint(names) -> bool:
     return "src/config.py" in names or sum(n.startswith("src/") for n in names) > 3
 
 
+def _rate_limited(ex) -> bool:
+    """GitHub refusing because of its limit for requests without an account
+    (60 an hour per internet connection), not a broken connection."""
+    return isinstance(ex, urllib.error.HTTPError) and ex.code in (403, 429)
+
+
+_RATE_LIMIT_MSG = ("GitHub is limiting requests from your internet connection right now. "
+                   "Try again in about an hour.")
+
+
+def _quick_update_check(timeout: int = 8):
+    """One GitHub request: True if main is ahead of this install's VERSION,
+    False if up to date, None if it can't tell (offline, rate limit, ...).
+    Used for the notice at startup; the full check runs on the button."""
+    try:
+        with open(os.path.join(PROJECT_ROOT, "VERSION")) as f:
+            local_sha = f.read().strip()
+    except OSError:
+        local_sha = ""
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/commits/main", headers=_HDR)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            remote_sha = json.loads(r.read()).get("sha", "")
+    except Exception as ex:
+        _log.info("startup update check skipped: %s", ex)
+        return None
+    if not isinstance(remote_sha, str) or len(remote_sha) != 40:
+        return None
+    return remote_sha != local_sha
+
+
 def _check_update_status():
     """Compare this install to GitHub main. Returns 'OK|..', 'UPDATE|..' or 'FAIL|..'."""
     try:
@@ -120,7 +152,9 @@ def _check_update_status():
         return f"UPDATE|Update available — {len(stale)} file(s) to download.{hint}"
     except Exception as ex:
         _log.warning("Update check failed: %s", ex)
-        return "FAIL|Update check failed."
+        if _rate_limited(ex):
+            return f"FAIL|Update check failed. {_RATE_LIMIT_MSG}"
+        return "FAIL|Update check failed. Check your internet connection and try again."
 
 
 # ── ManagementCard ────────────────────────────────────────────────────────────
@@ -333,6 +367,22 @@ class ManagementScreen(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         self._refresh()
+        # The desktop icon skips the launcher's update prompt: say here, once
+        # per session, when an update is out. One GitHub request; silent if
+        # offline or rate limited.
+        if not getattr(self, "_startup_checked", False):
+            self._startup_checked = True
+            self._startup_sig = _Sigs()
+            self._startup_sig.done.connect(self._on_startup_update_check)
+            threading.Thread(target=lambda: self._startup_sig.done.emit(_quick_update_check() is True),
+                             daemon=True).start()
+
+    def _on_startup_update_check(self, available):
+        # Never overwrite a check or update the player started meanwhile
+        if available and self._deckops_update_btn.isEnabled() and not self._deckops_update_status.text():
+            self._deckops_update_status.setText(
+                "A DeckOps update is available. Click Update DeckOps to see it and install it.")
+            self._deckops_update_status.setStyleSheet(f"color:{C_IW};")
 
     def _refresh(self):
         if getattr(self, "_scanning", False): return
@@ -2038,7 +2088,8 @@ class ConfigureScreen(QWidget):
                 self._apply_sig.log.emit(f"ROLLBACK|Could not restore the previous DeckOps version: {ex}")
             else:
                 shutil.rmtree(update_dir, ignore_errors=True)
-                self._apply_sig.log.emit(f"FAIL|Update failed: {ex}")
+                why = _RATE_LIMIT_MSG if _rate_limited(ex) else str(ex)
+                self._apply_sig.log.emit(f"FAIL|Update did not finish. {why}")
 
     def _on_apply_signal(self, msg):
         kind, text = msg.split("|", 1)

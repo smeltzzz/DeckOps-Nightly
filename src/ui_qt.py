@@ -67,7 +67,19 @@ class BootstrapScreen(QWidget):
         except FileNotFoundError:
             pass  # Font missing — fall back gracefully, app still works
 
-        if cfg.is_first_run():
+        first_run = cfg.is_first_run()      # loads deckops.json: moves a damaged one aside
+        damaged = cfg.unnoticed_corrupt_files()
+        if damaged:
+            # It used to only reach the log: the player just saw setup start
+            # again and every game shown as not set up, with no reason given.
+            QMessageBox.warning(
+                self, APP_TITLE,
+                "DeckOps's settings file was damaged (for example by a power cut), so DeckOps "
+                "started with fresh settings.\n\nYour games, game files and saves were not touched. "
+                "Run Set Up again for your games to continue.\n\nThe damaged file was kept as:\n"
+                + "\n".join(damaged))
+            cfg.mark_corrupt_noticed(damaged)
+        if first_run:
             go_to(self.stack, "SetupFlowScreen")
         else:
             go_to(self.stack, "ManagementScreen")

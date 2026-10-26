@@ -244,6 +244,9 @@ def _check_digest(path: str, digest: str):
         raise IOError(f"{algo} mismatch for {os.path.basename(path)}")
 
 
+_LATEST_RELEASES = {}
+
+
 def github_asset(repo: str, suffix: str, fallback: str = None, timeout: int = 30):
     """
     (url, digest) of the latest release asset of repo whose name ends with
@@ -252,11 +255,18 @@ def github_asset(repo: str, suffix: str, fallback: str = None, timeout: int = 30
     or rate limit doesn't block the install, just skips verification.
     """
     try:
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{repo}/releases/latest",
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "DeckOps"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read())
+        # One lookup per repo per session: T6SP, AlterWare (4 games), IW-Pad
+        # and IW4x asked for the same release several times, using up GitHub's
+        # 60 requests an hour. Only answers that worked are kept.
+        data = _LATEST_RELEASES.get(repo)
+        if data is None:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{repo}/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "DeckOps"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read())
+            if isinstance(data, dict):
+                _LATEST_RELEASES[repo] = data
         for a in data.get("assets", []):
             if a["name"].endswith(suffix):
                 return a["browser_download_url"], a.get("digest")

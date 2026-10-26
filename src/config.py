@@ -114,6 +114,23 @@ def load() -> dict:
         return copy.deepcopy(_cache)
 
 
+def unnoticed_corrupt_files() -> list:
+    """deckops.json copies load() moved aside (possibly in another process,
+    e.g. a game's prelaunch) that the player hasn't been told about yet."""
+    import glob
+    return sorted(p for p in glob.glob(glob.escape(CONFIG_PATH) + ".corrupt-*")
+                  if not p.endswith(".noticed"))
+
+
+def mark_corrupt_noticed(paths):
+    """Rename each to <name>.noticed so the notice is shown once. Kept, never deleted."""
+    for p in paths:
+        try:
+            os.replace(p, p + ".noticed")
+        except OSError:
+            _log.debug("could not mark %s as noticed", p, exc_info=True)
+
+
 def save(config: dict):
     """
     Write config to disk and invalidate the cache.
