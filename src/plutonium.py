@@ -980,12 +980,50 @@ def cleanup_plut_from_non_plut_prefixes(steam_root: str, on_progress=None):
         plut_dir = _plut_dir_in_compatdata(steam_root, int(appid_str))
         if not os.path.isdir(plut_dir):
             continue
-        prog(f"  Removing leaked Plutonium data from appid {appid_str}...")
-        shutil.rmtree(plut_dir, ignore_errors=True)
+        # Same rule as the uninstaller: only a folder DeckOps linked to its
+        # Plutonium copy is ours. This used to delete any Plutonium folder
+        # here, storage/ (stats, mods, custom maps) included.
+        if not _linked_by_deckops(plut_dir):
+            _log.info("Plutonium in appid %s prefix is not DeckOps's -- left alone", appid_str)
+            continue
+        storage = os.path.join(plut_dir, "storage")
+        if os.path.isdir(storage) and _has_real_files(storage):
+            # Real files in storage/ may be the only copy of someone's data
+            prog(f"  Removing leaked Plutonium data from appid {appid_str} (keeping storage/)...")
+            for name in os.listdir(plut_dir):
+                if name == "storage":
+                    continue
+                p = os.path.join(plut_dir, name)
+                if os.path.islink(p) or not os.path.isdir(p):
+                    os.remove(p)
+                else:
+                    shutil.rmtree(p, ignore_errors=True)
+        else:
+            prog(f"  Removing leaked Plutonium data from appid {appid_str}...")
+            shutil.rmtree(plut_dir, ignore_errors=True)
         cleaned += 1
         prog(f"  ✓ Cleaned Plutonium from appid {appid_str}")
 
     return cleaned
+
+
+def _linked_by_deckops(plut_dir: str) -> bool:
+    """True if bin/, launcher/ or games/ is a link to DeckOps's Plutonium
+    master (or the old shared copy it used to use)."""
+    owners = [get_dedicated_plut_dir(), SHARED_PLUT_DIR]
+    for sub in _PLUT_SHARED_SUBDIRS:
+        p = os.path.join(plut_dir, sub)
+        if os.path.islink(p) and any(
+                os.path.realpath(p) == os.path.realpath(os.path.join(o, sub)) for o in owners):
+            return True
+    return False
+
+
+def _has_real_files(path: str) -> bool:
+    for dp, _, files in os.walk(path):
+        if any(not os.path.islink(os.path.join(dp, f)) for f in files):
+            return True
+    return False
 
 
 # ── public API ────────────────────────────────────────────────────────────────

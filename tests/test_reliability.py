@@ -1,6 +1,7 @@
 """Regressions for update and repair paths that must never report false success."""
 
 import hashlib
+import os
 import subprocess
 from pathlib import Path
 import sys
@@ -420,6 +421,66 @@ class ZombiesRepairTests(unittest.TestCase):
                 zd.update_zd(self.root)
             download.assert_not_called()
         self.assertEqual(self.file.read_bytes(), b"good")
+
+
+class PlutoniumLeakCleanupTests(unittest.TestCase):
+    """Update Games' leaked-Plutonium cleanup must only remove DeckOps's folders."""
+
+    def setUp(self):
+        import plutonium
+        self.plut = plutonium
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.master = self.root / "master" / "Plutonium"
+        for sub in ("bin", "launcher", "games"):
+            (self.master / sub).mkdir(parents=True)
+        probe = self.root / "probe"
+        try:
+            probe.symlink_to(self.master)
+        except OSError:
+            self.skipTest("symlinks unavailable here")
+        for p in (patch.object(plutonium, "get_dedicated_plut_dir", return_value=str(self.master)),
+                  patch.object(plutonium, "SHARED_PLUT_DIR", str(self.root / "no-shared"))):
+            p.start()
+            self.addCleanup(p.stop)
+        # CoD4 (7940) never runs Plutonium
+        self.dir = Path(plutonium._plut_dir_in_compatdata(str(self.root), 7940))
+        self.dir.mkdir(parents=True)
+
+    def _clean(self):
+        return self.plut.cleanup_plut_from_non_plut_prefixes(str(self.root))
+
+    def test_deckops_leak_without_user_files_is_removed(self):
+        (self.dir / "bin").symlink_to(self.master / "bin")
+        (self.dir / "storage" / "t6").mkdir(parents=True)
+        (self.dir / "storage" / "t6" / "x.ff").symlink_to(self.master / "bin")
+        self.assertEqual(self._clean(), 1)
+        self.assertFalse(self.dir.exists())
+
+    def test_deckops_leak_keeps_real_storage_files(self):
+        (self.dir / "bin").symlink_to(self.master / "bin")
+        (self.dir / "config.json").write_text("{}")
+        stats = self.dir / "storage" / "t6" / "players" / "stats.cfg"
+        stats.parent.mkdir(parents=True)
+        stats.write_text("prestige 10")
+        self.assertEqual(self._clean(), 1)
+        self.assertEqual(stats.read_text(), "prestige 10")
+        self.assertFalse(os.path.lexists(self.dir / "bin"))
+        self.assertFalse((self.dir / "config.json").exists())
+        self.assertTrue(self.master.joinpath("bin").is_dir())      # the link target survives
+
+    def test_unidentified_plutonium_is_left_alone(self):
+        stats = self.dir / "storage" / "t6" / "players" / "stats.cfg"
+        stats.parent.mkdir(parents=True)
+        stats.write_text("mine")
+        (self.dir / "bin").mkdir()
+        other = self.root / "other" / "bin"
+        other.mkdir(parents=True)
+        (self.dir / "launcher").symlink_to(other)
+        self.assertEqual(self._clean(), 0)
+        self.assertEqual(stats.read_text(), "mine")
+        self.assertTrue((self.dir / "bin").is_dir())
 
 
 class DesktopIconUpgradeTests(unittest.TestCase):
