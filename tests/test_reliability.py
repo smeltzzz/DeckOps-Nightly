@@ -388,6 +388,28 @@ class SaveBackupWithoutSettingsTests(unittest.TestCase):
         self.assertIn("could not tell which games", sb.describe_backup({}, ["settings"]))
 
 
+class T6spConsistentPairTests(unittest.TestCase):
+    def test_exe_and_dll_always_come_from_the_same_release(self):
+        import t6sp_mod
+        latest = "https://github.com/Rattpak/T6SP-Mod-Release/releases/download/v2.0/"
+        cases = [
+            ([(latest + "T6SP-Mod.exe", "sha256:a"), (t6sp_mod._PIN + "t6sp-mod.dll", None)], t6sp_mod._PIN),
+            ([(t6sp_mod._PIN + "T6SP-Mod.exe", None), (latest + "t6sp-mod.dll", "sha256:b")], t6sp_mod._PIN),
+            ([(latest + "T6SP-Mod.exe", "sha256:a"), (latest + "t6sp-mod.dll", "sha256:b")], latest),
+        ]
+        for lookups, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as game:
+                urls = []
+
+                def fake_download(url, dest, *a, **kw):
+                    urls.append(url)
+                    Path(dest).write_bytes(b"x")
+                with patch.object(t6sp_mod, "github_asset", side_effect=lookups), \
+                     patch.object(t6sp_mod, "_download", side_effect=fake_download):
+                    t6sp_mod.install_t6sp_mod({"install_dir": game}, game, "", "", source="own")
+                self.assertTrue(all(u.startswith(expected) for u in urls), urls)
+
+
 class InstallStopsWhenSteamStaysOpenTests(unittest.TestCase):
     def test_no_steam_config_written_if_steam_cannot_be_closed(self):
         try:

@@ -64,6 +64,12 @@ def install_t6sp_mod(game: dict, steam_root: str,
 
     exe_url, exe_dg = github_asset(_REPO, "T6SP-Mod.exe", fallback=_PIN + "T6SP-Mod.exe")
     dll_url, dll_dg = github_asset(_REPO, "t6sp-mod.dll", fallback=_PIN + "t6sp-mod.dll")
+    # Two lookups: if only one fell back (e.g. a GitHub rate limit between
+    # them), the exe and dll would come from different releases. Use the
+    # pinned pair for both instead.
+    if exe_url.startswith(_PIN) != dll_url.startswith(_PIN):
+        exe_url, exe_dg = _PIN + "T6SP-Mod.exe", None
+        dll_url, dll_dg = _PIN + "t6sp-mod.dll", None
 
     # Download mod exe
     exe_dest = os.path.join(install_dir, "t6sp_mod_tmp.exe")
