@@ -6,7 +6,8 @@ import subprocess
 
 from identity import LEDGER_PATH
 from log import get_logger
-from steam_common import backup_file as _backup_file, newest_proton_dir, write_json as _write_json
+from steam_common import (backup_file as _backup_file, newest_proton_dir, write_json as _write_json,
+                          atomic_write as _atomic_write, keep_original as _keep_original)
 
 _log = get_logger(__name__)
 
@@ -86,91 +87,86 @@ def _find_block_end(text, start):
     Failure to do this will corrupt localconfig.vdf.
     """
     depth = 0
-    i = start
-    in_quote = False
-    while i < len(text):
-        c = text[i]
-        if c == '"' and (i == 0 or text[i - 1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
+    for i, c, in_quote in _vdf_scan(text, start):
+        if not in_quote:
             if c == '{':
                 depth += 1
             elif c == '}':
                 depth -= 1
                 if depth == 0:
                     return i
-        i += 1
     return -1
 
 
-def _validate_vdf(path: str) -> bool:
-    """
-    Read a VDF file back after writing and verify brace balance.
+def _vdf_scan(text, start=0):
+    """Yield (index, char, inside_quotes) for the structural characters of a
+    text VDF. Inside quotes a backslash escapes the next character, so
+    "C:\\\\" ends at its last quote (the old check, "quote not preceded by a
+    backslash", read that as an escaped quote and lost track from there)."""
+    i, n, in_quote = start, len(text), False
+    while i < n:
+        c = text[i]
+        if in_quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                in_quote = False
+            else:
+                yield i, c, True
+        elif c == '"':
+            in_quote = True
+        else:
+            yield i, c, False
+        i += 1
 
-    Walks the entire file using the same quote-aware brace parser that
-    _find_block_end uses. A valid VDF file has every { matched by a }.
-    Returns True if balanced, False if corrupt.
 
-    On failure, automatically restores from .bak if available and logs
-    the error. This catches corruption before Steam ever sees the file.
-    """
-    try:
-        with open(path, "r", errors="replace") as f:
-            data = f.read()
-    except OSError:
-        _log.error("VDF validation: cannot read %s", path)
-        return False
-
-    depth = 0
-    in_quote = False
-    for i, c in enumerate(data):
-        if c == '"' and (i == 0 or data[i - 1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
-            if c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth < 0:
-                    break
-
-    if depth != 0:
-        _log.error(
-            "VDF validation FAILED for %s (brace depth %d) — restoring backup",
-            path, depth,
-        )
-        bak = path + ".bak"
-        if os.path.exists(bak):
-            try:
-                shutil.copy2(bak, path)
-                _log.info("VDF restored from %s", bak)
-            except OSError:
-                _log.error("VDF restore failed for %s", path, exc_info=True)
-        return False
-
-    return True
+def _vdf_balanced(text) -> bool:
+    """Every { outside quotes has its }, and no quote is left open (an
+    unterminated quote swallows the rest of the file)."""
+    depth, in_quote, i, n = 0, False, 0, len(text)
+    while i < n:
+        c = text[i]
+        if in_quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"':
+                in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth < 0:
+                return False
+        i += 1
+    return depth == 0 and not in_quote
 
 
 def _write_and_validate_vdf(path: str, data: str, encoding: str = "utf-8",
                             errors: str | None = None) -> bool:
     """
-    Write VDF data to path, then validate brace balance.
+    Check new VDF text, then write it in one step.
 
-    Backs up before writing. If validation fails, the backup is
-    automatically restored. Returns True if the write is clean.
+    The text is checked BEFORE the disk is touched: if its braces or quotes
+    don't balance, the file is left as it is and False is returned (it used
+    to be written first and the .bak copied back afterwards). The write
+    itself is atomic (steam_common.atomic_write), so a crash or full disk
+    can't leave a cut-off file. The first edit keeps <file>.deckops-original;
+    every edit refreshes <file>.bak. Returns True if the new text is on disk.
 
-    encoding / errors — passed to open(). Use errors="replace" for
-    localconfig.vdf which can contain non-UTF-8 bytes.
+    encoding / errors -- how the text is turned back into bytes. Text read
+    with errors="surrogateescape" (localconfig.vdf) is written back the same
+    way, so bytes that aren't valid UTF-8 survive unchanged.
     """
-    _backup_file(path)
-    open_kwargs = {"encoding": encoding}
-    if errors:
-        open_kwargs = {"errors": errors}
-    with open(path, "w", **open_kwargs) as f:
-        f.write(data)
-    if not _validate_vdf(path):
-        _log.error("VDF corruption detected in %s after write", path)
+    if not _vdf_balanced(data):
+        _log.error("VDF edit for %s rejected: braces or quotes don't balance; file left unchanged", path)
         return False
+    _keep_original(path)
+    _backup_file(path)
+    _atomic_write(path, data.encode(encoding, errors or "strict"))
     return True
 
 
@@ -191,7 +187,9 @@ def _localconfigs(steam_root):
         vdf_path = os.path.join(userdata, uid, "config", "localconfig.vdf")
         if not os.path.exists(vdf_path):
             continue
-        with open(vdf_path, "r", errors="replace") as f:
+        # surrogateescape: bytes that aren't UTF-8 are carried through an edit
+        # unchanged (errors="replace" turned them into U+FFFD on write)
+        with open(vdf_path, "r", encoding="utf-8", errors="surrogateescape") as f:
             content = f.read()
         yield uid, vdf_path, content
 
@@ -520,8 +518,8 @@ def set_launch_options(steam_root, appid, options):
             _log.warning("LaunchOptions not set for %s (uid %s): %s", appid, uid, ex)
             continue
 
-        _write_and_validate_vdf(vdf_path, content, errors="replace")
-        _record_localconfig(uid, appid, "LaunchOptions", vdf_options)
+        if _write_and_validate_vdf(vdf_path, content, errors="surrogateescape"):
+            _record_localconfig(uid, appid, "LaunchOptions", vdf_options)
 
 
 def clear_launch_options(steam_root, appid):
@@ -550,8 +548,8 @@ def clear_launch_options(steam_root, appid):
             continue
 
         content = _set_flat_value(content, found, "")
-        _write_and_validate_vdf(vdf_path, content, errors="replace")
-        _record_localconfig(uid, appid, "LaunchOptions", "")
+        if _write_and_validate_vdf(vdf_path, content, errors="surrogateescape"):
+            _record_localconfig(uid, appid, "LaunchOptions", "")
 
 
 def snapshot_launch_options(steam_root, appids):
@@ -603,7 +601,7 @@ def restore_launch_options(steam_root, snapshot, appid):
         except ValueError as ex:
             _log.warning("LaunchOptions not restored for %s (uid %s): %s", appid, uid, ex)
             continue
-        if _write_and_validate_vdf(vdf_path, content, errors="replace"):
+        if _write_and_validate_vdf(vdf_path, content, errors="surrogateescape"):
             _record_localconfig(uid, appid, "LaunchOptions", value)
             restored.append(uid)
     return restored
@@ -765,8 +763,7 @@ def set_steam_input_enabled(steam_root, appids=None):
                 continue
             modified_appids.append(appid)
 
-        if modified_appids:
-            _write_and_validate_vdf(vdf_path, content, errors="replace")
+        if modified_appids and _write_and_validate_vdf(vdf_path, content, errors="surrogateescape"):
             for appid in modified_appids:
                 _record_localconfig(uid, appid, "UseSteamControllerConfig", "1")
 
@@ -839,9 +836,9 @@ def set_compat_tool(appids, version):
                     count=1,
                 )
 
-    _write_and_validate_vdf(STEAM_CONFIG, data)
-    for appid in appids:
-        _record_config_vdf(str(appid), "CompatToolMapping", version)
+    if _write_and_validate_vdf(STEAM_CONFIG, data):
+        for appid in appids:
+            _record_config_vdf(str(appid), "CompatToolMapping", version)
 
 
 def clear_compat_tool(appids):
@@ -879,8 +876,7 @@ def clear_compat_tool(appids):
             data = re.sub(pattern, "", data, flags=re.MULTILINE | re.DOTALL)
             modified = True
 
-    if modified:
-        _write_and_validate_vdf(STEAM_CONFIG, data)
+    if modified and _write_and_validate_vdf(STEAM_CONFIG, data):
         for appid in appids:
             _remove_config_vdf(str(appid), "CompatToolMapping")
 
@@ -986,8 +982,7 @@ def set_default_launch_option(steam_root, appids_config):
                         )
                         modified = True
 
-        if modified:
-            _write_and_validate_vdf(vdf_path, content, errors="replace")
+        if modified and _write_and_validate_vdf(vdf_path, content, errors="surrogateescape"):
             for appid, (hash_key, index) in appids_config.items():
                 _record_localconfig(
                     uid, appid, "DefaultLaunchOption",
@@ -1022,4 +1017,4 @@ def clear_default_launch_option(steam_root, appids):
             changed = True
         if changed:
             _write_and_validate_vdf(vdf_path, content[:apps_open + 1] + block + content[apps_close:],
-                                    errors="replace")
+                                    errors="surrogateescape")

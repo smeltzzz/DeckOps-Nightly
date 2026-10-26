@@ -633,6 +633,84 @@ _LOCALCONFIG = '''"UserLocalConfigStore"
 '''
 
 
+class SteamFileSafetyTests(unittest.TestCase):
+    """Steam's files are replaced all at once, checked before writing, keep
+    bytes that aren't UTF-8, and keep the player's original copy."""
+
+    def setUp(self):
+        import wrapper
+        self.w = wrapper
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        self.vdf = Path(self.root, "userdata", "123", "config", "localconfig.vdf")
+        self.vdf.parent.mkdir(parents=True)
+        self.vdf.write_bytes(_LOCALCONFIG.encode())
+        self.ledger = Path(self.root, "ledger.json")
+        p = patch.object(wrapper, "LEDGER_PATH", str(self.ledger))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _leftovers(self, folder):
+        return [n for n in os.listdir(folder) if n.endswith(".tmp")]
+
+    def test_disk_error_mid_write_leaves_localconfig_untouched(self):
+        before = self.vdf.read_bytes()
+        with patch("os.fsync", side_effect=OSError(28, "No space left on device")):
+            try:
+                self.w.set_launch_options(self.root, "10190", "new %command%")
+            except OSError:
+                pass
+        self.assertEqual(self.vdf.read_bytes(), before)
+        self.assertEqual(self._leftovers(self.vdf.parent), [])
+
+    def test_disk_error_mid_write_leaves_shortcuts_untouched(self):
+        import shortcut
+        path = Path(self.root, "shortcuts.vdf")
+        before = b"\x00shortcuts\x00" + b"\x000\x00\x01AppName\x00Mine\x00\x08" + b"\x08\x08"
+        path.write_bytes(before)
+        raw = shortcut._read_shortcuts_raw(str(path))
+        with patch("os.fsync", side_effect=OSError(28, "No space left on device")):
+            try:
+                shortcut._write_shortcuts_vdf(str(path), raw, [b"\x001\x00\x01AppName\x00New\x00\x08"])
+            except OSError:
+                pass
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self._leftovers(self.root), [])
+
+    def test_bytes_that_are_not_utf8_survive_an_edit(self):
+        data = self.vdf.read_bytes().replace(b'"other %command%"', b'"caf\xe9 %command%"')
+        self.vdf.write_bytes(data)
+        self.w.set_launch_options(self.root, "10190", "new %command%")
+        out = self.vdf.read_bytes()
+        self.assertIn(b'"caf\xe9 %command%"', out)
+        self.assertIn(b"new %command%", out)
+
+    def test_value_ending_in_backslash_does_not_block_the_edit(self):
+        data = self.vdf.read_text().replace('"other %command%"', '"Z:\\\\games\\\\"')
+        self.vdf.write_text(data)
+        self.w.set_launch_options(self.root, "10190", "new %command%")
+        self.assertIn("new %command%", self.vdf.read_text())
+
+    def test_unbalanced_edit_is_never_written_or_recorded(self):
+        before = self.vdf.read_bytes()
+        self.assertFalse(self.w._write_and_validate_vdf(str(self.vdf), '"a" { "b" { }', errors="surrogateescape"))
+        self.assertEqual(self.vdf.read_bytes(), before)
+        with patch.object(self.w, "_vdf_balanced", create=True, return_value=False):
+            self.w.set_launch_options(self.root, "10190", "new %command%")
+        self.assertEqual(self.vdf.read_bytes(), before)
+        self.assertNotIn("new %command%", self.ledger.read_text() if self.ledger.exists() else "")
+
+    def test_players_original_is_kept_once(self):
+        original = self.vdf.read_bytes()
+        self.w.set_launch_options(self.root, "10190", "first %command%")
+        after_first = self.vdf.read_bytes()
+        self.w.clear_launch_options(self.root, "10190")
+        orig = Path(str(self.vdf) + ".deckops-original")
+        self.assertEqual(orig.read_bytes(), original)
+        self.assertEqual(Path(str(self.vdf) + ".bak").read_bytes(), after_first)
+
+
 class LaunchOptionRestoreTests(unittest.TestCase):
     """A game that fails during Update Games must keep its launch options."""
 

@@ -34,7 +34,9 @@ _log = get_logger(__name__)
 
 from steam_common import (
     PROJECT_ROOT, STEAM_ROOT, USERDATA_DIR,
+    atomic_write as _atomic_write,
     backup_file as _backup_file,
+    keep_original as _keep_original,
     calc_shortcut_appid as _calc_shortcut_appid,
     find_all_steam_uids as _find_all_steam_uids,
     get_deck_serial as _get_deck_serial,
@@ -624,6 +626,7 @@ def _get_next_index(raw_data: bytes) -> int:
 def _write_shortcuts_vdf(path: str, existing_raw: bytes, new_entries: list):
     """Write shortcuts.vdf with existing entries preserved and new ones appended."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    _keep_original(path)
     _backup_file(path)
     
     data = b'\x00shortcuts\x00'
@@ -636,8 +639,8 @@ def _write_shortcuts_vdf(path: str, existing_raw: bytes, new_entries: list):
     
     data += b'\x08\x08'
     
-    with open(path, 'wb') as f:
-        f.write(data)
+    # All at once: a cut-off shortcuts.vdf loses every non-Steam shortcut
+    _atomic_write(path, data)
 
 
 # ── Artwork download ──────────────────────────────────────────────────────────

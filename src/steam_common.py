@@ -75,6 +75,53 @@ def backup_file(path: str):
             _log.debug("backup failed for %s", path, exc_info=True)
 
 
+ORIGINAL_SUFFIX = ".deckops-original"
+
+
+def keep_original(path: str):
+    """The first time DeckOps edits a Steam file, keep a copy of it as it was.
+    Never overwritten (each write replaces .bak, so after a few writes .bak
+    no longer holds the player's own version). Only for manual recovery."""
+    orig = path + ORIGINAL_SUFFIX
+    if os.path.exists(path) and not os.path.lexists(orig):
+        try:
+            shutil.copy2(path, orig)
+        except OSError:
+            _log.debug("could not keep original of %s", path, exc_info=True)
+
+
+def atomic_write(path: str, data: bytes):
+    """Replace path with data all at once: write a temp file next to it,
+    flush it to disk, then rename it over path. A crash, power loss or full
+    disk leaves the old file or the new one, never a cut-off file. Keeps the
+    file's permissions. Raises OSError on failure (path is then unchanged)."""
+    folder = os.path.dirname(path) or "."
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except OSError:
+        mode = None
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".deckops-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+    if hasattr(os, "O_DIRECTORY"):
+        try:
+            dfd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try: os.fsync(dfd)
+            finally: os.close(dfd)
+        except OSError:
+            pass
+
+
 def write_json(path: str, data, indent: int = 2):
     # tmp + rename so a crash or sleep mid-write can't leave a half-written file
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
@@ -209,13 +256,13 @@ def patch_configset(configset_path: str, key: str, template_name: str):
 
     if not os.path.exists(configset_path):
         os.makedirs(os.path.dirname(configset_path), exist_ok=True)
-        with open(configset_path, "w", encoding="utf-8") as f:
-            f.write('"controller_config"\n{\n' + entry + '}\n')
+        atomic_write(configset_path, ('"controller_config"\n{\n' + entry + '}\n').encode("utf-8"))
         record_configset_edit(configset_path, key, template_name)
         return
 
-    with open(configset_path, "r", encoding="utf-8", errors="replace") as f:
+    with open(configset_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         content = f.read()
+    before = content
 
     # This regex works because configset entries are shallow (one level of
     # braces). [^}]* matches everything inside the block without crossing
@@ -229,9 +276,14 @@ def patch_configset(configset_path: str, key: str, template_name: str):
         content = content.rstrip()
         if content.endswith("}"):
             content = content[:-1].rstrip() + "\n" + entry + "}\n"
+        else:
+            # Not the shape we know: leave it alone rather than record an edit we didn't make
+            _log.warning("configset %s not patched for %s: unexpected format", configset_path, key)
+            return
 
-    with open(configset_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    if content != before:
+        backup_file(configset_path)
+        atomic_write(configset_path, content.encode("utf-8", "surrogateescape"))
     record_configset_edit(configset_path, key, template_name)
 
 
