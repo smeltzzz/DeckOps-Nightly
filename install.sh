@@ -234,11 +234,13 @@ info "Creating application shortcut..."
 
 mkdir -p "$(dirname "$DESKTOP_FILE")"
 
+# Through the launcher, not the venv's python directly: a venv broken by a
+# SteamOS Python update can then still be repaired from the icon.
 cat > "$DESKTOP_FILE" << DEOF
 [Desktop Entry]
 Name=${APP_TITLE:-DeckOps Nightly}
 Comment=${DESKTOP_COMMENT:-DeckOps Nightly — Experimental build}
-Exec=$VENV_PYTHON $ENTRY_POINT
+Exec=bash "$INSTALL_DIR/launcher.sh" --desktop
 Icon=$ICON_PATH
 Terminal=false
 Type=Application

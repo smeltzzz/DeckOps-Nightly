@@ -422,6 +422,43 @@ class ZombiesRepairTests(unittest.TestCase):
         self.assertEqual(self.file.read_bytes(), b"good")
 
 
+class DesktopIconUpgradeTests(unittest.TestCase):
+    """Old icons ran the venv's python directly and could not repair it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.install = str(self.home / "DeckOps-Nightly")
+        Path(self.install).mkdir()
+        Path(self.install, "launcher.sh").write_text("#!/bin/bash\n")
+        self.old = f"Exec={self.install}/.venv/bin/python3 {self.install}/src/main.py"
+        self.app = self.home / ".local" / "share" / "applications" / "deckops-nightly.desktop"
+        self.desk = self.home / "Desktop" / "DeckOps-Nightly.desktop"
+        for p in (self.app, self.desk):
+            p.parent.mkdir(parents=True)
+            p.write_text(f"[Desktop Entry]\nName=DeckOps Nightly\n{self.old}\nTerminal=false\n")
+
+    def test_old_icons_open_through_the_launcher(self):
+        changed = update_manifest.upgrade_desktop_entries(self.install, str(self.home))
+        self.assertEqual(sorted(changed), sorted([str(self.app), str(self.desk)]))
+        for p in (self.app, self.desk):
+            text = p.read_text()
+            self.assertIn(f'Exec=bash "{self.install}/launcher.sh" --desktop\n', text)
+            self.assertNotIn("main.py", text)
+            self.assertIn("Name=DeckOps Nightly\n", text)
+        self.assertEqual(update_manifest.upgrade_desktop_entries(self.install, str(self.home)), [])
+
+    def test_edited_icon_or_missing_launcher_is_left_alone(self):
+        Path(self.install, "launcher.sh").unlink()
+        self.assertEqual(update_manifest.upgrade_desktop_entries(self.install, str(self.home)), [])
+        self.assertIn(self.old, self.app.read_text())
+        Path(self.install, "launcher.sh").write_text("#!/bin/bash\n")
+        self.desk.write_text("[Desktop Entry]\nExec=my-own-command\n")
+        self.assertEqual(update_manifest.upgrade_desktop_entries(self.install, str(self.home)), [str(self.app)])
+        self.assertEqual(self.desk.read_text(), "[Desktop Entry]\nExec=my-own-command\n")
+
+
 _LOCALCONFIG = '''"UserLocalConfigStore"
 {
 \t"Software"

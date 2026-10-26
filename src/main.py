@@ -40,6 +40,15 @@ setup_logging()
 import crash
 crash.install()
 
+# Icons from older installers bypass the launcher, which can repair a broken
+# venv. This start worked, so the launcher is there to switch them to.
+try:
+    from update_manifest import upgrade_desktop_entries
+    for _icon in upgrade_desktop_entries(_install_dir):
+        get_logger(__name__).info("desktop icon now opens through launcher.sh: %s", _icon)
+except Exception:
+    get_logger(__name__).warning("desktop icon upgrade skipped", exc_info=True)
+
 
 def _ensure_qt6():
     # Updates only copy files, so venvs made before the PyQt6 move still

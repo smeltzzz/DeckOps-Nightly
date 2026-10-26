@@ -42,6 +42,46 @@ def update_lock(install_dir):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+def upgrade_desktop_entries(install_dir, home=None):
+    """Point desktop icons made by older installers at `launcher.sh --desktop`.
+
+    Those icons ran the venv's python directly, so a venv broken by a SteamOS
+    Python update could not open or repair DeckOps. Only an Exec line that is
+    exactly the old one is replaced; icons a player edited are left alone.
+    Returns the paths rewritten.
+    """
+    install_dir = str(install_dir)
+    if not os.path.isfile(os.path.join(install_dir, "launcher.sh")):
+        return []
+    home = home or os.path.expanduser("~")
+    name = os.path.basename(install_dir.rstrip("/\\"))
+    old = f"Exec={install_dir}/.venv/bin/python3 {install_dir}/src/main.py"
+    new = f'Exec=bash "{install_dir}/launcher.sh" --desktop'
+    changed = []
+    for path in (os.path.join(home, ".local", "share", "applications", f"{name.lower()}.desktop"),
+                 os.path.join(home, "Desktop", f"{name}.desktop")):
+        try:
+            with open(path, encoding="utf-8") as stream:
+                lines = stream.read().split("\n")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if old not in lines:
+            continue
+        lines = [new if line == old else line for line in lines]
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        fd, tmp = tempfile.mkstemp(prefix=".deckops-desktop-", dir=os.path.dirname(path))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write("\n".join(lines))
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        changed.append(path)
+    return changed
+
+
 def _path(value):
     if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value:
         raise ValueError("invalid update path")

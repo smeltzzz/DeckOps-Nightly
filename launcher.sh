@@ -33,6 +33,49 @@ LOCKFILE="$HOME/.deckops_installing"
 VERSION_FILE="$INSTALL_DIR/VERSION"
 UPDATE_DIR="$INSTALL_DIR/.update"
 
+# The installed desktop icon runs `launcher.sh --desktop`: open DeckOps right
+# away, without the menu or the update prompt (DeckOps checks for updates
+# itself). It used to start the venv's python directly, so a venv broken by a
+# SteamOS Python update did nothing at all and could not be repaired from it.
+DESKTOP_MODE=false
+[ "${1:-}" = "--desktop" ] && DESKTOP_MODE=true
+
+venv_ok() {
+    "$INSTALL_DIR/.venv/bin/python3" -c "import PyQt6.QtWidgets" &>/dev/null \
+        || "$INSTALL_DIR/.venv/bin/python3" -c "import PyQt5.QtWidgets" &>/dev/null
+}
+
+# The icon has no terminal window. An install or repair shows its progress in
+# one, so open a terminal that runs this launcher again.
+if $DESKTOP_MODE && [ ! -t 1 ] && \
+   { [ ! -d "$INSTALL_DIR" ] || [ -f "$LOCKFILE" ] || ! venv_ok; }; then
+    zenity --info --title="$APP_TITLE" --width=380 \
+        --text="DeckOps needs to repair itself (a SteamOS update can cause this).\n\nA terminal window opens and shows the progress. It can take several minutes; do not close it. DeckOps opens when it is done." \
+        2>/dev/null
+    SELF="${BASH_SOURCE[0]}"
+    for term in konsole gnome-terminal xterm; do
+        command -v "$term" >/dev/null 2>&1 || continue
+        case "$term" in
+            gnome-terminal) "$term" --wait -- bash "$SELF" --desktop ;;
+            *)              "$term" -e bash "$SELF" --desktop ;;
+        esac
+        exit 0
+    done
+    zenity --error --title="$APP_TITLE" --width=380 \
+        --text="DeckOps needs to repair itself, but no terminal program was found.\n\nOpen a terminal (Konsole) and run:\nbash ~/$(basename "$INSTALL_DIR")/launcher.sh" \
+        2>/dev/null
+    exit 1
+fi
+
+# An install or repair started from the icon runs in its own terminal window,
+# which closes when it ends: say so if it failed.
+repair_failed() {
+    $DESKTOP_MODE || return 0
+    zenity --error --title="$APP_TITLE" --width=380 \
+        --text="DeckOps could not finish repairing itself.\n\nCheck your internet connection, then open DeckOps again to retry." \
+        2>/dev/null
+}
+
 # Download one of this repo's scripts to a file, then run it. `curl | bash`
 # starts running whatever has arrived, so a connection that dropped part way
 # used to run half of the installer or uninstaller. Here curl must finish
@@ -67,6 +110,7 @@ if [ ! -d "$INSTALL_DIR" ] || [ -f "$LOCKFILE" ]; then
         rm -f "$LOCKFILE"
         exit 0
     fi
+    repair_failed
     exit 1
 fi
 
@@ -283,7 +327,9 @@ check_for_updates() {
 }
 
 # ── Already installed — ask what to do ───────────────────────────────────────
-if command -v zenity >/dev/null 2>&1; then
+if $DESKTOP_MODE; then
+    choice="Launch DeckOps"
+elif command -v zenity >/dev/null 2>&1; then
     choice=$(zenity \
         --list \
         --title="$APP_TITLE" \
@@ -303,9 +349,9 @@ case "$choice" in
     "Launch DeckOps")
         # Repair only when neither Qt version can launch the app. A working
         # PyQt5 install must not require network access just to open DeckOps.
-        if ! "$INSTALL_DIR/.venv/bin/python3" -c "import PyQt6.QtWidgets" &>/dev/null \
-           && ! "$INSTALL_DIR/.venv/bin/python3" -c "import PyQt5.QtWidgets" &>/dev/null; then
-            zenity --info --title="$APP_TITLE Update" --width=360 \
+        if ! venv_ok; then
+            # From the icon the player was already told, before the terminal opened
+            $DESKTOP_MODE || zenity --info --title="$APP_TITLE Update" --width=360 \
                 --text="DeckOps needs to repair its window components.\n\nIt downloads in the terminal window and can take several minutes.\n\nDo not close the terminal. DeckOps opens when it is done." \
                 2>/dev/null
             touch "$LOCKFILE"
@@ -313,11 +359,15 @@ case "$choice" in
                 rm -f "$LOCKFILE"
                 exit 0
             fi
+            repair_failed
             exit 1
         fi
 
         # Check for updates before launching; do not launch if rollback failed.
-        check_for_updates || exit 1
+        # The icon skips the prompt: DeckOps itself shows when one is available.
+        if ! $DESKTOP_MODE; then
+            check_for_updates || exit 1
+        fi
         # Release the launcher lock before main.py checks for a running update.
         if $UPDATE_LOCKED; then
             flock -u 9
