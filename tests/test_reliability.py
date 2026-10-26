@@ -388,6 +388,38 @@ class SaveBackupWithoutSettingsTests(unittest.TestCase):
         self.assertIn("could not tell which games", sb.describe_backup({}, ["settings"]))
 
 
+class InstallStopsWhenSteamStaysOpenTests(unittest.TestCase):
+    def test_no_steam_config_written_if_steam_cannot_be_closed(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        app = QApplication.instance() or QApplication([])
+        import ui_install
+        screen = ui_install.InstallScreen(None)
+        screen.steam_selected, screen.own_selected = [], {}
+        screen.steam_root = tempfile.gettempdir()
+        screen.offline_mode = None
+        done, logs = [], []
+        screen._s.done.connect(done.append)
+        screen._s.log.connect(logs.append)
+        with patch.object(ui_install, "_log_to_file", create=True), \
+             patch.object(ui_install.cfg, "get_offline_mode", return_value=False), \
+             patch("wrapper.kill_steam", side_effect=TimeoutError("Steam did not exit")), \
+             patch("wrapper.get_proton_path", return_value="proton"), \
+             patch("wrapper.clear_launch_options") as clear_lo, \
+             patch("wrapper.clear_compat_tool") as clear_ct, \
+             patch("wrapper.set_compat_tool") as set_ct, \
+             patch("ge_proton.install_ge_proton", return_value="GE-Proton10-1"), \
+             patch.object(ui_install.cfg, "set_ge_proton_version"):
+            screen._run()
+        app.processEvents()
+        self.assertEqual(done, [False])
+        clear_lo.assert_not_called(); clear_ct.assert_not_called(); set_ct.assert_not_called()
+        self.assertTrue(any("Steam's settings were not changed" in m for m in logs), logs[-3:])
+
+
 class DepotLoginTests(unittest.TestCase):
     def test_cleanup_removes_only_private_login(self):
         with tempfile.TemporaryDirectory() as tmp:

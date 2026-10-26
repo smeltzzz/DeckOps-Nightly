@@ -617,6 +617,10 @@ class SetupScreen(QWidget):
         s.bo3_client = _ask_bo3_client(self, all_tuples)
         go_to(self.stack, "InstallScreen")
 
+class _SteamStillRunning(RuntimeError):
+    """Steam could not be closed, so the install stops before Steam's files."""
+
+
 # --- _BaseInstallScreen ---
 class _BaseInstallScreen(QWidget):
     _DONE_MSG = "Installation complete!"
@@ -1369,6 +1373,11 @@ class _BaseInstallScreen(QWidget):
                 cfg.set_offline_mode(self.offline_mode)
             _log_to_file(f"Offline Mode: {'on' if cfg.get_offline_mode() else 'off'}")
             self._run_inner()
+        except _SteamStillRunning:
+            self._s.log.emit("Close Steam yourself (Steam menu → Exit), then run Set Up again. "
+                             "Game files already downloaded are kept; Steam's settings were not changed.")
+            self._s.progress.emit(100, "Install stopped: Steam is still running.")
+            self._s.done.emit(False)
         except Exception:
             err = _tb.format_exc()
             _log_to_file(f"[FATAL] {self.screen_name}._run crashed:\n{err}")
@@ -1454,7 +1463,11 @@ class _BaseInstallScreen(QWidget):
                     kill_steam(on_progress=lambda msg: self._s.log.emit(f"  {msg}"))
                     self._s.log.emit("  ✓ Steam closed.")
                 except Exception as ex:
-                    self._s.log.emit(f"  Could not close Steam: {ex}")
+                    # Steam rewrites its config files when it exits: launch
+                    # options, compat tools and shortcuts written now would be
+                    # lost or mixed. Update Games already stops here; so does install.
+                    self._s.log.emit(f"✗  Could not close Steam: {ex}")
+                    raise _SteamStillRunning() from ex
                 _steam_killed = True
 
         # --- GE-Proton download (Steam still running)
