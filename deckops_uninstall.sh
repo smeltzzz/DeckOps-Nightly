@@ -138,56 +138,155 @@ for r in "${STEAM_ROOTS[@]}"; do
     fi
 done
 
-# Steam games configured by this branch start with
-#   bash "<install dir>/prelaunch.sh" <key> %command%
-# If this branch's folder is deleted while another branch keeps the games,
-# that file is gone and the game no longer starts. Point those entries at a
-# prelaunch.sh that will still exist.
-repoint_prelaunch() {
-    local ours="$INSTALL_DIR/prelaunch.sh" target hits=""
-    [ -n "$STEAM_ROOT" ] || return 0
-    hits=$(grep -lF "$ours" "$STEAM_ROOT"/userdata/*/config/localconfig.vdf 2>/dev/null)
-    [ -n "$hits" ] || return 0
-    if [ -f "$OTHER_DIR/prelaunch.sh" ]; then
-        target="$OTHER_DIR/prelaunch.sh"
-    elif [ -f "$ours" ]; then
-        # The other branch has no prelaunch.sh. A copy of this one is safe on
-        # its own: without the Python environment it just starts the game.
-        target="$HOME/.local/share/deckops/prelaunch.sh"
-        mkdir -p "$(dirname "$target")" && cp -f "$ours" "$target" && chmod +x "$target" \
-            || { warn "Could not keep a launch helper for your Steam games."; return 1; }
-    else
-        warn "No prelaunch.sh is available to keep your Steam games launching."
+# Whatever this branch set up last points into its own folder: Steam launch
+# options (prelaunch.sh, and on LCD the venv's python + src/cache_cleanup.py),
+# non-Steam shortcuts (their program, start folder and launch options; the
+# Plutonium Offline launcher) and DeckOps's scripts in game folders (the
+# offline scripts call assets/LAN/lan_server.sh, the online ones prelaunch.sh).
+# Once that folder is deleted those games no longer start. Point every such
+# path at the same file in the other branch. If any path has no replacement,
+# change nothing and keep this branch installed. Only prelaunch.sh may fall back
+# to a shared copy: without the Python environment it just starts the game.
+REPOINT_PY='
+import glob, json, os, re, shutil, sys, tempfile
+mode = sys.argv[1]
+ours = os.environ["DECKOPS_INSTALL_DIR"].rstrip("/")
+other = os.environ["DECKOPS_OTHER_DIR"].rstrip("/")
+sr = os.environ.get("DECKOPS_STEAM_ROOT", "")
+shared = os.path.expanduser("~/.local/share/deckops/prelaunch.sh")
+# Exactly this folder (not "DeckOps-Nightly2") plus an optional sub path, up to
+# the end of the quoted value / NUL-terminated shortcuts.vdf string
+END = rb"\s\"\x27\\\x00"
+pat = re.compile(re.escape(ours.encode()) + rb"(/[^" + END + rb"]*)?(?=[" + END + rb"]|$)")
+# DeckOps game-folder scripts (plutonium.STEAM_MENU_EXES, OLED_OWN_WRAPPER_EXES,
+# OLED_LAN_WRAPPER_NAMES)
+NAMES = {f"{g}plut{m}{s}.exe" for g in ("t4", "t5", "t6") for m in ("sp", "mp", "zm") for s in ("", "_lan")}
+NAMES |= {"iw5plutmp.exe", "iw5plutmp_lan.exe", "iw5plutds.exe", "iw5plutds_lan.exe", "iw5plut_lan.sh"}
+NAMES |= {f"{g}plut_lan_{m}.sh" for g in ("t4", "t5", "t6") for m in ("sp", "mp", "zm")}
+
+steam_files = []
+if sr:
+    for n in ("localconfig.vdf", "shortcuts.vdf"):
+        steam_files += sorted(glob.glob(os.path.join(sr, "userdata", "*", "config", n)))
+
+def read(p):
+    try:
+        with open(p, "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+
+# Where DeckOps scripts can be: what this branch recorded, every Steam library,
+# and the folders non-Steam shortcuts start from (own copies)
+dirs, scripts = set(), set()
+try:
+    with open(os.path.join(ours, "deckops.json")) as f:
+        sg = json.load(f).get("setup_games") or {}
+    for e in sg.values():
+        for k in ("wrapper_path", "lan_wrapper_path"):
+            if isinstance(e, dict) and e.get(k):
+                scripts.add(e[k])
+except (OSError, ValueError, AttributeError):
+    pass
+libs = [os.path.join(sr, "steamapps")] if sr else []
+lf = read(os.path.join(sr, "steamapps", "libraryfolders.vdf")) if sr else b""
+libs += [os.path.join(m.decode(errors="surrogateescape"), "steamapps")
+         for m in re.findall(rb"\"path\"\s+\"([^\"]+)\"", lf)]
+libs += glob.glob("/run/media/*/steamapps") + glob.glob("/run/media/*/*/steamapps")
+for lib in libs:
+    dirs.update(glob.glob(os.path.join(lib, "common", "*")))
+for p in steam_files:
+    if p.endswith("shortcuts.vdf"):
+        for m in re.findall(rb"\x01(?:exe|StartDir)\x00\"?([^\x00\"]+)", read(p), re.I):
+            d = m.decode(errors="surrogateescape")
+            dirs.add(d if os.path.isdir(d) else os.path.dirname(d))
+for d in dirs:
+    for n in NAMES:
+        scripts.add(os.path.join(d, n))
+script_files = []
+for p in sorted(scripts):
+    data = read(p)
+    if os.path.isfile(p) and 0 < len(data) < 65536 and data.startswith(b"#!/bin/bash") \
+            and os.path.basename(p) in NAMES:
+        script_files.append(p)
+
+hits, missing, mapping = {}, set(), {}
+for p in steam_files + script_files:
+    data = read(p)
+    found = {m.group(0) for m in pat.finditer(data)}
+    if not found:
+        continue
+    hits[p] = data
+    for old in found:
+        rel = old[len(ours.encode()):].decode(errors="surrogateescape")
+        if os.path.exists(other + rel):
+            mapping[old] = (other + rel).encode(errors="surrogateescape")
+        elif rel == "/prelaunch.sh" and (os.path.isfile(shared) or os.path.isfile(ours + rel)):
+            mapping[old] = shared.encode()
+        else:
+            missing.add(ours + rel)
+
+if missing:
+    for m in sorted(missing):
+        print(m)
+    sys.exit(3)
+if mode == "check":
+    if any(p in steam_files for p in hits):
+        print("NEED_STEAM")
+    for p in hits:
+        print("will update " + p)
+    sys.exit(0)
+
+if shared.encode() in mapping.values() and not os.path.isfile(shared):
+    os.makedirs(os.path.dirname(shared), exist_ok=True)
+    shutil.copy2(os.path.join(ours, "prelaunch.sh"), shared)
+    os.chmod(shared, 0o755)
+for p, data in hits.items():
+    new = pat.sub(lambda m: mapping[m.group(0)], data)
+    if new == data:
+        continue
+    if p in steam_files:
+        shutil.copy2(p, p + ".bak")
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".deckops-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(new)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+        os.replace(tmp, p)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    print("updated " + p)
+'
+
+repoint_to_other() {
+    local out rc
+    export DECKOPS_STEAM_ROOT="$STEAM_ROOT"
+    out=$(python3 -c "$REPOINT_PY" check 2>&1); rc=$?
+    if [ $rc -eq 3 ]; then
+        warn "Some games and shortcuts use files that only $APP_TITLE has and $OTHER_TITLE does not:"
+        printf '%s\n' "$out" | sed 's/^/           /'
+        warn "Open $OTHER_TITLE and run Set Up for those games (or Repair Shortcuts), then uninstall $APP_TITLE again."
+        return 1
+    elif [ $rc -ne 0 ]; then
+        printf '%s\n' "$out" | sed 's/^/           /'
         return 1
     fi
-    info "Steam games still launch through $APP_TITLE's prelaunch.sh; updating them to $target ..."
-    close_steam
-    python3 - "$ours" "$target" $hits <<'PYEOF' || return 1
-import os, sys
-old, new, paths = sys.argv[1], sys.argv[2], sys.argv[3:]
-# In localconfig.vdf the path sits inside an escaped quoted string: ...sh\"
-old_s, new_s = old + '\\"', new + '\\"'
-for path in paths:
-    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
-        text = f.read()
-    if old_s not in text:
-        continue
-    tmp = path + ".deckops.tmp"
-    with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
-        f.write(text.replace(old_s, new_s))
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
-    os.replace(tmp, path)
-    print("updated " + path)
-PYEOF
-    success "Steam launch options now use $target"
+    [ -n "$out" ] || return 0
+    info "Games and shortcuts still use $APP_TITLE's files; pointing them at $OTHER_TITLE ..."
+    printf '%s\n' "$out" | grep -q '^NEED_STEAM' && close_steam
+    python3 -c "$REPOINT_PY" apply | sed 's/^/           /'
+    [ "${PIPESTATUS[0]}" -eq 0 ] || return 1
+    success "Games and shortcuts now use $OTHER_TITLE's files"
 }
 
 if [ -n "$KEEP_OTHER" ]; then
     info "$OTHER_TITLE is also installed ($OTHER_DIR)."
     info "Keeping shared game files, Steam settings and Plutonium data for $OTHER_TITLE."
-    repoint_prelaunch || { warn "Could not update Steam's launch options, so $APP_TITLE was left installed. Nothing was removed."; exit 1; }
+    repoint_to_other || { warn "Could not point your games at $OTHER_TITLE, so $APP_TITLE was left installed. Nothing was removed."; exit 1; }
     # Both branches configure the same games and Steam profiles. Removing
     # shared files or reversing Steam edits here would break the other branch.
     # Only remove this branch's own app and desktop shortcuts.
@@ -1975,11 +2074,16 @@ if [ -n "$STEAM_ROOT" ]; then
     lan_removed=0
     for common_dir in "${LAN_SWEEP_DIRS[@]}"; do
         while IFS= read -r -d '' sidecar; do
+            # Today's per-mode names (plutonium.OLED_LAN_WRAPPER_NAMES, e.g.
+            # t6plut_lan_mp.sh) were never swept. Only files DeckOps wrote.
+            case "$(basename "$sidecar")" in
+                *plut_lan_*.sh) grep -q "^# DeckOps offline" "$sidecar" 2>/dev/null || continue ;;
+            esac
             if rm -f "$sidecar" 2>/dev/null; then
                 info "  Removed: $sidecar"
                 lan_removed=$((lan_removed + 1))
             fi
-        done < <(find "$common_dir" -maxdepth 2 -name "*plut_lan.sh" -print0 2>/dev/null)
+        done < <(find "$common_dir" -maxdepth 2 \( -name "*plut_lan.sh" -o -name "*plut_lan_*.sh" \) -print0 2>/dev/null)
     done
 
     if [ "$lan_removed" -gt 0 ]; then
