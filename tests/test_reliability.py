@@ -186,6 +186,174 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual((self.install / "src" / "main.py").read_text(), "print('old app')")
 
 
+class ObsoleteFileTests(unittest.TestCase):
+    """A full-archive update or repair must not leave files the new version dropped."""
+    SHA = "b" * 40
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.install = Path(self.tmp.name, "DeckOps")
+        self.stage = self.install / ".update" / "files"
+        for folder in ("src", "assets/music", "logs", ".venv/bin"):
+            (self.install / folder).mkdir(parents=True)
+        (self.stage / "src").mkdir(parents=True)
+        (self.install / "VERSION").write_text("old-version")
+        (self.install / "deckops.json").write_text("my settings")
+        (self.install / "logs" / "install.log").write_text("log")
+        (self.install / "assets" / "music" / "background.mp3").write_bytes(b"music")
+        (self.install / ".venv" / "bin" / "python3").write_text("venv")
+        (self.install / "notes.txt").write_text("player's own file")
+        (self.install / "src" / "main.py").write_text("print('old')")
+        (self.install / "src" / "retired.py").write_text("RETIRED = True")
+        (self.install / "deckops_identity.sh").write_text("old")
+        (self.stage / "src" / "main.py").write_text("print('new')")
+        (self.stage / "deckops_identity.sh").write_text("new")
+        # What the installed version shipped. Hostile entries must be ignored.
+        self.previous = ["src/main.py", "src/retired.py", "src/never_installed.py",
+                         "deckops_identity.sh", "deckops.json", "VERSION", "logs/install.log",
+                         "assets/music/background.mp3", ".update/files/src/main.py",
+                         "../outside", "/etc/passwd", "src/../../outside"]
+
+    def test_full_update_removes_only_files_the_old_version_shipped(self):
+        update_manifest.apply_update(self.install, self.stage, self.SHA, full=True,
+                                     previous_files=self.previous)
+        self.assertFalse((self.install / "src" / "retired.py").exists())
+        self.assertEqual((self.install / "src" / "main.py").read_text(), "print('new')")
+        for kept in ("deckops.json", "notes.txt", "logs/install.log",
+                     "assets/music/background.mp3", ".venv/bin/python3"):
+            self.assertTrue((self.install / kept).exists(), kept)
+        self.assertEqual((self.install / "VERSION").read_text(), self.SHA + "\n")
+
+    def test_without_an_old_file_list_nothing_is_removed(self):
+        update_manifest.apply_update(self.install, self.stage, self.SHA, full=True)
+        self.assertTrue((self.install / "src" / "retired.py").exists())
+
+    def test_removed_files_come_back_when_the_update_is_rolled_back(self):
+        original = update_manifest._replace_file
+
+        def fail(source, target):
+            if source == self.stage / "src" / "main.py":
+                raise OSError("disk full")
+            original(source, target)
+
+        with patch.object(update_manifest, "_replace_file", side_effect=fail):
+            with self.assertRaises(OSError):
+                update_manifest.apply_update(self.install, self.stage, self.SHA, full=True,
+                                             previous_files=self.previous)
+        self.assertEqual((self.install / "src" / "retired.py").read_text(), "RETIRED = True")
+        self.assertEqual((self.install / "VERSION").read_text(), "old-version")
+
+    def test_interrupted_update_that_removed_files_recovers(self):
+        original = update_manifest._replace_file
+
+        def interrupted(source, target):
+            if source == self.stage / "src" / "main.py":
+                raise SystemExit("power loss")
+            original(source, target)
+
+        with patch.object(update_manifest, "_replace_file", side_effect=interrupted):
+            with self.assertRaises(SystemExit):
+                update_manifest.apply_update(self.install, self.stage, self.SHA, full=True,
+                                             previous_files=self.previous)
+        self.assertTrue(update_manifest.recover_update(self.install))
+        self.assertEqual((self.install / "src" / "retired.py").read_text(), "RETIRED = True")
+
+    def test_symlinked_obsolete_entry_is_left_alone(self):
+        outside = Path(self.tmp.name, "outside.txt")
+        outside.write_text("not DeckOps")
+        link = self.install / "src" / "linked.py"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable here")
+        update_manifest.apply_update(self.install, self.stage, self.SHA, full=True,
+                                     previous_files=self.previous + ["src/linked.py"])
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(outside.read_text(), "not DeckOps")
+
+    def test_git_tree_must_be_complete(self):
+        data = {"tree": [{"type": "blob", "path": "src/a.py"}, {"type": "tree", "path": "src"}]}
+        self.assertEqual(update_manifest.tree_paths(data), ["src/a.py"])
+        with self.assertRaises(ValueError):
+            update_manifest.tree_paths({**data, "truncated": True})
+        with self.assertRaises(ValueError):
+            update_manifest.tree_paths({})
+
+    def test_prune_for_repair_installs(self):
+        # install.sh copies files over the install, then prunes. A broken
+        # archive must never delete anything.
+        archive = Path(self.tmp.name, "archive")
+        (archive / "src").mkdir(parents=True)
+        with self.assertRaises(ValueError):
+            update_manifest.prune_obsolete(self.install, archive, self.previous)
+        self.assertTrue((self.install / "src" / "retired.py").exists())
+        (archive / "src" / "main.py").write_text("print('new')")
+        with self.assertRaises(ValueError):          # still incomplete
+            update_manifest.prune_obsolete(self.install, archive, self.previous)
+        (archive / "deckops_identity.sh").write_text("new")
+        removed = update_manifest.prune_obsolete(self.install, archive, self.previous)
+        self.assertEqual(removed, ["src/retired.py"])
+        self.assertTrue((self.install / "notes.txt").exists())
+
+    def test_launcher_commands_tree_prune_and_apply(self):
+        lst = Path(self.tmp.name, "previous.txt")
+        lst.write_text("\n".join(self.previous) + "\n")
+        tree = subprocess.run([sys.executable, update_manifest.__file__, "tree"],
+                              input='{"tree": [{"type": "blob", "path": "src/retired.py"}]}',
+                              check=True, capture_output=True, text=True)
+        self.assertEqual(tree.stdout.split(), ["src/retired.py"])
+        subprocess.run([sys.executable, update_manifest.__file__, "apply", str(self.install),
+                        str(self.stage), self.SHA, "full", str(lst)],
+                       check=True, capture_output=True, text=True)
+        self.assertFalse((self.install / "src" / "retired.py").exists())
+        self.assertEqual((self.install / "deckops.json").read_text(), "my settings")
+
+
+class GeProtonFallbackTests(unittest.TestCase):
+    """A failed GE-Proton download must not leave games without a compat tool."""
+
+    def _tool(self, root, name):
+        tool = Path(root, name)
+        (tool / "files" / "share" / "default_pfx").mkdir(parents=True)
+        (tool / "proton").write_text("")
+        (tool / "compatibilitytool.vdf").write_text("")
+
+    def test_falls_back_to_pinned_then_newest_complete_install(self):
+        import ge_proton
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ge_proton, "COMPAT_DIR", tmp):
+            self.assertIsNone(ge_proton.resolve_ge_version())
+            self._tool(tmp, "GE-Proton10-9")
+            self._tool(tmp, "GE-Proton10-30")
+            Path(tmp, "GE-Proton10-99").mkdir()          # half-extracted: ignored
+            self.assertEqual(ge_proton.resolve_ge_version(), "GE-Proton10-30")
+            with patch("config.get_ge_proton_version", return_value="GE-Proton10-9"):
+                self.assertEqual(ge_proton.resolve_ge_version(), "GE-Proton10-9")
+            self.assertEqual(ge_proton.resolve_ge_version("GE-Proton11-1"), "GE-Proton11-1")
+
+
+class SaveBackupFailureTests(unittest.TestCase):
+    def test_skipped_group_is_reported_not_called_complete(self):
+        import save_backup as sb
+        with tempfile.TemporaryDirectory() as tmp:
+            game = Path(tmp, "game")
+            (game / "players").mkdir(parents=True)
+            (game / "players" / "profile.cfg").write_text("stats")
+            backup = Path(tmp, "backup")
+            config = {"setup_games": {"cod4mp": {}}}
+            with patch.object(sb, "BACKUP_ROOT", str(backup)), \
+                 patch.object(sb, "_load_config", return_value=config), \
+                 patch.object(sb, "_find_install_dir", return_value=str(game)):
+                failures = []
+                with patch.object(sb, "_has_room", return_value=False):
+                    self.assertEqual(sb.backup_saves(steam_root=tmp, failures=failures), {})
+                self.assertEqual(failures, ["cod4"])
+                failures = []
+                self.assertEqual(list(sb.backup_saves(steam_root=tmp, failures=failures)), ["cod4"])
+                self.assertEqual(failures, [])
+                self.assertEqual((backup / "cod4" / "profile.cfg").read_text(), "stats")
+
+
 class DepotLoginTests(unittest.TestCase):
     def test_cleanup_removes_only_private_login(self):
         with tempfile.TemporaryDirectory() as tmp:

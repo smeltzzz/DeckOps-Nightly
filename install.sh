@@ -125,7 +125,33 @@ EXTRACTED=$(find "$TMPDIR_EXTRACT" -maxdepth 1 -mindepth 1 -type d | head -1)
 [ -z "$EXTRACTED" ] && EXTRACTED="$TMPDIR_EXTRACT"
 
 mkdir -p "$INSTALL_DIR"
+
+# A repair over an existing install: first undo an interrupted update so the
+# recorded version matches the files on disk, then remember that version to
+# find files the new one no longer ships.
+PREVIOUS_SHA=""
+if [ -f "$INSTALL_DIR/.update/transaction.json" ] && [ -f "$INSTALL_DIR/src/update_manifest.py" ]; then
+    python3 "$INSTALL_DIR/src/update_manifest.py" recover "$INSTALL_DIR" >/dev/null 2>&1 \
+        || warn "Could not undo an interrupted update; the new files will replace it."
+fi
+[ -f "$INSTALL_DIR/VERSION" ] && PREVIOUS_SHA=$(tr -d '[:space:]' < "$INSTALL_DIR/VERSION")
+
 cp -r "$EXTRACTED"/. "$INSTALL_DIR"/ || die "Could not copy DeckOps into $INSTALL_DIR."
+# The complete copy supersedes any leftover update state. A stale journal
+# would roll this fresh install back to old files on the next launch.
+rm -rf "$INSTALL_DIR/.update"
+
+if [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ ]] && [ "$PREVIOUS_SHA" != "$INITIAL_SHA" ] \
+   && [ -f "$EXTRACTED/src/update_manifest.py" ]; then
+    PREVIOUS_LIST="$(mktemp /tmp/deckops_previous_XXXXXX)"
+    if (set -o pipefail; curl -sf --max-time 20 \
+            "https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/git/trees/${PREVIOUS_SHA}?recursive=1" \
+            | python3 "$EXTRACTED/src/update_manifest.py" tree > "$PREVIOUS_LIST" 2>/dev/null); then
+        PRUNED=$(python3 "$EXTRACTED/src/update_manifest.py" prune "$INSTALL_DIR" "$EXTRACTED" "$PREVIOUS_LIST" 2>/dev/null | wc -l)
+        [ "${PRUNED:-0}" -gt 0 ] && info "Removed $PRUNED obsolete file(s) from the previous version."
+    fi
+    rm -f "$PREVIOUS_LIST"
+fi
 rm -rf "$TMPDIR_EXTRACT"
 
 chmod +x "$ENTRY_POINT" 2>/dev/null || true

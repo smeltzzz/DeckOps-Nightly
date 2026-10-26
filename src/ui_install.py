@@ -1388,7 +1388,7 @@ class _BaseInstallScreen(QWidget):
         from t6sp_mod import install_t6sp_mod
         from cleanops import install_cleanops
         from t7x import install_t7x
-        from ge_proton import install_ge_proton, MANAGED_APPIDS
+        from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
 
         # --- Source awareness setup
         own_selected = self.own_selected
@@ -1472,6 +1472,15 @@ class _BaseInstallScreen(QWidget):
         except Exception as ex:
             self._s.pulse_stop.emit()
             self._s.log.emit(f"  GE-Proton setup skipped: {ex}")
+        # A failed download must not leave games without a compat tool:
+        # fall back to a GE-Proton that is already installed.
+        if not ge_version:
+            ge_version = resolve_ge_version()
+            if ge_version:
+                self._s.log.emit(f"  Using the installed {ge_version}")
+            else:
+                self._s.log.emit("✗  No GE-Proton is installed; games may not launch until it is installed. "
+                                 "Steam's compatibility settings were left unchanged.")
 
         proton = get_proton_path(self.steam_root)
 
@@ -2003,8 +2012,12 @@ class _BaseInstallScreen(QWidget):
             for appid in MANAGED_APPIDS:
                 if appid in run_appids:
                     clear_launch_options(self.steam_root, appid)
-            clear_compat_tool(MANAGED_APPIDS)
-            self._s.log.emit("✓  Cleared launch options and compat tools")
+            # Only clear mappings that are re-applied below (GE-Proton found
+            # and Steam games selected); otherwise earlier setups would lose them.
+            if ge_version and steam_sel:
+                clear_compat_tool(MANAGED_APPIDS)
+            self._s.log.emit("✓  Cleared launch options" +
+                             (" and compat tools" if ge_version and steam_sel else ""))
             # The CoD4 phase ran before Steam closed, so its launch option
             # (IW3SP swap, CoD4R pre-launch update) has to be set now.
             if "7940" in run_appids:

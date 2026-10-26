@@ -70,7 +70,7 @@ echo ""
 # (OK labelled "Cancel"), so Escape, the window's X or a zenity failure -- all
 # non-zero -- started the uninstall, and without zenity it ran unasked.
 if [ -n "$KEEP_OTHER" ]; then
-    CONFIRM_TEXT="This removes only $APP_TITLE. Shared games, Steam entries, Plutonium data and $OTHER_TITLE stay in place. If a Steam entry still points to Nightly afterward, use Repair in $OTHER_TITLE.\n\nContinue?"
+    CONFIRM_TEXT="This removes only $APP_TITLE. Shared games, Steam entries, Plutonium data and $OTHER_TITLE stay in place. If Steam has to be closed so your games keep launching, it is closed first.\n\nContinue?"
 else
     CONFIRM_TEXT="This will remove DeckOps' client files, shortcuts and launch options. Your Steam games and backed-up saves will be kept. Unrelated Plutonium data will be left alone.\n\nContinue?"
 fi
@@ -97,52 +97,29 @@ fi
 
 echo ""
 
-if [ -n "$KEEP_OTHER" ]; then
-    info "$OTHER_TITLE is also installed ($OTHER_DIR)."
-    info "Keeping shared game files, Steam settings and Plutonium data for $OTHER_TITLE."
-    # Both branches configure the same games and Steam profiles. Removing
-    # shared files or reversing Steam edits here would break the other branch.
-    # Only remove this branch's own app and desktop shortcuts.
-    for shortcut in "$HOME/.local/share/applications/${XDG_ID}.desktop" \
-                    "$HOME/Desktop/${INSTALL_DIR_NAME}.desktop"; do
-        [ ! -f "$shortcut" ] || rm -f "$shortcut" || warn "Could not remove $shortcut"
-    done
-    rm -rf "$INSTALL_DIR" "$HOME/.config/$XDG_ID" \
-        || { warn "Could not fully remove $APP_TITLE; check $INSTALL_DIR"; exit 1; }
-    if [ "$XDG_ID" != "deckops" ]; then
-        rm -rf "$HOME/.local/share/$XDG_ID" \
-            || warn "Could not remove $HOME/.local/share/$XDG_ID"
-    fi
-    success "$APP_TITLE removed. $OTHER_TITLE and shared game setup were kept."
-    info "Steam entries shared by both branches were left alone. If one still points to Nightly, run Repair in $OTHER_TITLE."
-    exit 0
-fi
-
-info "Closing Steam..."
-
 # Use Steam's own shutdown command for a clean exit. This ensures Steam
 # flushes config files and syncs cloud saves before exiting.
-if pgrep -x "steam" > /dev/null 2>&1 || pgrep -f "steam.sh" > /dev/null 2>&1; then
-    steam -shutdown 2>/dev/null
+close_steam() {
+    if pgrep -x "steam" > /dev/null 2>&1 || pgrep -f "steam.sh" > /dev/null 2>&1; then
+        steam -shutdown 2>/dev/null
 
-    # Wait for Steam to finish closing
-    deadline=$((SECONDS + 120))
-    while pgrep -x "steam" > /dev/null 2>&1 || pgrep -f "steam.sh" > /dev/null 2>&1; do
-        if [ $SECONDS -ge $deadline ]; then
-            warn "Steam did not close within 120 seconds."
-            warn "Please close Steam manually and re-run the uninstaller."
-            exit 1
-        fi
-        sleep 1
-    done
-    sleep 3
-    sync
-    success "Steam closed."
-else
-    skip "Steam was not running."
-fi
-
-echo ""
+        # Wait for Steam to finish closing
+        local deadline=$((SECONDS + 120))
+        while pgrep -x "steam" > /dev/null 2>&1 || pgrep -f "steam.sh" > /dev/null 2>&1; do
+            if [ $SECONDS -ge $deadline ]; then
+                warn "Steam did not close within 120 seconds."
+                warn "Please close Steam manually and re-run the uninstaller."
+                exit 1
+            fi
+            sleep 1
+        done
+        sleep 3
+        sync
+        success "Steam closed."
+    else
+        skip "Steam was not running."
+    fi
+}
 
 STEAM_ROOTS=(
     "$HOME/.local/share/Steam"
@@ -160,6 +137,79 @@ for r in "${STEAM_ROOTS[@]}"; do
         break
     fi
 done
+
+# Steam games configured by this branch start with
+#   bash "<install dir>/prelaunch.sh" <key> %command%
+# If this branch's folder is deleted while another branch keeps the games,
+# that file is gone and the game no longer starts. Point those entries at a
+# prelaunch.sh that will still exist.
+repoint_prelaunch() {
+    local ours="$INSTALL_DIR/prelaunch.sh" target hits=""
+    [ -n "$STEAM_ROOT" ] || return 0
+    hits=$(grep -lF "$ours" "$STEAM_ROOT"/userdata/*/config/localconfig.vdf 2>/dev/null)
+    [ -n "$hits" ] || return 0
+    if [ -f "$OTHER_DIR/prelaunch.sh" ]; then
+        target="$OTHER_DIR/prelaunch.sh"
+    elif [ -f "$ours" ]; then
+        # The other branch has no prelaunch.sh. A copy of this one is safe on
+        # its own: without the Python environment it just starts the game.
+        target="$HOME/.local/share/deckops/prelaunch.sh"
+        mkdir -p "$(dirname "$target")" && cp -f "$ours" "$target" && chmod +x "$target" \
+            || { warn "Could not keep a launch helper for your Steam games."; return 1; }
+    else
+        warn "No prelaunch.sh is available to keep your Steam games launching."
+        return 1
+    fi
+    info "Steam games still launch through $APP_TITLE's prelaunch.sh; updating them to $target ..."
+    close_steam
+    python3 - "$ours" "$target" $hits <<'PYEOF' || return 1
+import os, sys
+old, new, paths = sys.argv[1], sys.argv[2], sys.argv[3:]
+# In localconfig.vdf the path sits inside an escaped quoted string: ...sh\"
+old_s, new_s = old + '\\"', new + '\\"'
+for path in paths:
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
+        text = f.read()
+    if old_s not in text:
+        continue
+    tmp = path + ".deckops.tmp"
+    with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write(text.replace(old_s, new_s))
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+    os.replace(tmp, path)
+    print("updated " + path)
+PYEOF
+    success "Steam launch options now use $target"
+}
+
+if [ -n "$KEEP_OTHER" ]; then
+    info "$OTHER_TITLE is also installed ($OTHER_DIR)."
+    info "Keeping shared game files, Steam settings and Plutonium data for $OTHER_TITLE."
+    repoint_prelaunch || { warn "Could not update Steam's launch options, so $APP_TITLE was left installed. Nothing was removed."; exit 1; }
+    # Both branches configure the same games and Steam profiles. Removing
+    # shared files or reversing Steam edits here would break the other branch.
+    # Only remove this branch's own app and desktop shortcuts.
+    for shortcut in "$HOME/.local/share/applications/${XDG_ID}.desktop" \
+                    "$HOME/Desktop/${INSTALL_DIR_NAME}.desktop"; do
+        [ ! -f "$shortcut" ] || rm -f "$shortcut" || warn "Could not remove $shortcut"
+    done
+    rm -rf "$INSTALL_DIR" "$HOME/.config/$XDG_ID" \
+        || { warn "Could not fully remove $APP_TITLE; check $INSTALL_DIR"; exit 1; }
+    if [ "$XDG_ID" != "deckops" ]; then
+        rm -rf "$HOME/.local/share/$XDG_ID" \
+            || warn "Could not remove $HOME/.local/share/$XDG_ID"
+    fi
+    success "$APP_TITLE removed. $OTHER_TITLE and shared game setup were kept."
+    info "Steam games and shortcuts shared by both branches were left in place."
+    exit 0
+fi
+
+info "Closing Steam..."
+close_steam
+
+echo ""
 
 if [ -z "$STEAM_ROOT" ]; then
     warn "Steam root not found -- skipping game restore steps."
@@ -561,6 +611,7 @@ PYEOF
 echo ""
 
 info "Backing up player save data before cleanup..."
+SAVE_BACKUP_FAILED=false
 
 zenity --question \
     --title="$APP_TITLE Uninstaller" \
@@ -591,7 +642,8 @@ if [ -f "$DECKOPS_SRC/save_backup.py" ]; then
     if [ "$_backup_exit" -eq 0 ]; then
         success "Save backup complete."
     else
-        warn "Save backup had errors (saves may be incomplete)."
+        SAVE_BACKUP_FAILED=true
+        warn "Some saves could NOT be backed up (see above). Your Plutonium player data will be kept."
     fi
 else
     skip "save_backup.py not found — skipping save backup."
@@ -2126,12 +2178,17 @@ PYEOF
 
     # storage/ holds user mods, usermaps and players (configs, stats, classes)
     KEEP_PLUT_STORAGE=true
-    zenity --question \
-        --title="$APP_TITLE Uninstaller" \
-        --text="Remove Plutonium mods, custom maps and player data?\n\nKeeping them lets a reinstall pick up where you left off.\nPlutonium itself is removed either way." \
-        --ok-label="Remove" \
-        --cancel-label="Keep" 2>/dev/null
-    [ $? -eq 0 ] && KEEP_PLUT_STORAGE=false
+    if $SAVE_BACKUP_FAILED; then
+        # Removing it now could lose saves that exist nowhere else.
+        warn "Keeping Plutonium mods, custom maps and player data: the save backup was incomplete."
+    else
+        zenity --question \
+            --title="$APP_TITLE Uninstaller" \
+            --text="Remove Plutonium mods, custom maps and player data?\n\nKeeping them lets a reinstall pick up where you left off.\nPlutonium itself is removed either way." \
+            --ok-label="Remove" \
+            --cancel-label="Keep" 2>/dev/null
+        [ $? -eq 0 ] && KEEP_PLUT_STORAGE=false
+    fi
 
     found_any=0
     if [ -n "$KEEP_OTHER" ]; then

@@ -444,15 +444,19 @@ def _keep_pre_restore(path: str):
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def backup_saves(steam_root: str = None, on_progress=None,
-                 installed_games: dict = None) -> dict:
+                 installed_games: dict = None, failures: list = None) -> dict:
     """Back up save data for all installed games.
 
     steam_root       — Steam root path (defaults to ~/.local/share/Steam)
     on_progress      — callback(message: str)
     installed_games  — optional dict of key -> game info (from install flow)
+    failures         — optional list; every group that HAS save data but could
+                       not be backed up (no space, copy error) is appended, so
+                       callers never report a complete backup that is not
 
     Returns a dict of {group_name: backup_path} for groups that were backed up.
     """
+    failed = failures if failures is not None else []
     if steam_root is None:
         steam_root = STEAM_ROOT_DEFAULT
     if on_progress is None:
@@ -471,6 +475,7 @@ def backup_saves(steam_root: str = None, on_progress=None,
         os.makedirs(BACKUP_ROOT, exist_ok=True)     # also lets _has_room measure the drive
     except OSError as ex:
         on_progress(f"  ⚠ cannot create {BACKUP_ROOT}: {ex}")
+        failed.append("*")
         return {}
 
     for group_name, group in SAVE_GROUPS.items():
@@ -496,6 +501,7 @@ def backup_saves(steam_root: str = None, on_progress=None,
             skips = _PLUT_SKIP.get(group["plut_store"], {})
             need = sum(_tree_size(s, skips.get(p, ())) for (tag, p), s in parts.items())
             if not _has_room(need, group_name, on_progress):
+                failed.append(group_name)
                 continue
             stage = _staging(group_name)
             ok = [_copy_part(s, os.path.join(stage, tag, p), group_name, on_progress, skips.get(p, ()))
@@ -505,6 +511,8 @@ def backup_saves(steam_root: str = None, on_progress=None,
                 on_progress(f"  ✓ {group_name}: backed up players/ and mods/ "
                             f"from {len(storages)} prefix(es), other Plutonium files skipped")
                 _log.info("save backup: %s -> %s (%s)", group_name, dst, sorted(storages))
+            else:
+                failed.append(group_name)
             continue
 
         if group["type"] == "install_dir":
@@ -521,14 +529,17 @@ def backup_saves(steam_root: str = None, on_progress=None,
 
         # Check if there's actually anything to back up
         try:
-            has_files = any(True for _ in os.scandir(src))
+            with os.scandir(src) as entries:
+                has_files = any(True for _ in entries)
         except OSError:
+            failed.append(group_name)
             continue
         if not has_files:
             continue
 
         dst = os.path.join(BACKUP_ROOT, group_name)
         if not _has_room(_tree_size(src), group_name, on_progress):
+            failed.append(group_name)
             continue
         stage = _staging(group_name)
         ok = [_copytree_safe(src, stage, group_name, on_progress)]
@@ -536,6 +547,8 @@ def backup_saves(steam_root: str = None, on_progress=None,
             backed_up[group_name] = dst
             on_progress(f"  ✓ {group_name}: backed up")
             _log.info("save backup: %s -> %s", src, dst)
+        else:
+            failed.append(group_name)
 
     # Write metadata
     if backed_up:
@@ -701,11 +714,16 @@ if __name__ == "__main__":
         print(msg)
 
     if action == "backup":
-        result = backup_saves(steam_root=steam, on_progress=_print)
+        failures = []
+        result = backup_saves(steam_root=steam, on_progress=_print, failures=failures)
         if result:
             print(f"\nBacked up {len(result)} group(s) to {BACKUP_ROOT}")
         else:
             print("\nNo saves to back up.")
+        if failures:
+            # The uninstaller must not claim success or delete player data
+            print(f"\nNOT backed up: {', '.join(dict.fromkeys(failures))}")
+            sys.exit(2)
     elif action == "restore":
         result = restore_saves(steam_root=steam, on_progress=_print)
         if result:

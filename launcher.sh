@@ -61,9 +61,13 @@ run_remote_script() {
 # ── Installing or first-time — run install directly ───────────────────────────
 if [ ! -d "$INSTALL_DIR" ] || [ -f "$LOCKFILE" ]; then
     touch "$LOCKFILE"
-    run_remote_script install.sh
-    rm -f "$LOCKFILE"
-    exit 0
+    # Keep the marker if the install failed or was cut off, so the next launch
+    # finishes it instead of treating a half-copied install as complete.
+    if run_remote_script install.sh; then
+        rm -f "$LOCKFILE"
+        exit 0
+    fi
+    exit 1
 fi
 
 # A running DeckOps update owns .update. A second launch must not delete its
@@ -102,6 +106,9 @@ check_for_updates() {
     # Read local version (commit SHA). "0" means never updated.
     LOCAL_SHA="0"
     [ -f "$VERSION_FILE" ] && LOCAL_SHA=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+    # LOCAL_SHA becomes "0" when a full archive is needed; the installed
+    # commit is still needed to find files the new version no longer ships.
+    local PREVIOUS_SHA="$LOCAL_SHA" PREVIOUS_FILES="none"
 
     # Fetch latest commit SHA from GitHub API (unauthenticated, 60 req/hr)
     REMOTE_SHA=$(curl -sf --max-time 10 \
@@ -228,13 +235,25 @@ check_for_updates() {
     # back before reading VERSION or running any updated Python code.
     local APPLY_SCRIPT="$UPDATE_DIR/files/src/update_manifest.py"
     local CHANGES="full"
+    local APPLY_EXTRA=()
     if [ "$LOCAL_SHA" != "0" ]; then
         APPLY_SCRIPT="$INSTALL_DIR/src/update_manifest.py"
         CHANGES="$UPDATE_DIR/changes.tsv"
         printf '%s\n' "$PARSED" > "$CHANGES"
+    else
+        # A full archive cannot say what was removed. Ask GitHub what the
+        # installed commit shipped, so files the new version dropped do not
+        # linger. Without a complete list nothing is removed.
+        if [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ ]] && [ -f "$APPLY_SCRIPT" ] && \
+           (set -o pipefail; curl -sf --max-time 20 \
+                "https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/git/trees/${PREVIOUS_SHA}?recursive=1" \
+                | python3 "$APPLY_SCRIPT" tree > "$UPDATE_DIR/previous_files.txt" 2>/dev/null); then
+            PREVIOUS_FILES="$UPDATE_DIR/previous_files.txt"
+        fi
+        APPLY_EXTRA=("$PREVIOUS_FILES")
     fi
     if [ ! -f "$APPLY_SCRIPT" ] || \
-       ! python3 "$APPLY_SCRIPT" apply "$INSTALL_DIR" "$UPDATE_DIR/files" "$REMOTE_SHA" "$CHANGES"; then
+       ! python3 "$APPLY_SCRIPT" apply "$INSTALL_DIR" "$UPDATE_DIR/files" "$REMOTE_SHA" "$CHANGES" "${APPLY_EXTRA[@]}"; then
         # A failed rollback leaves its journal for recovery on the next launch.
         # Do not run a potentially mixed installation in that case.
         if [ -f "$UPDATE_DIR/transaction.json" ]; then
@@ -290,9 +309,11 @@ case "$choice" in
                 --text="DeckOps needs to repair its window components.\n\nIt downloads in the terminal window and can take several minutes.\n\nDo not close the terminal. DeckOps opens when it is done." \
                 2>/dev/null
             touch "$LOCKFILE"
-            run_remote_script install.sh
-            rm -f "$LOCKFILE"
-            exit 0
+            if run_remote_script install.sh; then
+                rm -f "$LOCKFILE"
+                exit 0
+            fi
+            exit 1
         fi
 
         # Check for updates before launching; do not launch if rollback failed.

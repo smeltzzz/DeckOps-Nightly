@@ -119,6 +119,28 @@ def _get_local_version() -> str | None:
     return newest_proton_dir(COMPAT_DIR, "GE-Proton")
 
 
+def resolve_ge_version(fresh: str | None = None) -> str | None:
+    """GE-Proton version to map onto the games.
+
+    The one just installed wins. If the download failed (offline, GitHub rate
+    limit), use the version DeckOps pinned or the newest complete one already
+    on disk, so games keep a compat tool. None means there is no usable
+    GE-Proton at all; callers must then leave Steam's existing mappings alone
+    rather than clearing entries they cannot put back.
+    """
+    if fresh:
+        return fresh
+    try:
+        import config as _cfg
+        pinned = _cfg.get_ge_proton_version()
+    except Exception:
+        pinned = None
+    for candidate in (pinned, _get_local_version()):
+        if candidate and _is_installed(candidate):
+            return candidate
+    return None
+
+
 # ── default_pfx resolution ───────────────────────────────────────────────────
 
 def _find_default_pfx(ge_version: str | None) -> str | None:

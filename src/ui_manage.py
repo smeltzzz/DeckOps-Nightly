@@ -2138,7 +2138,7 @@ class UpdateScreen(QWidget):
             self._s.done.emit(True)
             return
         from wrapper import get_proton_path, find_compatdata, kill_steam, set_compat_tool
-        from ge_proton import install_ge_proton, MANAGED_APPIDS
+        from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
         from iw4x import install_iw4x
         from cod4x import install_cod4x
         from cod4r import install_cod4r
@@ -2271,6 +2271,14 @@ class UpdateScreen(QWidget):
             self._s.log.emit(f"✓  {ge_version} ready")
         except Exception as ex:
             self._s.log.emit(f"  GE-Proton update skipped: {ex}")
+        # A failed download must not leave the games without a compat tool:
+        # keep using the GE-Proton that is already installed.
+        if not ge_version:
+            ge_version = resolve_ge_version()
+            if ge_version:
+                self._s.log.emit(f"  Using the installed {ge_version}")
+            else:
+                self._s.log.emit("✗  No GE-Proton is installed; Steam's compatibility settings were left unchanged.")
 
         # Always close Steam before the config writes below (launch options,
         # compat tools, Steam Input, shortcuts): Steam rewrites config.vdf and
@@ -2301,8 +2309,10 @@ class UpdateScreen(QWidget):
             for appid in MANAGED_APPIDS:
                 if appid in run_appids:
                     clear_launch_options(self.steam_root, appid)
-            clear_compat_tool(MANAGED_APPIDS)
-            self._s.log.emit("✓  Cleared launch options and compat tools")
+            # Only clear mappings that are put back below.
+            if ge_version:
+                clear_compat_tool(MANAGED_APPIDS)
+            self._s.log.emit("✓  Cleared launch options" + (" and compat tools" if ge_version else ""))
             if "7940" in run_appids:
                 from iw3sp import apply_cod4_launch_option
                 apply_cod4_launch_option(self.steam_root)

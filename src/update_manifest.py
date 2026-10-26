@@ -78,6 +78,63 @@ def compare(data):
         yield "M", path, sha
 
 
+def tree_paths(data):
+    """Return file paths from a complete GitHub git-tree response.
+
+    A truncated list could hide files, so it is rejected; the caller then
+    leaves obsolete files alone instead of guessing.
+    """
+    tree = data.get("tree") if isinstance(data, dict) else None
+    if not isinstance(tree, list) or data.get("truncated"):
+        raise ValueError("incomplete GitHub file list")
+    return [e["path"] for e in tree
+            if isinstance(e, dict) and e.get("type") == "blob"
+            and isinstance(e.get("path"), str) and "\n" not in e["path"]]
+
+
+def obsolete_files(install_dir, current_files, previous_files):
+    """Files an older DeckOps shipped that the current version no longer has.
+
+    Only paths named by the previous version's own file list qualify, so a
+    file DeckOps never shipped (settings, logs, music, .venv, user data) is
+    never a candidate. Protected, unsafe and symlinked paths are skipped.
+    """
+    keep = set(current_files)
+    found = []
+    for relative in dict.fromkeys(previous_files):
+        if relative in keep:
+            continue
+        try:
+            _path(relative)
+            target = _file(install_dir, relative)
+        except ValueError:
+            continue
+        if target.is_file():
+            found.append(relative)
+    return sorted(found)
+
+
+def prune_obsolete(install_dir, stage_dir, previous_files):
+    """Remove obsolete files after a plain copy-over install (install.sh).
+
+    Refuses to run unless the staged archive looks like a real DeckOps tree,
+    so a broken extraction can never delete the installation.
+    """
+    stage = Path(stage_dir)
+    if not (stage / "src" / "main.py").is_file() or not (stage / "deckops_identity.sh").is_file():
+        raise ValueError("archive is missing DeckOps files; nothing removed")
+    current = [Path(base, name).relative_to(stage).as_posix()
+               for base, _, names in os.walk(stage) for name in names]
+    removed = []
+    for relative in obsolete_files(install_dir, current, previous_files):
+        try:
+            _file(install_dir, relative).unlink()
+            removed.append(relative)
+        except OSError:
+            pass
+    return removed
+
+
 def verify(path, sha):
     if not _SHA.fullmatch(sha):
         raise ValueError("invalid blob hash")
@@ -148,7 +205,7 @@ def _replace_file(source, target):
             os.remove(name)
 
 
-def _changes(stage, rows, full):
+def _changes(stage, rows, full, install=None, previous=()):
     if full:
         if not (stage / "src" / "main.py").is_file() or not (stage / "deckops_identity.sh").is_file():
             raise ValueError("full update archive is missing DeckOps files")
@@ -162,6 +219,12 @@ def _changes(stage, rows, full):
                 if relative in _PROTECTED or relative.startswith("logs/"):
                     continue
                 rows.append(("M", relative, "-"))
+        # A complete archive replaces the installation: also drop files the
+        # old version shipped that this one no longer has, as a partial
+        # update does. These deletions are journaled like any other change.
+        if install is not None and previous:
+            rows.extend(("D", relative, "-") for relative in
+                        obsolete_files(install, [row[1] for row in rows], previous))
     selected = {}
     for action, relative, sha in rows:
         _path(relative)
@@ -220,11 +283,13 @@ def recover_update(install_dir):
     return True
 
 
-def apply_update(install_dir, stage_dir, remote_sha, rows=(), full=False):
+def apply_update(install_dir, stage_dir, remote_sha, rows=(), full=False, previous_files=()):
     """Apply staged files and version as one recoverable operation.
 
     On an exception restore immediately; on a hard crash, recover_update() on
     the next launch reads the journal before any new code is run.
+    `previous_files` (full updates only) lists what the installed version
+    shipped, so files the new version dropped can be removed.
     """
     if not _SHA.fullmatch(remote_sha):
         raise ValueError("invalid target version")
@@ -233,7 +298,7 @@ def apply_update(install_dir, stage_dir, remote_sha, rows=(), full=False):
     journal = update / _JOURNAL
     if journal.exists():
         raise RuntimeError("unfinished update must be recovered before applying another")
-    selected = _changes(stage, rows, full)
+    selected = _changes(stage, rows, full, install, previous_files)
     backups = update / "rollback"
     if backups.exists():
         shutil.rmtree(backups)
@@ -300,10 +365,22 @@ if __name__ == "__main__":
                 raise ValueError("download does not match GitHub")
         elif len(sys.argv) == 3 and sys.argv[1] == "recover":
             recover_update(sys.argv[2])
-        elif len(sys.argv) == 6 and sys.argv[1] == "apply":
-            _, _, install_dir, staged, sha, changes = sys.argv
+        elif len(sys.argv) == 5 and sys.argv[1] == "prune":
+            with open(sys.argv[4], encoding="utf-8") as stream:
+                listed = [line.rstrip("\n") for line in stream if line.strip()]
+            for path in prune_obsolete(sys.argv[2], sys.argv[3], listed):
+                print(path)
+        elif sys.argv[1:2] == ["tree"] and len(sys.argv) == 2:
+            for path in tree_paths(json.load(sys.stdin)):
+                print(path)
+        elif len(sys.argv) in (6, 7) and sys.argv[1] == "apply":
+            install_dir, staged, sha, changes = sys.argv[2:6]
             if changes == "full":
-                apply_update(install_dir, staged, sha, full=True)
+                previous = []
+                if len(sys.argv) == 7 and sys.argv[6] != "none":
+                    with open(sys.argv[6], encoding="utf-8") as stream:
+                        previous = [line.rstrip("\n") for line in stream if line.strip()]
+                apply_update(install_dir, staged, sha, full=True, previous_files=previous)
             else:
                 with open(changes, encoding="utf-8") as stream:
                     rows = [line.rstrip("\n").split("\t") for line in stream]
