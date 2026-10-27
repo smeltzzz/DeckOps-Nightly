@@ -1232,6 +1232,41 @@ class HostMenuTests(unittest.TestCase):
         retired.assert_called_once()
 
 
+class Iw4xMenuTests(unittest.TestCase):
+    """MW2 MP tile (10190): IW4x only, stock entry hidden."""
+
+    def _refresh(self, files, setup=None):
+        import iw4x
+        setup = setup or {"iw4mp": {"client": "iw4x", "source": "steam"}}
+        with tempfile.TemporaryDirectory() as d:
+            for n in files:
+                Path(d, n).write_text("x")
+            with patch("config.get_setup_games", return_value=setup), \
+                 patch("detect_games.parse_library_folders", return_value=[]), \
+                 patch("detect_games.find_installed_games", return_value={"iw4mp": {"install_dir": d}}), \
+                 patch("steam_appinfo.add_launch_entries", return_value=True) as add:
+                ok = iw4x.refresh_steam_menu("steam")
+        return ok, add
+
+    def test_menu_is_iw4x_plus_hidden_stock_entry(self):
+        ok, add = self._refresh(["iw4x-launcher.exe"])
+        self.assertTrue(ok)
+        entries = add.call_args[0][2]
+        self.assertEqual(add.call_args[0][1], 10190)
+        self.assertEqual(entries[0]["executable"], "iw4x-launcher.exe")
+        self.assertIn({"executable": "iw4mp.exe", "hide": True}, entries)
+
+    def test_stock_entry_stays_while_the_launcher_is_missing(self):
+        ok, add = self._refresh([])
+        self.assertFalse(ok)
+        add.assert_not_called()
+
+    def test_other_clients_are_skipped(self):
+        ok, add = self._refresh(["iw4x-launcher.exe"], setup={"iw4mp": {"client": "steam"}})
+        self.assertFalse(ok)
+        add.assert_not_called()
+
+
 class LaunchMenuEditTests(unittest.TestCase):
     """steam_appinfo: hiding and relabelling Steam's own launch entries."""
 

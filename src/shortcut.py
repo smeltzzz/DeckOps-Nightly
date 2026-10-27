@@ -2264,6 +2264,12 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
         refresh_steam_menus(sr, prog)
     except Exception as ex:
         _log.warning("launch menus not refreshed: %s", ex)
+    # MW2 Multiplayer tile: IW4x only (the campaign's Multiplayer button starts it)
+    try:
+        from iw4x import refresh_steam_menu
+        refresh_steam_menu(sr, prog)
+    except Exception as ex:
+        _log.warning("MW2 multiplayer menu not refreshed: %s", ex)
     # MW2 / MW3 SP: IW-Pad's launch option, if something else replaced it
     try:
         from sp_mod import repair_sp_launch_options

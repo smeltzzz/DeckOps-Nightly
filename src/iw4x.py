@@ -240,6 +240,31 @@ IW4X_MENU = [
     {"executable": "iw4x-launcher.exe", "arguments": "--arch x86", "description": "Play IW4x"},
 ]
 
+# The stock MW2 MP entry is hidden from the picker (flagged macOS-only, nothing is
+# deleted): the campaign's Multiplayer button starts this tile, and with only the
+# IW4x entry left it goes straight into IW4x.
+IW4X_STOCK_ENTRY = {"executable": "iw4mp.exe", "hide": True}
+
+
+def refresh_steam_menu(steam_root: str, log=lambda m: None) -> bool:
+    """Put the IW4x launch menu on the Steam MW2 MP tile (10190) and hide the stock
+    entry, for a copy set up earlier with the old menu. Only when iw4x-launcher.exe
+    is in the game folder. Steam must be closed. Returns True if the menu was applied."""
+    import config as cfg
+    entry = cfg.get_setup_games().get("iw4mp", {})
+    if entry.get("client") != "iw4x" or entry.get("source", "steam") != "steam":
+        return False
+    from detect_games import parse_library_folders, find_installed_games
+    game = find_installed_games(parse_library_folders(steam_root), steam_root).get("iw4mp") or {}
+    install_dir = game.get("install_dir", "")
+    if not install_dir or not os.path.isfile(os.path.join(install_dir, "iw4x-launcher.exe")):
+        return False
+    from steam_appinfo import add_launch_entries
+    ok = add_launch_entries(steam_root, int(MW2_MP_APPID), IW4X_MENU + [IW4X_STOCK_ENTRY])
+    log("  ✓ MW2 Multiplayer: IW4x only" if ok else
+        "  ⚠ MW2 Multiplayer menu not applied yet, will retry next time Steam is closed")
+    return ok
+
 
 # ── DLC install ──────────────────────────────────────────────────────────────
 
@@ -466,21 +491,20 @@ def install_iw4x(game: dict, steam_root: str,
         shutil.rmtree(staging, ignore_errors=True)
 
     # ── Launch menu (Steam only) ─────────────────────────────────────────
-    # The stock entry (tagged) stays vanilla MW2; "Play IW4x" runs the launcher
-    # directly, which updates and then starts the x86 client. If Steam drops
+    # "Play IW4x" runs the launcher directly, which updates and then starts the
+    # x86 client; the stock entry is hidden (IW4X_STOCK_ENTRY). If Steam drops
     # the menu, the launch option's prelaunch.sh turns plain Play into IW4x.
     if source != "own":
         prog(80, "Adding IW4x to the Steam launch menu...")
         try:
             from wrapper import clear_launch_options, set_launch_options
-            from steam_appinfo import add_launch_entries, VANILLA_TAG
+            from steam_appinfo import add_launch_entries
             from steam_common import prelaunch_prefix
             clear_launch_options(steam_root, MW2_MP_APPID)
             set_launch_options(steam_root, MW2_MP_APPID,
                                'DECKOPS_MENU="iw4mp.exe=iw4x-launcher.exe" DECKOPS_MENU_ARGS="--arch x86" '
                                f'{prelaunch_prefix("menu")}%command%')
-            if add_launch_entries(steam_root, MW2_MP_APPID,
-                                  IW4X_MENU + [{"executable": "iw4mp.exe", "tag": VANILLA_TAG}]):
+            if add_launch_entries(steam_root, MW2_MP_APPID, IW4X_MENU + [IW4X_STOCK_ENTRY]):
                 prog(80, "  ✓ Launch menu: Play IW4x")
             else:
                 prog(80, "  ⚠ Launch menu not added yet, will retry next time Steam is closed")
