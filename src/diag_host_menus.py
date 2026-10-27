@@ -27,6 +27,34 @@ def say(*parts):
     LINES.append(line)
 
 
+def plain(node):
+    """A parsed binary-KV node as plain Python (dicts, str, int)."""
+    import struct
+    out = {}
+    for t, key, val in node:
+        if t == a._T_DICT:
+            out[key] = plain(val)
+        elif t == a._T_STR:
+            out[key] = val.decode("utf-8", "replace")
+        elif t == a._T_WSTR:
+            out[key] = val.decode("utf-16-le", "replace")
+        elif t == a._T_INT32:
+            out[key] = struct.unpack("<I", val)[0]
+        else:
+            out[key] = repr(bytes(val))
+    return out
+
+
+def full_launch(ai, appid):
+    span = ai.find_app(appid)
+    if not span:
+        return "NOT in appinfo.vdf"
+    st, en = span
+    node, _ = ai.parse_kv(bytes(ai.data[st + 8 + a._HDR.size:en]))
+    launch = a._dict(a._dict(a._dict(node, "appinfo") or [], "config") or [], "launch")
+    return plain(launch) if launch else "no launch entries"
+
+
 def launch_entries(ai, appid):
     span = ai.find_app(appid)
     if not span:
@@ -70,6 +98,12 @@ def main():
         ai = a._AppInfo(open(a.appinfo_path(sr), "rb").read())
         for appid in (42680, 42700, 202970):
             say("appinfo", appid, "->", launch_entries(ai, appid))
+        # Every field of every launch entry (stock ones too): tells whether a
+        # stock entry's label can be changed and what the extra WaW options are
+        import json
+        for appid in (10090, 42680, 42700, 202970):
+            say("FULL launch", appid)
+            say(json.dumps(full_launch(ai, appid), indent=1, ensure_ascii=False))
     except Exception as ex:
         say("appinfo unreadable:", ex)
 

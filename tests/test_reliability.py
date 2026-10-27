@@ -1183,6 +1183,31 @@ class HostMenuTests(unittest.TestCase):
         self.assertFalse(ok)
         add.assert_not_called()
 
+    def test_picker_labels(self):
+        import plutonium
+        L = plutonium.STEAM_MENU_LABELS
+        self.assertEqual([L[k][0] for k in ("t4sp", "t4mp", "t5sp", "t5mp", "t6mp", "t6zm", "iw5mp")],
+                         ["Campaign & Zombies", "Multiplayer", "Campaign & Zombies", "Multiplayer",
+                          "Multiplayer", "Zombies", "Multiplayer"])
+        # the host tile uses the same words
+        self.assertEqual({k: v[2] for k, v in plutonium.HOST_MENU.items()},
+                         {k: L[k][0] for k in plutonium.HOST_MENU})
+
+    def test_refresh_rebuilds_each_set_up_game_once(self):
+        import plutonium
+        setup = {"t5mp": {"client": "plutonium", "source": "steam"},
+                 "t4sp": {"client": "plutonium", "source": "steam"},
+                 "iw4mp": {"client": "iw4x", "source": "steam"}}
+        installed = {"t5mp": {"install_dir": "a"}, "t4sp": {"install_dir": "b"}, "iw4mp": {"install_dir": "c"}}
+        with patch("config.is_lcd", return_value=False), \
+             patch("config.get_setup_games", return_value=setup), \
+             patch("detect_games.parse_library_folders", return_value=[]), \
+             patch("detect_games.find_installed_games", return_value=installed), \
+             patch.object(plutonium, "add_steam_menu") as menu:
+            done = plutonium.refresh_steam_menus("steam")
+        self.assertEqual(sorted(done), ["t4sp", "t5mp"])
+        self.assertEqual(menu.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

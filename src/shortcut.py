@@ -1213,8 +1213,8 @@ def cleanup_orphan_shortcuts(on_progress=None):
 #   CoD4 (7940):  Play starts IW3SP-MOD; the main menu's Multiplayer button
 #                 starts CoD4R (it replaces iw3mp.exe in place). Going back to
 #                 SP from MP means quitting and pressing Play again.
-#   WaW (10090):  "Play Plutonium SP/ZM ..." and "Play Plutonium Multiplayer ..."
-#                 entries added by plutonium._setup_steam_menu.
+#   WaW (10090):  "Campaign & Zombies" and "Multiplayer" entries added by
+#                 plutonium._setup_steam_menu (labels: STEAM_MENU_LABELS).
 # Both use the same prefix the shortcut used, so nothing moves. CoD4x keeps its
 # shortcut (it needs the KB+M controller layout), and so does WaW on LCD
 # (Heroic flatpak launch).
@@ -2257,12 +2257,13 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
     readded = []
     # Old CoD4 MP / WaW MP shortcuts go once their main tile launches MP
     remove_merged_mp_shortcuts(sr, on_progress)
-    # MW3 / BO1 / BO2: MP and ZM entries on the SP tile's launch menu
+    # Plutonium launch menus: current labels, plus the MP / ZM entries that
+    # MW3 / BO1 / BO2 keep on their SP tile
     try:
-        from plutonium import ensure_host_menus
-        ensure_host_menus(sr, prog)
+        from plutonium import refresh_steam_menus
+        refresh_steam_menus(sr, prog)
     except Exception as ex:
-        _log.warning("host tile menus skipped: %s", ex)
+        _log.warning("launch menus not refreshed: %s", ex)
     if setup.get("t6sp", {}).get("source") == "own":
         g = find_own_installed().get("t6sp")
         if g and migrate_own_t6sp(g, on_progress):

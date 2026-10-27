@@ -46,7 +46,7 @@ With Plutonium Offline, you can play WaW, BO1, BO2, and MW3 without an internet 
 
 1. On the setup screen, select **Plutonium Offline**.
 2. DeckOps adds the **DeckOps: Plutonium Offline** launcher to your Steam library.
-3. To start a game, open the launcher. You can also select **Play Plutonium Offline** in the Steam launch menu of the game.
+3. To start a game, open the launcher. You can also pick the game's **(Offline)** entry in its Steam launch menu.
 
 In Offline Multiplayer, DeckOps starts a local server with bots. You can also play Campaign and Zombies offline in WaW and BO1, and Zombies offline in BO2.
 

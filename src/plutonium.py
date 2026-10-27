@@ -160,10 +160,18 @@ STEAM_MENU_EXES = {
     "iw5mp_ds": ("iw5plutds.exe", "iw5plutds_lan.exe"),
 }
 
-# Menu labels where one appid holds two modes; others get the defaults.
+# What the Steam picker shows for each key's (online, offline) entry; keys not
+# listed get _DEFAULT_MENU_LABELS. Steam's own entries are not touched here.
+_LABELS_CZ = ("Campaign & Zombies", "Campaign & Zombies (Offline)")
+_LABELS_MP = ("Multiplayer", "Multiplayer (Offline)")
 STEAM_MENU_LABELS = {
-    "t4sp": ("Play Plutonium SP/ZM Online", "Play Plutonium SP/ZM Offline"),
-    "t4mp": ("Play Plutonium Multiplayer Online", "Play Plutonium Multiplayer Offline"),
+    "t4sp":  _LABELS_CZ,
+    "t4mp":  _LABELS_MP,
+    "t5sp":  _LABELS_CZ,
+    "t5mp":  _LABELS_MP,
+    "t6mp":  _LABELS_MP,
+    "t6zm":  ("Zombies", "Zombies (Offline)"),
+    "iw5mp": _LABELS_MP,
 }
 _DEFAULT_MENU_LABELS = ("Play Plutonium Online", "Play Plutonium Offline")
 
@@ -906,10 +914,10 @@ def add_steam_menu(game: dict, game_key: str, steam_root: str, prog):
 # host tile's launch option doesn't include. The online wrapper scripts export
 # their own prefix, so they run from any tile.
 HOST_MENU = {
-    "iw5mp": (42680,  "iw5sp", "Play Plutonium Multiplayer Online"),
-    "t5mp":  (42700,  "t5sp",  "Play Plutonium Multiplayer Online"),
-    "t6mp":  (202970, "t6sp",  "Play Plutonium Multiplayer Online"),
-    "t6zm":  (202970, "t6sp",  "Play Plutonium Zombies Online"),
+    "iw5mp": (42680,  "iw5sp", STEAM_MENU_LABELS["iw5mp"][0]),
+    "t5mp":  (42700,  "t5sp",  STEAM_MENU_LABELS["t5mp"][0]),
+    "t6mp":  (202970, "t6sp",  STEAM_MENU_LABELS["t6mp"][0]),
+    "t6zm":  (202970, "t6sp",  STEAM_MENU_LABELS["t6zm"][0]),
 }
 
 
@@ -963,6 +971,33 @@ def ensure_host_menus(steam_root: str, log=lambda m: None) -> list:
     installed = find_installed_games(parse_library_folders(steam_root), steam_root)
     return [k for k in keys if k in installed
             and add_host_menu(installed[k], k, steam_root, log, installed)]
+
+
+def refresh_steam_menus(steam_root: str, log=lambda m: None) -> list:
+    """Rebuild the Plutonium launch menu (entries and labels) of every set-up
+    Plutonium Steam game, then each one's host tile entry (add_steam_menu does
+    both). Picks up label changes without reinstalling. OLED / Other only.
+    Steam must be closed. Returns the keys refreshed."""
+    import config as _cfg
+    if _cfg.is_lcd():
+        return []
+    setup = _cfg.get_setup_games()
+    keys = [k for k in STEAM_MENU_EXES if setup.get(k, {}).get("client") == "plutonium"
+            and setup[k].get("source", "steam") == "steam"]
+    if not keys:
+        return []
+    from detect_games import parse_library_folders, find_installed_games
+    installed = find_installed_games(parse_library_folders(steam_root), steam_root)
+    done = []
+    for k in keys:
+        if k not in installed:
+            continue
+        try:
+            add_steam_menu(installed[k], k, steam_root, lambda pct, msg: log(msg))
+            done.append(k)
+        except Exception as ex:
+            _log.warning("launch menu refresh failed for %s: %s", k, ex)
+    return done
 
 
 def remove_offline_files(game: dict, game_key: str):
