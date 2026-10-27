@@ -111,7 +111,7 @@ def main():
     try:
         import wrapper as w
         for uid, _path, content in w._localconfigs(sr):
-            for appid in ("42680", "42690", "42700", "202970", "10090", "7940"):
+            for appid in ("10180", "42680", "42690", "42700", "202970", "10090", "7940"):
                 block = w._app_block(content, appid)
                 if block:
                     found = w._flat_values(content, block, "LaunchOptions")
