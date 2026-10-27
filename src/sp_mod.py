@@ -112,19 +112,36 @@ def update_iw_pad(game_key: str, install_dir: str, log=_log.info):
     _fetch_iw_pad(game_key, install_dir, arch, lambda p, m: None, release=(url, dg))
 
 
+# DXVK frame limit per game: MW2 (2009) renders through Direct3D 9, so DXVK's
+# limiter caps it whatever the game's own settings do. Games not listed get none.
+_FRAME_CAP = {
+    "iw4sp": 'DXVK_CONFIG="d3d9.maxFrameRate=90" ',
+}
+
+
 def build_sp_launch_option(game_key: str) -> str:
-    """Launch option (Steam app or own shortcut) that swaps the original SP exe for iw-pad.exe."""
+    """Launch option (Steam app or own shortcut) that swaps the original SP exe for iw-pad.exe,
+    with the game's DXVK frame cap in front when it has one."""
     exe = _SP_MOD_CONFIG[game_key]["original_exe"]
     from steam_common import prelaunch_prefix
-    return f"{prelaunch_prefix(game_key)}bash -c 'exec \"${{@/{exe}/iw-pad.exe}}\"' -- %command%"
+    return (f"{_FRAME_CAP.get(game_key, '')}{prelaunch_prefix(game_key)}"
+            f"bash -c 'exec \"${{@/{exe}/iw-pad.exe}}\"' -- %command%")
+
+
+def _launch_option_ok(game_key: str, value: str) -> bool:
+    """True if a tile's current launch option still has what DeckOps puts there:
+    the iw-pad.exe swap, and the frame cap for games that have one."""
+    if "iw-pad.exe" not in value:
+        return False
+    return not _FRAME_CAP.get(game_key) or "d3d9.maxFrameRate" in value
 
 
 def repair_sp_launch_options(steam_root: str, log=lambda m: None) -> list:
     """Steam MW2 / MW3 SP set up with IW-Pad: put IW-Pad's launch option back
     when the tile's current one doesn't run iw-pad.exe (empty, or left over
-    from something else such as an old AlterWare client). An option that
-    already uses iw-pad.exe is never touched. Steam must be closed.
-    Returns the game keys fixed."""
+    from something else such as an old AlterWare client), or lacks the frame
+    cap of a game that has one (MW2). An option that has both is never
+    touched. Steam must be closed. Returns the game keys fixed."""
     from config import get_setup_games
     from wrapper import snapshot_launch_options, clear_launch_options, set_launch_options
     setup = get_setup_games()
@@ -135,9 +152,9 @@ def repair_sp_launch_options(steam_root: str, log=lambda m: None) -> list:
             continue
         appid = cfg["appid"]
         current = snapshot_launch_options(steam_root, [appid]).get(str(appid), {})
-        if current and all("iw-pad.exe" in v for v in current.values()):
+        if current and all(_launch_option_ok(key, v) for v in current.values()):
             continue
-        log(f"  {key}: launch option did not use IW-Pad, setting it again")
+        log(f"  {key}: launch option is not DeckOps' IW-Pad one, setting it again")
         clear_launch_options(steam_root, appid)
         set_launch_options(steam_root, appid, build_sp_launch_option(key))
         fixed.append(key)

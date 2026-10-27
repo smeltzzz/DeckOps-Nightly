@@ -974,18 +974,28 @@ DEFAULT_FOV = 90
 FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp",
                 "t4sp", "t4mp", "t5sp", "t5mp", "t6sp", "t6mp", "t6zm")
 
+# MW2 (2009) campaign, stock build: cg_fov is cheat-protected and the game puts it
+# back to 65 when a level loads. thereisacow 1337 unlocks it; F10 re-applies it
+# (map a button to F10 in Steam Input). Only the stock config.cfg gets these.
+_EXTRA_PATCHES = {
+    ("iw4sp", "config.cfg"): {"extra_dvars": {"thereisacow": "1337"},
+                              "binds": {"F10": "cg_fov 90"}},
+}
+
 # BO2 SP (T6SP-Mod) keeps its settings in binary profiles. The mod runs
 # config_sp.cfg when the game starts and persistent_sp.cfg on each level change,
 # so those are written next to the game and in its players folder.
 _T6SP_AUTOEXEC = ("config_sp.cfg", "persistent_sp.cfg")
 
 
-def _patch_dvars(path, values, create=False):
+def _patch_dvars(path, values, create=False, binds=None):
     """
     Set `seta <name> "<value>"` for each name in values, in place. An existing
     line gets the new value; a missing one is added (cg_fov after cg_fovScale,
-    others at the end). Line endings and every other line stay as they are.
-    create=True makes the file if it isn't there. Returns True if it changed.
+    others at the end). binds ({key: command}) does the same for
+    `bind <key> "<command>"` lines. Line endings and every other line stay as
+    they are. create=True makes the file if it isn't there. Returns True if
+    it changed.
     """
     import re as _re
 
@@ -1015,6 +1025,15 @@ def _patch_dvars(path, values, create=False):
             if new and not new.endswith("\n"):
                 new += nl
             new += line + nl
+    for key, command in (binds or {}).items():
+        pat = _re.compile(r'^([ \t]*bind[ \t]+' + _re.escape(key) + r'[ \t]+")[^"\r\n]*(")',
+                          _re.IGNORECASE | _re.MULTILINE)
+        if pat.search(new):
+            new = pat.sub(lambda m: m.group(1) + command + m.group(2), new)
+        else:
+            if new and not new.endswith("\n"):
+                new += nl
+            new += f'bind {key} "{command}"' + nl
     if new == text:
         return False
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1049,10 +1068,10 @@ def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
     player_name = cfg.get_player_name()
     changed = 0
 
-    def patch(path, label, create=False):
+    def patch(path, label, create=False, extra_dvars=None, binds=None):
         nonlocal changed
         try:
-            if _patch_dvars(path, values, create=create):
+            if _patch_dvars(path, {**values, **(extra_dvars or {})}, create=create, binds=binds):
                 changed += 1
                 prog(f"  + {label}: {os.path.basename(path)}")
         except OSError as ex:
@@ -1086,7 +1105,8 @@ def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
             if not dest_dir:
                 continue
 
-            patch(os.path.join(dest_dir, name), key)
+            extra = _EXTRA_PATCHES.get((key, name.lower()), {})
+            patch(os.path.join(dest_dir, name), key, **extra)
 
             if fixed_dest:
                 if cfg.is_lcd():

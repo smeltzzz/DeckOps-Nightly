@@ -1306,6 +1306,28 @@ class SpLaunchOptionRepairTests(unittest.TestCase):
         clear.assert_not_called()
         set_.assert_not_called()
 
+    def test_mw2_option_has_the_dxvk_frame_cap_and_mw3_does_not(self):
+        import sp_mod
+        mw2, mw3 = sp_mod.build_sp_launch_option("iw4sp"), sp_mod.build_sp_launch_option("iw5sp")
+        self.assertTrue(mw2.startswith('DXVK_CONFIG="d3d9.maxFrameRate=90" '))
+        self.assertIn("iw-pad.exe", mw2)
+        self.assertNotIn("DXVK_CONFIG", mw3)
+
+    def test_mw2_option_without_the_cap_is_replaced(self):
+        old = {"10180": {"u": "bash -c 'exec \\\"${@/iw4sp.exe/iw-pad.exe}\\\"' -- %command%"}}
+        fixed, clear, set_ = self._repair(old, setup={"iw4sp": {"client": "iw-pad", "source": "steam"}})
+        self.assertEqual(fixed, ["iw4sp"])
+        clear.assert_called_once_with("steam", 10180)
+        self.assertIn("d3d9.maxFrameRate=90", set_.call_args[0][2])
+
+    def test_mw2_option_with_the_cap_is_left_alone(self):
+        import sp_mod
+        ok = {"10180": {"u": sp_mod.build_sp_launch_option("iw4sp").replace('"', '\\"')}}
+        fixed, clear, set_ = self._repair(ok, setup={"iw4sp": {"client": "iw-pad", "source": "steam"}})
+        self.assertEqual(fixed, [])
+        clear.assert_not_called()
+        set_.assert_not_called()
+
     def test_games_not_set_up_with_iw_pad_are_skipped(self):
         fixed, clear, _ = self._repair({}, setup={"iw5sp": {"client": "steam", "source": "steam"}})
         self.assertEqual(fixed, [])
@@ -1357,6 +1379,34 @@ class FpsFovTests(unittest.TestCase):
             self.assertFalse(p.exists())
             self.assertTrue(gc._patch_dvars(str(p), self.V, create=True))
             self.assertEqual(p.read_text(), 'seta cg_fov "90"\nseta com_maxfps "90"\n')
+
+    def test_binds_are_set_or_added(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            p = self._file(d, "c.cfg", 'bind F10 "something"\r\nbind w "+forward"\r\n')
+            gc._patch_dvars(str(p), {}, binds={"F10": "cg_fov 90", "F11": "x"})
+            self.assertEqual(p.read_bytes().decode(),
+                             'bind F10 "cg_fov 90"\r\nbind w "+forward"\r\nbind F11 "x"\r\n')
+
+    def test_mw2_campaign_config_gets_thereisacow_and_the_fov_bind(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            mw2 = Path(d, "mw2")
+            (mw2 / "players").mkdir(parents=True)
+            stock = self._file(mw2 / "players", "config.cfg", 'seta com_maxfps "85"\r\n')
+            iw4x = self._file(mw2 / "players", "iw4x_sp_config.cfg", 'seta com_maxfps "85"\r\n')
+            games = {"iw4sp": {"install_dir": str(mw2)}}
+            with patch("config.get_setup_games", return_value={"iw4sp": {"client": "iw-pad"}}), \
+                 patch("config.get_player_name", return_value="Me"), \
+                 patch("config.is_lcd", return_value=False):
+                gc.set_fps_fov(d, games)
+            text = stock.read_text()
+            self.assertIn('seta thereisacow "1337"', text)
+            self.assertIn('bind F10 "cg_fov 90"', text)
+            self.assertIn('seta com_maxfps "90"', text)
+            # the AlterWare SP config only gets FPS and FOV
+            self.assertNotIn("thereisacow", iw4x.read_text())
+            self.assertIn('seta cg_fov "90"', iw4x.read_text())
 
     def test_set_fps_fov_patches_sp_configs_and_the_bo2_autoexec(self):
         import game_config as gc
