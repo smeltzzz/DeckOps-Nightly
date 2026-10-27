@@ -107,6 +107,32 @@ def main():
     except Exception as ex:
         say("appinfo unreadable:", ex)
 
+    # The launch option each tile really has (this is what swaps in IW-Pad etc.)
+    try:
+        import wrapper as w
+        for uid, _path, content in w._localconfigs(sr):
+            for appid in ("42680", "42690", "42700", "202970", "10090", "7940"):
+                block = w._app_block(content, appid)
+                if block:
+                    found = w._flat_values(content, block, "LaunchOptions")
+                    say("LaunchOptions", uid, appid, "->", [content[vs:ve] for _, vs, ve in found])
+    except Exception as ex:
+        say("LaunchOptions not read:", ex)
+
+    # MW3 folder: which IW-Pad / AlterWare files are there
+    d = (inst.get("iw5sp") or {}).get("install_dir", "")
+    if d and os.path.isdir(d):
+        names = sorted(n for n in os.listdir(d)
+                       if n.lower().startswith(("iw-pad", "iw_pad", "alterware", "awcache", "iw5", "deckops"))
+                       or n.lower().endswith(".json"))
+        say("MW3 folder:", [(n, os.path.getsize(os.path.join(d, n))) for n in names if os.path.isfile(os.path.join(d, n))])
+        say("MW3 subfolders:", sorted(n for n in os.listdir(d) if os.path.isdir(os.path.join(d, n))))
+    try:
+        from config import get_iw_pad
+        say("IW-Pad iw5sp saved:", get_iw_pad("iw5sp"), "| setup iw5sp:", setup.get("iw5sp"))
+    except Exception as ex:
+        say("IW-Pad config not read:", ex)
+
     say("recorded launch_menus:",
         {k: [e["executable"] for e in v] for k, v in cfg.get("launch_menus", {}).items()})
 
@@ -125,9 +151,14 @@ def main():
         from identity import LOG_DIR
         log = os.path.join(LOG_DIR, "install.log")
         with open(log, errors="replace") as f:
-            hits = [l.rstrip() for l in f if any(w in l.lower() for w in ("launch menu", "appinfo", "host tile"))]
+            lines = f.readlines()
+        hits = [l.rstrip() for l in lines if any(w in l.lower() for w in ("launch menu", "appinfo", "host tile"))]
         say("--- install.log (last 15 menu lines) ---")
         for l in hits[-15:]:
+            say(l)
+        iwpad = [l.rstrip() for l in lines if any(w in l.lower() for w in ("iw-pad", "iw5sp", "prelaunch"))]
+        say("--- install.log (last 15 IW-Pad / prelaunch lines) ---")
+        for l in iwpad[-15:]:
             say(l)
     except Exception as ex:
         say("install.log not read:", ex)
