@@ -1334,6 +1334,33 @@ class SpLaunchOptionRepairTests(unittest.TestCase):
         clear.assert_not_called()
 
 
+class PrelaunchFovLinesTests(unittest.TestCase):
+    """MW2 SP: the lines the game strips on exit are put back before launch."""
+
+    def _run(self, key, cfg_text):
+        import prelaunch
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "players").mkdir()
+            cfg = Path(d, "players", "config.cfg")
+            cfg.write_bytes(cfg_text.encode())
+            exe = os.path.join(d, f"{key}.exe")
+            with patch("sp_mod.update_iw_pad") as upd:
+                prelaunch._iwpad(key, ["proton", "run", exe])
+            return cfg.read_bytes().decode(), upd
+
+    def test_mw2_lines_are_restored_before_the_iw_pad_update(self):
+        text, upd = self._run("iw4sp", 'seta thereisacow "1337"\r\n')
+        self.assertIn('seta cg_fov "90"', text)
+        self.assertIn('seta com_maxfps "90"', text)
+        self.assertIn('bind F10 "cg_fov 90"', text)
+        upd.assert_called_once()
+
+    def test_mw3_config_is_left_alone(self):
+        text, upd = self._run("iw5sp", 'seta sensitivity "5"\r\n')
+        self.assertEqual(text, 'seta sensitivity "5"\r\n')
+        upd.assert_called_once()
+
+
 class FpsFovTests(unittest.TestCase):
     """game_config.set_fps_fov: only cg_fov and com_maxfps change, in place."""
 

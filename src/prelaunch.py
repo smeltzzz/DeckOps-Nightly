@@ -49,10 +49,27 @@ def _plutonium(key, cmd):
         pu.link_prefix(master, prefix, info, log)
 
 
+def _fov_lines(key, install_dir):
+    """MW2 campaign: the game drops cg_fov, com_maxfps and the F10 bind from
+    config.cfg when it writes the file on exit, so put them back before each
+    launch (before the IW-Pad update, so a network failure can't skip it)."""
+    if key != "iw4sp":
+        return
+    from game_config import _patch_dvars, _EXTRA_PATCHES, DEFAULT_FPS, DEFAULT_FOV
+    extra = _EXTRA_PATCHES[("iw4sp", "config.cfg")]
+    values = {"cg_fov": str(DEFAULT_FOV), "com_maxfps": str(DEFAULT_FPS), **extra["extra_dvars"]}
+    if _patch_dvars(os.path.join(install_dir, "players", "config.cfg"), values, binds=extra["binds"]):
+        _log.info("prelaunch %s: FOV / FPS lines put back in config.cfg", key)
+
+
 def _iwpad(key, cmd):
     exe = f"{key}.exe"
     path = next((a for a in cmd if a.lower().endswith(exe)), None)
     if path:
+        try:
+            _fov_lines(key, os.path.dirname(path))
+        except Exception as ex:
+            _log.warning("prelaunch %s: config lines skipped: %s", key, ex)
         from sp_mod import update_iw_pad
         update_iw_pad(key, os.path.dirname(path), log=_log.info)
 
