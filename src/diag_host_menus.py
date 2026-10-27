@@ -133,6 +133,32 @@ def main():
     except Exception as ex:
         say("IW-Pad config not read:", ex)
 
+    # MW2 campaign: do the FOV lines survive, and what does IW-Pad say?
+    import re, time
+    d2 = (inst.get("iw4sp") or {}).get("install_dir", "")
+    if d2:
+        cfg_path = os.path.join(d2, "players", "config.cfg")
+        if os.path.isfile(cfg_path):
+            st = os.stat(cfg_path)
+            say("MW2 config.cfg:", st.st_size, "bytes, modified", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+                "| writable:", os.access(cfg_path, os.W_OK))
+            pat = re.compile(r'thereisacow|bind\s+F10|cg_fov|com_maxfps|developer|con_|ui_console|monkeytoy', re.I)
+            with open(cfg_path, errors="replace") as f:
+                for line in f:
+                    if pat.search(line):
+                        say("   ", line.rstrip())
+        else:
+            say("MW2 config.cfg: not found at", cfg_path)
+        log_path = os.path.join(d2, "iw-pad.log")
+        if os.path.isfile(log_path):
+            with open(log_path, errors="replace") as f:
+                tail = f.read().splitlines()[-25:]
+            say("--- MW2 iw-pad.log (last 25 lines) ---")
+            for l in tail:
+                say(l)
+        else:
+            say("MW2 iw-pad.log: not found")
+
     say("recorded launch_menus:",
         {k: [e["executable"] for e in v] for k, v in cfg.get("launch_menus", {}).items()})
 
