@@ -979,10 +979,10 @@ FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp",
 # MW3 that is still a guess); F10 re-applies it (map a button to F10 in Steam
 # Input). Only the stock config.cfg gets these.
 _FOV_UNLOCK = {"extra_dvars": {"thereisacow": "1337"}, "binds": {"F10": "cg_fov 90"}}
-# MW3: cg_fov did not take effect, so also try the scale: the view is cg_fov (65)
-# times cg_fovScale, and 65 * 1.385 is about 90.
-_FOV_UNLOCK_MW3 = {"extra_dvars": {"thereisacow": "1337", "cg_fovScale": "1.385"},
-                   "binds": {"F10": "cg_fov 90; cg_fovscale 1.385"}}
+# MW3: neither cg_fov, thereisacow nor cg_fovScale did anything in the 64-bit build,
+# so its FOV is held by fovwatch.py (started from prelaunch.sh). The scale goes back
+# to 1 so the two never stack; no cheat unlock or bind.
+_FOV_UNLOCK_MW3 = {"extra_dvars": {"cg_fovScale": "1"}, "binds": {}}
 _EXTRA_PATCHES = {
     ("iw4sp", "config.cfg"): _FOV_UNLOCK,
     ("iw5sp", "config.cfg"): _FOV_UNLOCK_MW3,

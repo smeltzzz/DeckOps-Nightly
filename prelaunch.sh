@@ -6,6 +6,7 @@
 # times out or there is no network.
 
 DIR="$(dirname "$(readlink -f "$0")")"
+KEY="$1"
 
 # Steam's launch environment (overlay preload, runtime libraries) is meant
 # for the game, not for the host Python, so it is dropped for the check only.
@@ -38,5 +39,15 @@ if [ -n "$DECKOPS_MENU" ]; then
             fi
         done
     done
+fi
+
+# MW3 campaign: cg_fov can't be set from config or console in the 64-bit Steam build,
+# so fovwatch.py runs the game as its child and holds the dvar at 90 (see its header).
+# It gets Steam's LD_PRELOAD / LD_LIBRARY_PATH only for the game, like the check above.
+# The game starts first; if the Python can't run at all, it is started as usual.
+if [ "$KEY" = iw5sp ] && [ -x "$DIR/.venv/bin/python3" ] && [ -f "$DIR/src/fovwatch.py" ]; then
+    exec env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
+        DECKOPS_LD_PRELOAD="$LD_PRELOAD" DECKOPS_LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+        "$DIR/.venv/bin/python3" "$DIR/src/fovwatch.py" 90 iw5sp.exe -- "$@"
 fi
 exec "$@"

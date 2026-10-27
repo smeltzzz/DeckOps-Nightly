@@ -1421,9 +1421,9 @@ class PrelaunchFovLinesTests(unittest.TestCase):
             text = cfg.read_bytes().decode()
         self.assertIn('seta sensitivity "5"', text)
         self.assertIn('seta cg_fov "90"', text)
-        self.assertIn('seta thereisacow "1337"', text)
-        self.assertIn('bind F10 "cg_fov 90; cg_fovscale 1.385"', text)
-        self.assertIn('seta cg_fovScale "1.385"', text)
+        self.assertIn('seta cg_fovScale "1"', text)   # the old experiment's scale goes back to 1
+        self.assertNotIn("thereisacow", text)
+        self.assertNotIn("bind F10", text)
 
     def test_other_keys_get_no_config_lines(self):
         import prelaunch
@@ -1433,6 +1433,91 @@ class PrelaunchFovLinesTests(unittest.TestCase):
             cfg.write_bytes(b'seta sensitivity "5"\r\n')
             prelaunch._fov_lines("iw3sp", d)
             self.assertEqual(cfg.read_bytes(), b'seta sensitivity "5"\r\n')
+
+
+class FakeMem:
+    """Stands in for ProcMem: address-space regions kept as byte buffers."""
+
+    def __init__(self, regions):
+        self.regions = regions            # {start: bytearray}
+
+    def _find(self, addr, n):
+        for start, buf in self.regions.items():
+            if start <= addr and addr + n <= start + len(buf):
+                return start, buf
+        return None
+
+    def read(self, addr, n):
+        hit = self._find(addr, 1)
+        if not hit:
+            return b""
+        start, buf = hit
+        return bytes(buf[addr - start:addr - start + n])
+
+    def write(self, addr, data):
+        hit = self._find(addr, len(data))
+        if not hit:
+            return False
+        start, buf = hit
+        buf[addr - start:addr - start + len(data)] = data
+        return True
+
+
+class FovWatchTests(unittest.TestCase):
+    """fovwatch: find the cg_fov dvar_t in the game's memory and hold its value."""
+
+    BASE = 0x140000000
+    EXE = "iw5sp.exe"
+
+    def _world(self, value=65.0, string=b"\x00cg_fov\x00"):
+        import struct
+        rdata, data = bytearray(0x1000), bytearray(0x1000)
+        rdata[0x100:0x100 + len(string)] = string
+        name_addr = self.BASE + 0x1000 + 0x101
+        rec = 0x200                                   # a dvar_t: name pointer at +0, value at +0x10
+        data[rec:rec + 8] = struct.pack("<Q", name_addr)
+        data[rec + 0x10:rec + 0x14] = struct.pack("<f", value)
+        mem = FakeMem({self.BASE + 0x1000: rdata, self.BASE + 0x2000: data})
+        maps = [(self.BASE + 0x1000, self.BASE + 0x2000, "r--p", f"/g/{self.EXE}"),
+                (self.BASE + 0x2000, self.BASE + 0x3000, "rw-p", f"/g/{self.EXE}")]
+        return mem, maps, self.BASE + 0x2000 + rec + 0x10
+
+    def test_finds_the_dvar_value_address(self):
+        import fovwatch
+        mem, maps, want = self._world()
+        self.assertEqual(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None), want)
+
+    def test_ignores_a_record_with_an_unreasonable_value(self):
+        import fovwatch
+        mem, maps, _ = self._world(value=0.0)
+        self.assertIsNone(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None))
+
+    def test_no_cg_fov_string_means_no_result(self):
+        import fovwatch
+        mem, maps, _ = self._world(string=b"\x00cg_other\x00")
+        self.assertIsNone(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None))
+
+    def test_hold_writes_only_when_the_value_differs(self):
+        import struct
+        import fovwatch
+        mem, maps, addr = self._world(value=65.0)
+        self.assertTrue(fovwatch.hold(mem, addr, 90.0))
+        self.assertEqual(struct.unpack("<f", mem.read(addr, 4))[0], 90.0)
+        self.assertFalse(fovwatch.hold(mem, addr, 90.0))           # already there
+        mem.write(addr, struct.pack("<f", 65.0))                    # a level load puts 65 back
+        self.assertTrue(fovwatch.hold(mem, addr, 90.0))
+        self.assertIsNone(fovwatch.hold(mem, addr + 0x10000, 90.0))  # unreadable
+
+    def test_child_gets_steams_preload_back_and_runs_to_completion(self):
+        import fovwatch
+        with patch.dict(os.environ, {"DECKOPS_LD_PRELOAD": "/steam/overlay.so", "DECKOPS_LD_LIBRARY_PATH": ""}):
+            env = fovwatch._child_env()
+        self.assertEqual(env["LD_PRELOAD"], "/steam/overlay.so")
+        self.assertNotIn("DECKOPS_LD_PRELOAD", env)
+        self.assertNotIn("LD_LIBRARY_PATH", env)
+        # the game's exit code is passed on even if the watcher can't do anything (no /proc here)
+        rc = fovwatch.main(["90", "iw5sp.exe", "--", sys.executable, "-c", "import sys; sys.exit(3)"])
+        self.assertEqual(rc, 3)
 
 
 class FpsFovTests(unittest.TestCase):
@@ -1489,7 +1574,7 @@ class FpsFovTests(unittest.TestCase):
             self.assertEqual(p.read_bytes().decode(),
                              'bind F10 "cg_fov 90"\r\nbind w "+forward"\r\nbind F11 "x"\r\n')
 
-    def test_mw3_campaign_config_gets_thereisacow_and_the_fov_bind(self):
+    def test_mw3_campaign_config_has_no_cheat_unlock_or_fov_bind(self):
         import game_config as gc
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "players2").mkdir()
@@ -1499,9 +1584,9 @@ class FpsFovTests(unittest.TestCase):
                  patch("config.is_lcd", return_value=False):
                 gc.set_fps_fov(d, {"iw5sp": {"install_dir": d}})
             text = cfg.read_text()
-            self.assertIn('bind F10 "cg_fov 90; cg_fovscale 1.385"', text)
-            self.assertIn('seta thereisacow "1337"', text)
-            self.assertIn('seta cg_fovScale "1.385"', text)
+            self.assertIn('seta com_maxfps "90"', text)
+            self.assertNotIn("thereisacow", text)
+            self.assertNotIn("bind F10", text)
 
     def test_mw2_campaign_config_gets_thereisacow_and_the_fov_bind(self):
         import game_config as gc

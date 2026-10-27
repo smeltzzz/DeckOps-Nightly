@@ -186,6 +186,14 @@ def main():
         say("--- install.log (last 15 IW-Pad / prelaunch lines) ---")
         for l in iwpad[-15:]:
             say(l)
+        fov = [l.rstrip() for l in lines if "fovwatch" in l.lower() or "cg_fov" in l.lower()]
+        say("--- install.log (last 25 fovwatch lines) ---")
+        for l in fov[-25:]:
+            say(l)
+        try:
+            say("ptrace_scope:", open("/proc/sys/kernel/yama/ptrace_scope").read().strip())
+        except OSError as ex:
+            say("ptrace_scope not readable:", ex)
     except Exception as ex:
         say("install.log not read:", ex)
 
