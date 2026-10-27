@@ -112,10 +112,11 @@ def update_iw_pad(game_key: str, install_dir: str, log=_log.info):
     _fetch_iw_pad(game_key, install_dir, arch, lambda p, m: None, release=(url, dg))
 
 
-# DXVK frame limit per game: MW2 (2009) renders through Direct3D 9, so DXVK's
-# limiter caps it whatever the game's own settings do. Games not listed get none.
+# DXVK frame limit per game: MW2 (2009) and MW3 (2011) render through Direct3D 9,
+# so DXVK's limiter caps them whatever the game's own settings do.
 _FRAME_CAP = {
     "iw4sp": 'DXVK_CONFIG="d3d9.maxFrameRate=90" ',
+    "iw5sp": 'DXVK_CONFIG="d3d9.maxFrameRate=90" ',
 }
 
 
@@ -140,7 +141,7 @@ def repair_sp_launch_options(steam_root: str, log=lambda m: None) -> list:
     """Steam MW2 / MW3 SP set up with IW-Pad: put IW-Pad's launch option back
     when the tile's current one doesn't run iw-pad.exe (empty, or left over
     from something else such as an old AlterWare client), or lacks the frame
-    cap of a game that has one (MW2). An option that has both is never
+    cap of a game that has one (MW2, MW3). An option that has both is never
     touched. Steam must be closed. Returns the game keys fixed."""
     from config import get_setup_games
     from wrapper import snapshot_launch_options, clear_launch_options, set_launch_options

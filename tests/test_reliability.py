@@ -1300,18 +1300,25 @@ class SpLaunchOptionRepairTests(unittest.TestCase):
         set_.assert_called_once()
 
     def test_working_option_is_left_alone(self):
-        ok = {"42680": {"u": "bash -c 'exec \\\"${@/iw5sp.exe/iw-pad.exe}\\\"' -- %command%"}}
+        import sp_mod
+        ok = {"42680": {"u": sp_mod.build_sp_launch_option("iw5sp").replace('"', '\\"')}}
         fixed, clear, set_ = self._repair(ok)
         self.assertEqual(fixed, [])
         clear.assert_not_called()
         set_.assert_not_called()
 
-    def test_mw2_option_has_the_dxvk_frame_cap_and_mw3_does_not(self):
+    def test_mw2_and_mw3_options_have_the_dxvk_frame_cap(self):
         import sp_mod
-        mw2, mw3 = sp_mod.build_sp_launch_option("iw4sp"), sp_mod.build_sp_launch_option("iw5sp")
-        self.assertTrue(mw2.startswith('DXVK_CONFIG="d3d9.maxFrameRate=90" '))
-        self.assertIn("iw-pad.exe", mw2)
-        self.assertNotIn("DXVK_CONFIG", mw3)
+        for key in ("iw4sp", "iw5sp"):
+            opt = sp_mod.build_sp_launch_option(key)
+            self.assertTrue(opt.startswith('DXVK_CONFIG="d3d9.maxFrameRate=90" '), key)
+            self.assertIn("iw-pad.exe", opt)
+
+    def test_mw3_option_without_the_cap_is_replaced(self):
+        old = {"42680": {"u": "bash -c 'exec \\\"${@/iw5sp.exe/iw-pad.exe}\\\"' -- %command%"}}
+        fixed, clear, set_ = self._repair(old)
+        self.assertEqual(fixed, ["iw5sp"])
+        self.assertIn("d3d9.maxFrameRate=90", set_.call_args[0][2])
 
     def test_mw2_option_without_the_cap_is_replaced(self):
         old = {"10180": {"u": "bash -c 'exec \\\"${@/iw4sp.exe/iw-pad.exe}\\\"' -- %command%"}}
@@ -1355,10 +1362,28 @@ class PrelaunchFovLinesTests(unittest.TestCase):
         self.assertIn('bind F10 "cg_fov 90"', text)
         upd.assert_called_once()
 
-    def test_mw3_config_is_left_alone(self):
-        text, upd = self._run("iw5sp", 'seta sensitivity "5"\r\n')
-        self.assertEqual(text, 'seta sensitivity "5"\r\n')
-        upd.assert_called_once()
+    def test_mw3_lines_are_restored_in_players2(self):
+        import prelaunch
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "players2").mkdir()
+            cfg = Path(d, "players2", "config.cfg")
+            cfg.write_bytes(b'seta sensitivity "5"\r\n')
+            with patch("sp_mod.update_iw_pad"):
+                prelaunch._iwpad("iw5sp", ["proton", "run", os.path.join(d, "iw5sp.exe")])
+            text = cfg.read_bytes().decode()
+        self.assertIn('seta sensitivity "5"', text)
+        self.assertIn('seta cg_fov "90"', text)
+        self.assertIn('seta thereisacow "1337"', text)
+        self.assertIn('bind F10 "cg_fov 90"', text)
+
+    def test_other_keys_get_no_config_lines(self):
+        import prelaunch
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "players").mkdir()
+            cfg = Path(d, "players", "config.cfg")
+            cfg.write_bytes(b'seta sensitivity "5"\r\n')
+            prelaunch._fov_lines("iw3sp", d)
+            self.assertEqual(cfg.read_bytes(), b'seta sensitivity "5"\r\n')
 
 
 class FpsFovTests(unittest.TestCase):
@@ -1414,6 +1439,19 @@ class FpsFovTests(unittest.TestCase):
             gc._patch_dvars(str(p), {}, binds={"F10": "cg_fov 90", "F11": "x"})
             self.assertEqual(p.read_bytes().decode(),
                              'bind F10 "cg_fov 90"\r\nbind w "+forward"\r\nbind F11 "x"\r\n')
+
+    def test_mw3_campaign_config_gets_thereisacow_and_the_fov_bind(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "players2").mkdir()
+            cfg = self._file(Path(d) / "players2", "config.cfg", 'seta sensitivity "5"\r\n')
+            with patch("config.get_setup_games", return_value={"iw5sp": {"client": "iw-pad"}}), \
+                 patch("config.get_player_name", return_value="Me"), \
+                 patch("config.is_lcd", return_value=False):
+                gc.set_fps_fov(d, {"iw5sp": {"install_dir": d}})
+            text = cfg.read_text()
+            self.assertIn('bind F10 "cg_fov 90"', text)
+            self.assertIn('seta thereisacow "1337"', text)
 
     def test_mw2_campaign_config_gets_thereisacow_and_the_fov_bind(self):
         import game_config as gc

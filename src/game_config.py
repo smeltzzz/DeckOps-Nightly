@@ -974,12 +974,14 @@ DEFAULT_FOV = 90
 FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp",
                 "t4sp", "t4mp", "t5sp", "t5mp", "t6sp", "t6mp", "t6zm")
 
-# MW2 (2009) campaign, stock build: cg_fov is cheat-protected and the game puts it
-# back to 65 when a level loads. thereisacow 1337 unlocks it; F10 re-applies it
-# (map a button to F10 in Steam Input). Only the stock config.cfg gets these.
+# MW2 (2009) and MW3 (2011) campaigns, stock build: cg_fov is cheat-protected and
+# the game puts it back to 65 when a level loads. thereisacow 1337 unlocks it (for
+# MW3 that is still a guess); F10 re-applies it (map a button to F10 in Steam
+# Input). Only the stock config.cfg gets these.
+_FOV_UNLOCK = {"extra_dvars": {"thereisacow": "1337"}, "binds": {"F10": "cg_fov 90"}}
 _EXTRA_PATCHES = {
-    ("iw4sp", "config.cfg"): {"extra_dvars": {"thereisacow": "1337"},
-                              "binds": {"F10": "cg_fov 90"}},
+    ("iw4sp", "config.cfg"): _FOV_UNLOCK,
+    ("iw5sp", "config.cfg"): _FOV_UNLOCK,
 }
 
 # BO2 SP (T6SP-Mod) keeps its settings in binary profiles. The mod runs

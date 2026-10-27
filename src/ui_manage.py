@@ -1470,8 +1470,8 @@ class ConfigureScreen(QWidget):
         _head(left, "FPS and FOV")
         left.addWidget(_lbl("Sets a 90 FPS cap and 90 FOV for MW1, MW2, MW3, WaW, BO1 and BO2 "
                             "(campaign, multiplayer, zombies). Only those lines change in each "
-                            "config. MW2 campaign also gets an F10 key that sets FOV 90: map a "
-                            "back paddle to F10 in Steam Input and tap it after each level loads.",
+                            "config. MW2 and MW3 campaigns also get an F10 key that sets FOV 90: "
+                            "map a back paddle to F10 in Steam Input and tap it after each level loads.",
                             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
