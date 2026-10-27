@@ -119,6 +119,31 @@ def build_sp_launch_option(game_key: str) -> str:
     return f"{prelaunch_prefix(game_key)}bash -c 'exec \"${{@/{exe}/iw-pad.exe}}\"' -- %command%"
 
 
+def repair_sp_launch_options(steam_root: str, log=lambda m: None) -> list:
+    """Steam MW2 / MW3 SP set up with IW-Pad: put IW-Pad's launch option back
+    when the tile's current one doesn't run iw-pad.exe (empty, or left over
+    from something else such as an old AlterWare client). An option that
+    already uses iw-pad.exe is never touched. Steam must be closed.
+    Returns the game keys fixed."""
+    from config import get_setup_games
+    from wrapper import snapshot_launch_options, clear_launch_options, set_launch_options
+    setup = get_setup_games()
+    fixed = []
+    for key, cfg in _SP_MOD_CONFIG.items():
+        entry = setup.get(key, {})
+        if entry.get("client") != "iw-pad" or entry.get("source", "steam") != "steam":
+            continue
+        appid = cfg["appid"]
+        current = snapshot_launch_options(steam_root, [appid]).get(str(appid), {})
+        if current and all("iw-pad.exe" in v for v in current.values()):
+            continue
+        log(f"  {key}: launch option did not use IW-Pad, setting it again")
+        clear_launch_options(steam_root, appid)
+        set_launch_options(steam_root, appid, build_sp_launch_option(key))
+        fixed.append(key)
+    return fixed
+
+
 if __name__ == "__main__":
     assert build_sp_launch_option("iw4sp").endswith(" iw4sp bash -c 'exec \"${@/iw4sp.exe/iw-pad.exe}\"' -- %command%")
     assert build_sp_launch_option("iw5sp").endswith(" iw5sp bash -c 'exec \"${@/iw5sp.exe/iw-pad.exe}\"' -- %command%")

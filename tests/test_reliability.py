@@ -1274,5 +1274,43 @@ class LaunchMenuEditTests(unittest.TestCase):
         self.assertEqual(repr(launch), snapshot)
 
 
+class SpLaunchOptionRepairTests(unittest.TestCase):
+    """Repair puts IW-Pad's launch option back, but never replaces a working one."""
+
+    def _repair(self, current, setup=None):
+        import sp_mod
+        setup = setup or {"iw5sp": {"client": "iw-pad", "source": "steam"}}
+        with patch("config.get_setup_games", return_value=setup), \
+             patch("wrapper.snapshot_launch_options", return_value=current), \
+             patch("wrapper.clear_launch_options") as clear, \
+             patch("wrapper.set_launch_options") as set_:
+            fixed = sp_mod.repair_sp_launch_options("steam")
+        return fixed, clear, set_
+
+    def test_alterware_option_is_replaced(self):
+        old = {"42680": {"u": "eval $(echo \\\"%command%\\\" | sed 's/iw5sp.exe/alterware-launcher.exe/')"}}
+        fixed, clear, set_ = self._repair(old)
+        self.assertEqual(fixed, ["iw5sp"])
+        clear.assert_called_once_with("steam", 42680)
+        self.assertIn("iw-pad.exe", set_.call_args[0][2])
+
+    def test_missing_option_is_set(self):
+        fixed, _, set_ = self._repair({})
+        self.assertEqual(fixed, ["iw5sp"])
+        set_.assert_called_once()
+
+    def test_working_option_is_left_alone(self):
+        ok = {"42680": {"u": "bash -c 'exec \\\"${@/iw5sp.exe/iw-pad.exe}\\\"' -- %command%"}}
+        fixed, clear, set_ = self._repair(ok)
+        self.assertEqual(fixed, [])
+        clear.assert_not_called()
+        set_.assert_not_called()
+
+    def test_games_not_set_up_with_iw_pad_are_skipped(self):
+        fixed, clear, _ = self._repair({}, setup={"iw5sp": {"client": "steam", "source": "steam"}})
+        self.assertEqual(fixed, [])
+        clear.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2264,6 +2264,12 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
         refresh_steam_menus(sr, prog)
     except Exception as ex:
         _log.warning("launch menus not refreshed: %s", ex)
+    # MW2 / MW3 SP: IW-Pad's launch option, if something else replaced it
+    try:
+        from sp_mod import repair_sp_launch_options
+        readded += [f"{k} IW-Pad launch option" for k in repair_sp_launch_options(sr, prog)]
+    except Exception as ex:
+        _log.warning("SP launch options not checked: %s", ex)
     if setup.get("t6sp", {}).get("source") == "own":
         g = find_own_installed().get("t6sp")
         if g and migrate_own_t6sp(g, on_progress):
