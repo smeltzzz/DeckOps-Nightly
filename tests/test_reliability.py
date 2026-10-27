@@ -1183,6 +1183,16 @@ class HostMenuTests(unittest.TestCase):
         self.assertFalse(ok)
         add.assert_not_called()
 
+    def test_stock_sp_entry_is_relabelled_with_the_host_entry(self):
+        for key, stock, label in (("iw5mp", "iw5sp.exe", "Campaign & Spec Ops"),
+                                  ("t6zm", "t6sp.exe", "Campaign")):
+            _, add = self._add(key, [{"iw5mp": "iw5plutmp.exe", "t6zm": "t6plutzm.exe"}[key]])
+            self.assertIn({"executable": stock, "label": label}, add.call_args[0][2])
+
+    def test_bo1_host_entry_does_not_relabel_stock(self):
+        _, add = self._add("t5mp", ["t5plutmp.exe"])
+        self.assertEqual(len(add.call_args[0][2]), 1)
+
     def test_picker_labels(self):
         import plutonium
         L = plutonium.STEAM_MENU_LABELS
@@ -1207,6 +1217,61 @@ class HostMenuTests(unittest.TestCase):
             done = plutonium.refresh_steam_menus("steam")
         self.assertEqual(sorted(done), ["t4sp", "t5mp"])
         self.assertEqual(menu.call_count, 2)
+
+
+class LaunchMenuEditTests(unittest.TestCase):
+    """steam_appinfo: hiding and relabelling Steam's own launch entries."""
+
+    def _launch(self):
+        import steam_appinfo as a
+        S, D = a._T_STR, a._T_DICT
+        return [
+            [D, "0", [[S, "executable", b"BlackOps.exe"], [D, "config", [[S, "oslist", b"windows"]]]]],
+            [D, "1", [[S, "executable", b"CoDWaW.exe"]]],
+            [D, "2", [[S, "executable", b"t6sp.exe"], [S, "description", b"Single Player"]]],
+            [D, "3", [[S, "executable", b"iw5sp.exe"]]],
+        ]
+
+    def _run(self, launch, entries):
+        import steam_appinfo as a
+        with patch.object(a, "_edit_launch", side_effect=lambda root, appid, edit: edit(launch)), \
+             patch.object(a, "_record"):
+            a.add_launch_entries("root", 1, entries)
+        return launch
+
+    def _get(self, launch, exe, key):
+        import steam_appinfo as a
+        for _, _, node in launch:
+            if a._get(node, "executable")[2] == exe:
+                return a._get(node, key)
+        raise AssertionError(exe)
+
+    def test_hide_flags_stock_entry_as_macos_whether_or_not_it_has_a_config(self):
+        import steam_appinfo as a
+        launch = self._run(self._launch(), [{"executable": "BlackOps.exe", "hide": True},
+                                            {"executable": "CoDWaW.exe", "hide": True}])
+        for exe in (b"BlackOps.exe", b"CoDWaW.exe"):
+            cfg = self._get(launch, exe, "config")
+            self.assertEqual(a._get(cfg[2], "oslist")[2], b"macos")
+        # an entry nobody asked about is left alone
+        self.assertIsNone(self._get(launch, b"iw5sp.exe", "config"))
+
+    def test_label_sets_or_replaces_the_description(self):
+        launch = self._run(self._launch(), [{"executable": "t6sp.exe", "label": "Campaign"},
+                                            {"executable": "iw5sp.exe", "label": "Campaign & Spec Ops"}])
+        self.assertEqual(self._get(launch, b"t6sp.exe", "description")[2], b"Campaign")
+        self.assertEqual(self._get(launch, b"iw5sp.exe", "description")[2], b"Campaign & Spec Ops")
+
+    def test_edits_are_idempotent(self):
+        import steam_appinfo as a
+        launch = self._launch()
+        entries = [{"executable": "BlackOps.exe", "hide": True}, {"executable": "t6sp.exe", "label": "Campaign"}]
+        self._run(launch, entries)
+        snapshot = repr(launch)
+        with patch.object(a, "_edit_launch", side_effect=lambda r, ap, edit: self.assertFalse(edit(launch)) or True), \
+             patch.object(a, "_record"):
+            a.add_launch_entries("root", 1, entries)
+        self.assertEqual(repr(launch), snapshot)
 
 
 if __name__ == "__main__":

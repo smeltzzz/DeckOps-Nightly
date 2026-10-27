@@ -894,11 +894,25 @@ def add_steam_menu(game: dict, game_key: str, steam_root: str, prog):
             entries.append({"executable": STEAM_MENU_EXES[k][1], "description": off})
 
     from steam_appinfo import add_launch_entries, remove_launch_entries, VANILLA_TAG
-    entries += [{"executable": GAME_META[k][2], "tag": VANILLA_TAG} for k in keys]
-    remove_launch_entries(steam_root, appid, [n for k in keys for n in STEAM_MENU_EXES[k]])
+    # Stock entries: hidden on the tiles in HIDE_STOCK_APPIDS (the stock exe
+    # can't run the modded client); otherwise tagged so prelaunch.sh can tell
+    # a stock pick from a lost menu.
+    stock = {"hide": True} if appid in HIDE_STOCK_APPIDS else {"tag": VANILLA_TAG}
+    entries += [{"executable": GAME_META[k][2], **stock} for k in keys]
+
+    # Host entries other games keep on this tile go out and back in below, so
+    # the order stays Campaign first, then Multiplayer / Zombies.
+    host_keys = [k for k, h in HOST_MENU.items() if h[0] == appid]
+    remove_launch_entries(steam_root, appid, [n for k in keys for n in STEAM_MENU_EXES[k]]
+                          + [STEAM_MENU_EXES[k][0] for k in host_keys])
     added = add_launch_entries(steam_root, appid, entries)
-    prog(92, "  ✓ Launch menu: " + " / ".join(e["description"] for e in entries if "tag" not in e) if added
+    prog(92, "  ✓ Launch menu: " + " / ".join(e["description"] for e in entries if "description" in e) if added
              else "  ⚠ Launch menu not added yet, will retry next time Steam is closed")
+    for k in host_keys:
+        try:
+            add_host_menu({"install_dir": game["install_dir"]}, k, steam_root, lambda m: prog(92, m))
+        except Exception as ex:
+            _log.warning("host tile menu skipped for %s: %s", k, ex)
     try:
         add_host_menu(game, game_key, steam_root, lambda m: prog(92, m))
     except Exception as ex:
@@ -918,6 +932,17 @@ HOST_MENU = {
     "t5mp":  (42700,  "t5sp",  STEAM_MENU_LABELS["t5mp"][0]),
     "t6mp":  (202970, "t6sp",  STEAM_MENU_LABELS["t6mp"][0]),
     "t6zm":  (202970, "t6sp",  STEAM_MENU_LABELS["t6zm"][0]),
+}
+
+# Tiles whose stock entries are hidden from the picker: WaW and BO1 already
+# have a Plutonium entry for everything the stock exes would start.
+HIDE_STOCK_APPIDS = {10090, 42700}
+
+# Steam's own SP entry on a host tile, relabelled to match: host key ->
+# (stock exe, label). BO1's SP is the Plutonium "Campaign & Zombies" entry.
+HOST_STOCK_LABELS = {
+    "iw5sp": ("iw5sp.exe", "Campaign & Spec Ops"),
+    "t6sp":  ("t6sp.exe",  "Campaign"),
 }
 
 
@@ -948,7 +973,11 @@ def add_host_menu(game: dict, game_key: str, steam_root: str, log=lambda m: None
         return False
 
     from steam_appinfo import add_launch_entries
-    if add_launch_entries(steam_root, appid, [{"executable": online, "description": label}]):
+    entries = [{"executable": online, "description": label}]
+    if host_key in HOST_STOCK_LABELS:
+        stock_exe, stock_label = HOST_STOCK_LABELS[host_key]
+        entries.append({"executable": stock_exe, "label": stock_label})
+    if add_launch_entries(steam_root, appid, entries):
         log(f"  ✓ {label} added to the {host_key} tile ({appid})")
         return True
     log(f"  ⚠ {label} not added to {appid} yet, will retry next time Steam is closed")

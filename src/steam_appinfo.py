@@ -6,11 +6,13 @@ appinfo has more than one launch entry for the current OS. DeckOps uses
 that to offer mod client entries (e.g. Plutonium Online / Offline) under
 the stock game entries.
 
-Append-only by design: stock entries are never renumbered, our entries
-go after the last existing key and are matched by `executable`. The one
-edit to a stock entry is a "tag" argument (VANILLA_TAG): Steam drops it
-together with our entries, so a launch option can tell a stock pick from
-a lost menu.
+Append-only by design: stock entries are never renumbered or deleted, our
+entries go after the last existing key and are matched by `executable`.
+Edits to a stock entry (matched by `executable` too):
+  - a "tag" argument (VANILLA_TAG): Steam drops it together with our
+    entries, so a launch option can tell a stock pick from a lost menu;
+  - "hide": oslist set to macos, so Steam doesn't list it on Linux;
+  - "label": its picker description.
 Steam rewrites appinfo.vdf from Valve's servers now and then, so every
 menu we add is recorded in deckops.json (`launch_menus`) and
 reapply_all() puts them back. Only call with Steam closed.
@@ -214,6 +216,40 @@ def _tag(launch, exe: bytes, tag: bytes) -> bool:
     return changed
 
 
+def _hide(launch, exe: bytes) -> bool:
+    """Flag the entries running exe as macOS-only. Steam doesn't list those on
+    Linux (the stock .app entries are already hidden that way), and nothing is
+    deleted, so flipping oslist back restores the entry."""
+    changed = False
+    for item in launch:
+        if item[0] != _T_DICT or (_get(item[2], "executable") or [0, 0, b""])[2] != exe:
+            continue
+        cfg = _get(item[2], "config")
+        if cfg is None or cfg[0] != _T_DICT:
+            item[2].append([_T_DICT, "config", [[_T_STR, "oslist", b"macos"]]]); changed = True
+            continue
+        osl = _get(cfg[2], "oslist")
+        if osl is None:
+            cfg[2].append([_T_STR, "oslist", b"macos"]); changed = True
+        elif osl[0] != _T_STR or osl[2] != b"macos":
+            osl[0], osl[2] = _T_STR, b"macos"; changed = True
+    return changed
+
+
+def _relabel(launch, exe: bytes, text: bytes) -> bool:
+    """Set the picker label (description) of the entries running exe."""
+    changed = False
+    for item in launch:
+        if item[0] != _T_DICT or (_get(item[2], "executable") or [0, 0, b""])[2] != exe:
+            continue
+        desc = _get(item[2], "description")
+        if desc is None:
+            item[2].insert(1, [_T_STR, "description", text]); changed = True
+        elif desc[0] != _T_STR or desc[2] != text:
+            desc[0], desc[2] = _T_STR, text; changed = True
+    return changed
+
+
 def _edit_launch(steam_root: str, appid: int, edit) -> bool:
     """Load appinfo.vdf, run edit(launch_node) on one app, write back if it changed."""
     path = appinfo_path(steam_root)
@@ -282,13 +318,20 @@ def add_launch_entries(steam_root: str, appid: int, entries: list, record: bool 
     executable (relative to the install dir), description, optional
     arguments and oslist (default windows). An existing entry with the
     same executable is updated in place. An entry with "tag" instead adds
-    that argument to the stock entries running its executable.
+    that argument to the stock entries running its executable; "hide": True
+    hides those stock entries from the picker; "label" renames them.
     """
     def edit(launch):
         changed = False
         for e in entries:
             if e.get("tag"):
                 changed |= _tag(launch, e["executable"].encode(), e["tag"].encode())
+                continue
+            if e.get("hide"):
+                changed |= _hide(launch, e["executable"].encode())
+                continue
+            if e.get("label"):
+                changed |= _relabel(launch, e["executable"].encode(), e["label"].encode())
                 continue
             new = _entry_node(e)
             hit = next((item for item in launch if item[0] == _T_DICT and
