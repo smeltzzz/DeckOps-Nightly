@@ -928,20 +928,26 @@ def add_steam_menu(game: dict, game_key: str, steam_root: str, prog):
 # host tile's launch option doesn't include. The online wrapper scripts export
 # their own prefix, so they run from any tile.
 HOST_MENU = {
-    "iw5mp": (42680,  "iw5sp", STEAM_MENU_LABELS["iw5mp"][0]),
     "t5mp":  (42700,  "t5sp",  STEAM_MENU_LABELS["t5mp"][0]),
     "t6mp":  (202970, "t6sp",  STEAM_MENU_LABELS["t6mp"][0]),
     "t6zm":  (202970, "t6sp",  STEAM_MENU_LABELS["t6zm"][0]),
 }
+# MW3 is not here: its SP tile (42680) launches the campaign straight away, and
+# the main menu's Multiplayer button / the MP tile (42690) cover multiplayer.
+
+# Host entries that used to exist and must go (appid -> executables).
+RETIRED_HOST_MENUS = {
+    42680: ["iw5plutmp.exe"],
+}
 
 # Tiles whose stock entries are hidden from the picker: WaW and BO1 already
-# have a Plutonium entry for everything the stock exes would start.
-HIDE_STOCK_APPIDS = {10090, 42700}
+# have a Plutonium entry for everything the stock exes would start, and the
+# MW3 MP tile (42690) only has the Plutonium entry, so it starts that directly.
+HIDE_STOCK_APPIDS = {10090, 42700, 42690}
 
 # Steam's own SP entry on a host tile, relabelled to match: host key ->
 # (stock exe, label). BO1's SP is the Plutonium "Campaign & Zombies" entry.
 HOST_STOCK_LABELS = {
-    "iw5sp": ("iw5sp.exe", "Campaign & Spec Ops"),
     "t6sp":  ("t6sp.exe",  "Campaign"),
 }
 
@@ -1002,6 +1008,17 @@ def ensure_host_menus(steam_root: str, log=lambda m: None) -> list:
             and add_host_menu(installed[k], k, steam_root, log, installed)]
 
 
+def remove_retired_host_menus(steam_root: str, log=lambda m: None):
+    """Take out host entries DeckOps no longer adds (RETIRED_HOST_MENUS), and
+    forget the saved MW3 label so Steam's own entry is left as it was. Steam
+    must be closed."""
+    from steam_appinfo import remove_launch_entries, forget_launch_entries
+    for appid, exes in RETIRED_HOST_MENUS.items():
+        remove_launch_entries(steam_root, appid, exes)
+        log(f"  Removed old menu entries from {appid}: {', '.join(exes)}")
+    forget_launch_entries(42680, ["iw5sp.exe"])
+
+
 def refresh_steam_menus(steam_root: str, log=lambda m: None) -> list:
     """Rebuild the Plutonium launch menu (entries and labels) of every set-up
     Plutonium Steam game, then each one's host tile entry (add_steam_menu does
@@ -1010,6 +1027,10 @@ def refresh_steam_menus(steam_root: str, log=lambda m: None) -> list:
     import config as _cfg
     if _cfg.is_lcd():
         return []
+    try:
+        remove_retired_host_menus(steam_root, log)
+    except Exception as ex:
+        _log.warning("retired host menus not removed: %s", ex)
     setup = _cfg.get_setup_games()
     keys = [k for k in STEAM_MENU_EXES if setup.get(k, {}).get("client") == "plutonium"
             and setup[k].get("source", "steam") == "steam"]

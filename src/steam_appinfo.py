@@ -364,6 +364,13 @@ def remove_launch_entries(steam_root: str, appid: int, executables: list) -> boo
     return ok
 
 
+def forget_launch_entries(appid: int, executables: list):
+    """Drop entries from the saved record only (reapply_all stops re-adding them).
+    The appinfo itself is not touched: use this for edits to Steam's own entries,
+    which must not be deleted."""
+    _record(appid, remove=executables)
+
+
 def reapply_all(steam_root: str):
     """Re-add every recorded menu; Steam may have refreshed appinfo since."""
     import config as cfg

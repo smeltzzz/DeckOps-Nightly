@@ -1160,7 +1160,7 @@ class HostMenuTests(unittest.TestCase):
         return ok, add
 
     def test_entry_goes_on_the_sp_appid(self):
-        for key, appid, exe in (("iw5mp", 42680, "iw5plutmp.exe"), ("t5mp", 42700, "t5plutmp.exe"),
+        for key, appid, exe in (("t5mp", 42700, "t5plutmp.exe"),
                                 ("t6mp", 202970, "t6plutmp.exe"), ("t6zm", 202970, "t6plutzm.exe")):
             ok, add = self._add(key, [exe])
             self.assertTrue(ok, key)
@@ -1174,20 +1174,31 @@ class HostMenuTests(unittest.TestCase):
         add.assert_not_called()
 
     def test_skipped_when_sp_is_in_another_folder(self):
-        ok, add = self._add("iw5mp", ["iw5plutmp.exe"], host_dir=os.path.join(tempfile.gettempdir(), "elsewhere"))
+        ok, add = self._add("t6mp", ["t6plutmp.exe"], host_dir=os.path.join(tempfile.gettempdir(), "elsewhere"))
         self.assertFalse(ok)
         add.assert_not_called()
 
     def test_skipped_on_lcd(self):
-        ok, add = self._add("iw5mp", ["iw5plutmp.exe"], lcd=True)
+        ok, add = self._add("t6mp", ["t6plutmp.exe"], lcd=True)
         self.assertFalse(ok)
         add.assert_not_called()
 
     def test_stock_sp_entry_is_relabelled_with_the_host_entry(self):
-        for key, stock, label in (("iw5mp", "iw5sp.exe", "Campaign & Spec Ops"),
-                                  ("t6zm", "t6sp.exe", "Campaign")):
-            _, add = self._add(key, [{"iw5mp": "iw5plutmp.exe", "t6zm": "t6plutzm.exe"}[key]])
-            self.assertIn({"executable": stock, "label": label}, add.call_args[0][2])
+        _, add = self._add("t6zm", ["t6plutzm.exe"])
+        self.assertIn({"executable": "t6sp.exe", "label": "Campaign"}, add.call_args[0][2])
+
+    def test_mw3_has_no_host_entry_and_its_mp_tile_starts_plutonium_directly(self):
+        import plutonium
+        self.assertNotIn("iw5mp", plutonium.HOST_MENU)
+        self.assertIn(42690, plutonium.HIDE_STOCK_APPIDS)
+
+    def test_old_mw3_host_entry_is_removed_and_its_label_forgotten(self):
+        import plutonium
+        with patch("steam_appinfo.remove_launch_entries") as rm, \
+             patch("steam_appinfo.forget_launch_entries") as forget:
+            plutonium.remove_retired_host_menus("steam")
+        rm.assert_called_once_with("steam", 42680, ["iw5plutmp.exe"])
+        forget.assert_called_once_with(42680, ["iw5sp.exe"])
 
     def test_bo1_host_entry_does_not_relabel_stock(self):
         _, add = self._add("t5mp", ["t5plutmp.exe"])
@@ -1213,10 +1224,12 @@ class HostMenuTests(unittest.TestCase):
              patch("config.get_setup_games", return_value=setup), \
              patch("detect_games.parse_library_folders", return_value=[]), \
              patch("detect_games.find_installed_games", return_value=installed), \
+             patch.object(plutonium, "remove_retired_host_menus") as retired, \
              patch.object(plutonium, "add_steam_menu") as menu:
             done = plutonium.refresh_steam_menus("steam")
         self.assertEqual(sorted(done), ["t4sp", "t5mp"])
         self.assertEqual(menu.call_count, 2)
+        retired.assert_called_once()
 
 
 class LaunchMenuEditTests(unittest.TestCase):
