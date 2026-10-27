@@ -124,8 +124,9 @@ def _chunks(mem, start, end, size=16 * 1024 * 1024):
         pos += len(data)
 
 
-def find_cg_fov(mem, maps, exe_name, log=_log.info):
-    """Address of the cg_fov dvar_t's current value, or None."""
+def find_cg_fov(mem, maps, exe_name, log=_log.info, heap=True):
+    """Address of the cg_fov dvar_t's current value, or None. heap=False skips the
+    (large) fallback search of anonymous memory."""
     img = [m for m in maps if m[3].lower().endswith(exe_name.lower())]
     base = min((m[0] for m in img), default=0x140000000)
     window = [m for m in maps if base <= m[0] < base + IMAGE_WINDOW and m[2][0] == "r"]
@@ -165,7 +166,7 @@ def find_cg_fov(mem, maps, exe_name, log=_log.info):
         return hits
 
     hits = scan(window, "image")
-    if not hits:
+    if not hits and heap:
         budget, heap = HEAP_SCAN_LIMIT, []
         for m in maps:
             size = m[1] - m[0]
@@ -188,9 +189,19 @@ def hold(mem, addr, fov):
     return mem.write(addr, struct.pack("<f", fov))
 
 
-def watch(root_pid, fov, exe, stop, interval=0.2, find_every=5.0):
+FAST_TRIES = 24      # searches every 5 s while the game is loading (about 2 minutes)
+HEAP_TRIES = 4       # the big heap search runs on at most this many of them
+SLOW_EVERY = 60.0    # after that, only the cheap image search, once a minute
+
+
+def search_plan(tries):
+    """(seconds to wait before search number `tries`, whether it may scan the heap)."""
+    return (5.0 if tries < FAST_TRIES else SLOW_EVERY), tries < HEAP_TRIES
+
+
+def watch(root_pid, fov, exe, stop, interval=0.2):
     pid = mem = addr = None
-    last_find = 0.0
+    last_find = tries = 0
     told = set()
 
     def once(key, msg):
@@ -211,13 +222,18 @@ def watch(root_pid, fov, exe, stop, interval=0.2, find_every=5.0):
                 if mem:
                     mem.close()
                 pid = mem = addr = None
+                last_find = tries = 0
                 continue
             if addr is None:
-                if time.monotonic() - last_find >= find_every:
+                wait, heap = search_plan(tries)
+                if time.monotonic() - last_find >= wait:
                     last_find = time.monotonic()
-                    addr = find_cg_fov(mem, read_maps(pid), exe)
+                    tries += 1
+                    addr = find_cg_fov(mem, read_maps(pid), exe, heap=heap)
                     if addr:
                         _log.info("fovwatch: cg_fov at %#x, holding %s", addr, fov)
+                    elif tries == FAST_TRIES:
+                        _log.info("fovwatch: cg_fov not found yet, now checking once a minute")
                 stop.wait(interval)
                 continue
             if hold(mem, addr, fov) is None:

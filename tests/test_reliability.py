@@ -1497,6 +1497,29 @@ class FovWatchTests(unittest.TestCase):
         mem, maps, _ = self._world(string=b"\x00cg_other\x00")
         self.assertIsNone(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None))
 
+    def test_search_backs_off_and_the_heap_scan_is_limited(self):
+        import fovwatch
+        waits = [fovwatch.search_plan(n) for n in range(fovwatch.FAST_TRIES + 3)]
+        self.assertEqual(waits[0], (5.0, True))
+        self.assertEqual(sum(1 for _, heap in waits if heap), fovwatch.HEAP_TRIES)
+        self.assertEqual(waits[fovwatch.FAST_TRIES - 1][0], 5.0)
+        self.assertEqual(waits[fovwatch.FAST_TRIES], (fovwatch.SLOW_EVERY, False))
+
+    def test_heap_scan_can_be_switched_off(self):
+        import struct
+        import fovwatch
+        mem, maps, _ = self._world()
+        # the dvar record only exists in an anonymous region outside the image window
+        far = 0x7f0000000000
+        heap = bytearray(0x1000)
+        heap[0x40:0x48] = struct.pack("<Q", self.BASE + 0x1000 + 0x101)
+        heap[0x50:0x54] = struct.pack("<f", 65.0)
+        mem.regions[far] = heap
+        mem.regions[self.BASE + 0x2000] = bytearray(0x1000)         # nothing in the image's data
+        maps = maps + [(far, far + 0x1000, "rw-p", "")]
+        self.assertIsNone(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None, heap=False))
+        self.assertEqual(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None, heap=True), far + 0x50)
+
     def test_hold_writes_only_when_the_value_differs(self):
         import struct
         import fovwatch
