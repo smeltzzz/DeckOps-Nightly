@@ -1312,5 +1312,72 @@ class SpLaunchOptionRepairTests(unittest.TestCase):
         clear.assert_not_called()
 
 
+class FpsFovTests(unittest.TestCase):
+    """game_config.set_fps_fov: only cg_fov and com_maxfps change, in place."""
+
+    V = {"cg_fov": "90", "com_maxfps": "90"}
+
+    def _file(self, d, name, text):
+        p = Path(d, name)
+        p.write_bytes(text.encode())
+        return p
+
+    def test_existing_lines_get_the_new_value_and_nothing_else_changes(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            p = self._file(d, "c.cfg", 'seta name "Me"\r\nseta cg_fov "65"\r\nseta cg_fovScale "1"\r\n'
+                                       'seta com_maxfps "85"\r\nseta sensitivity "5"\r\n')
+            self.assertTrue(gc._patch_dvars(str(p), self.V))
+            self.assertEqual(p.read_bytes().decode(),
+                             'seta name "Me"\r\nseta cg_fov "90"\r\nseta cg_fovScale "1"\r\n'
+                             'seta com_maxfps "90"\r\nseta sensitivity "5"\r\n')
+            self.assertFalse(gc._patch_dvars(str(p), self.V))     # second run: nothing to do
+
+    def test_missing_lines_are_added_keeping_line_endings(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            p = self._file(d, "c.cfg", 'seta cg_fovScale "1"\r\nseta sensitivity "5"')
+            gc._patch_dvars(str(p), self.V)
+            self.assertEqual(p.read_bytes().decode(),
+                             'seta cg_fovScale "1"\r\nseta cg_fov "90"\r\nseta sensitivity "5"\r\n'
+                             'seta com_maxfps "90"\r\n')
+
+    def test_cg_fovscale_is_not_mistaken_for_cg_fov(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            p = self._file(d, "c.cfg", 'seta cg_fovScale "1.2"\n')
+            gc._patch_dvars(str(p), {"cg_fov": "90"})
+            self.assertIn('seta cg_fovScale "1.2"', p.read_text())
+
+    def test_missing_file_is_only_made_on_request(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, "players", "config_sp.cfg")
+            self.assertFalse(gc._patch_dvars(str(p), self.V))
+            self.assertFalse(p.exists())
+            self.assertTrue(gc._patch_dvars(str(p), self.V, create=True))
+            self.assertEqual(p.read_text(), 'seta cg_fov "90"\nseta com_maxfps "90"\n')
+
+    def test_set_fps_fov_patches_sp_configs_and_the_bo2_autoexec(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            mw3, bo2 = Path(d, "mw3"), Path(d, "bo2")
+            (mw3 / "players2").mkdir(parents=True)
+            cfg = self._file(mw3 / "players2", "config.cfg", 'seta com_maxfps "85"\r\n')
+            bo2.mkdir()
+            games = {"iw5sp": {"install_dir": str(mw3)}, "t6sp": {"install_dir": str(bo2)}}
+            setup = {"iw5sp": {"client": "iw-pad"}, "t6sp": {"client": "t6sp_mod"}, "t7": {"client": "cleanops"}}
+            with patch("config.get_setup_games", return_value=setup), \
+                 patch("config.get_player_name", return_value="Me"), \
+                 patch("config.is_lcd", return_value=False):
+                n = gc.set_fps_fov(d, games)
+            self.assertIn('seta cg_fov "90"', cfg.read_text())
+            self.assertIn('seta com_maxfps "90"', cfg.read_text())
+            for folder in (bo2, bo2 / "players"):
+                for name in ("config_sp.cfg", "persistent_sp.cfg"):
+                    self.assertIn('seta cg_fov "90"', (folder / name).read_text())
+            self.assertEqual(n, 5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1466,6 +1466,16 @@ class ConfigureScreen(QWidget):
         self._name_note = _lbl("Sets your offline name for CoD4x, IW4x, AlterWare, T7X, and Plutonium. Does not affect CleanOps.", 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         left.addWidget(self._name_note)
 
+        # ── Left: FPS and FOV ─────────────────────────────────────────────
+        _head(left, "FPS and FOV")
+        left.addWidget(_lbl("Sets a 90 FPS cap and 90 FOV for MW1, MW2, MW3, WaW, BO1 and BO2 "
+                            "(campaign, multiplayer, zombies). Only those two lines change in each "
+                            "config.",
+                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
+        fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
+        left.addWidget(fps_btn)
+
         # ── Left: Shader Cache (LCD only) ─────────────────────────────────
         self._shader_row = QWidget()
         sr_lay = QVBoxLayout(self._shader_row); sr_lay.setContentsMargins(0,0,0,0); sr_lay.setSpacing(10)
@@ -1748,6 +1758,29 @@ class ConfigureScreen(QWidget):
                 )
                 s.log.emit(f"✓  Player name set to \"{name}\" ({count} config(s) updated).")
             except Exception as ex:
+                s.log.emit(f"✗  Failed: {ex}")
+            finally:
+                s.done.emit(True)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_fps_fov(self):
+        s = _Sigs()
+        if not self._settings_task(s):
+            return
+        self.status.setText("Setting 90 FPS and 90 FOV...")
+        s.log.connect(lambda msg: self.status.setText(msg))
+        def _run():
+            try:
+                from game_config import set_fps_fov
+                from detect_games import find_all_games as _find_all
+                steam_root = cfg.load().get("steam_root", "") or find_steam_root()
+                installed = _find_all(steam_root) if steam_root else {}
+                count = set_fps_fov(steam_root, installed,
+                                    on_progress=lambda msg: _log.info("fps/fov: %s", msg.strip()))
+                s.log.emit(f"✓  90 FPS / 90 FOV set in {count} config file(s). "
+                           "Close the games first if they are running.")
+            except Exception as ex:
+                _log.error("fps/fov failed", exc_info=True)
                 s.log.emit(f"✗  Failed: {ex}")
             finally:
                 s.done.emit(True)

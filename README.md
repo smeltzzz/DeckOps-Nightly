@@ -112,6 +112,7 @@ DeckOps installs a controller profile for every game. Choose your gyro mode duri
 | Background Music | Turn on/off and adjust volume |
 | Controller Profiles | Switch gyro mode and re-apply controller templates |
 | Player Name | Change your in-game name for CoD4R, CoD4x, IW4x, and Plutonium offline |
+| FPS and FOV | Set a 90 FPS cap and 90 FOV in the configs of MW1, MW2, MW3, WaW, BO1, and BO2 (all modes). Only those two lines change. |
 | Shader Cache (LCD only) | Clear shader cache data for all set-up games |
 | Check for Updates | Check for and apply DeckOps updates |
 | Full Uninstall | Remove DeckOps-managed files while preserving save backups and unrelated Plutonium data. If Stable is also installed, shared game files and Steam settings stay in place. |

@@ -960,3 +960,154 @@ def _rename_in_lan_scripts(player_name, installed_games, prog):
             updated += 1
             prog(f"  + {key}: renamed in {os.path.basename(p)}")
     return updated
+
+
+# ── FPS cap and FOV ───────────────────────────────────────────────────────────
+# Patches com_maxfps / cg_fov in the configs already on disk, so nothing else
+# in them (sensitivity, binds, resolution) is touched. The templates in
+# assets/configs carry the same values for fresh installs.
+
+DEFAULT_FPS = 90
+DEFAULT_FOV = 90
+
+# MW1, MW2, MW3, WaW, BO1 and BO2: every mode
+FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp",
+                "t4sp", "t4mp", "t5sp", "t5mp", "t6sp", "t6mp", "t6zm")
+
+# BO2 SP (T6SP-Mod) keeps its settings in binary profiles. The mod runs
+# config_sp.cfg when the game starts and persistent_sp.cfg on each level change,
+# so those are written next to the game and in its players folder.
+_T6SP_AUTOEXEC = ("config_sp.cfg", "persistent_sp.cfg")
+
+
+def _patch_dvars(path, values, create=False):
+    """
+    Set `seta <name> "<value>"` for each name in values, in place. An existing
+    line gets the new value; a missing one is added (cg_fov after cg_fovScale,
+    others at the end). Line endings and every other line stay as they are.
+    create=True makes the file if it isn't there. Returns True if it changed.
+    """
+    import re as _re
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="surrogateescape", newline="") as f:
+            text = f.read()
+    except FileNotFoundError:
+        if not create:
+            return False
+        text = ""
+    nl = "\r\n" if "\r\n" in text else "\n"
+    new = text
+    for name, value in values.items():
+        pat = _re.compile(r'^([ \t]*seta[ \t]+' + _re.escape(name) + r'[ \t]+")[^"\r\n]*(")',
+                          _re.IGNORECASE | _re.MULTILINE)
+        if pat.search(new):
+            new = pat.sub(lambda m: m.group(1) + value + m.group(2), new)
+            continue
+        line = f'seta {name} "{value}"'
+        anchor = None
+        if name.lower() == "cg_fov":
+            anchor = _re.search(r'^[ \t]*seta[ \t]+cg_fovScale[ \t]+"[^"\r\n]*"[^\r\n]*\r?\n',
+                                new, _re.IGNORECASE | _re.MULTILINE)
+        if anchor:
+            new = new[:anchor.end()] + line + nl + new[anchor.end():]
+        else:
+            if new and not new.endswith("\n"):
+                new += nl
+            new += line + nl
+    if new == text:
+        return False
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".deckops-tmp"
+    with open(tmp, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
+        f.write(new)
+    os.replace(tmp, path)
+    return True
+
+
+def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
+                on_progress=None):
+    """
+    Set com_maxfps and cg_fov in the deployed configs of every set-up game in
+    FPS_FOV_KEYS (SP, MP and ZM), including the Plutonium offline copies and,
+    on LCD, the Heroic mirror. Games that haven't been set up are skipped, and
+    so are config files that don't exist yet (a fresh install writes them from
+    the templates). Returns the number of files changed.
+    """
+    import config as cfg
+
+    prog = on_progress or (lambda *a: None)
+    values = {"cg_fov": str(fov), "com_maxfps": str(fps)}
+    setup_keys = set(cfg.get_setup_games())
+    keys = [k for k in FPS_FOV_KEYS if k in setup_keys]
+    if not keys:
+        prog("No supported games set up yet.")
+        return 0
+
+    installed_games = installed_games or {}
+    config_map = _build_config_map(steam_root, installed_games)
+    player_name = cfg.get_player_name()
+    changed = 0
+
+    def patch(path, label, create=False):
+        nonlocal changed
+        try:
+            if _patch_dvars(path, values, create=create):
+                changed += 1
+                prog(f"  + {label}: {os.path.basename(path)}")
+        except OSError as ex:
+            prog(f"  ! {label}: could not update {path}: {ex}")
+
+    for key in keys:
+        game = installed_games.get(key, {})
+        install_dir = game.get("install_dir", "")
+
+        if key == "t6sp":
+            if install_dir:
+                for folder in (install_dir, os.path.join(install_dir, "players")):
+                    for name in _T6SP_AUTOEXEC:
+                        patch(os.path.join(folder, name), key, create=True)
+            continue
+
+        if key not in config_map:
+            continue
+        own_pfx = _own_compatdata(key, game)
+
+        for asset_subpath, fixed_dest in config_map[key]:
+            if asset_subpath.lower().endswith((".chp", ".cgp")):
+                continue                       # binary profile, no dvar lines
+            name = os.path.basename(asset_subpath)
+            if fixed_dest:
+                dest_dir = _own_pfx_dest(fixed_dest, own_pfx)
+            elif install_dir:
+                dest_dir = _dest_from_install(key, install_dir, player_name=player_name)
+            else:
+                continue
+            if not dest_dir:
+                continue
+
+            patch(os.path.join(dest_dir, name), key)
+
+            if fixed_dest:
+                if cfg.is_lcd():
+                    heroic = _heroic_mirror_path(dest_dir)
+                    if heroic:
+                        patch(os.path.join(heroic, name), key)
+                try:
+                    for offline_dir in _offline_mirror_paths(dest_dir, key):
+                        patch(os.path.join(offline_dir, name), key)
+                except Exception:
+                    _log.debug("offline mirror lookup failed for %s", key, exc_info=True)
+
+            # CoD4R / CoD4x also keep a copy of the profile under AppData
+            if key in ("cod4sp", "cod4mp") and install_dir:
+                try:
+                    profiles = _cod4_appdata_profiles(steam_root, install_dir, own_pfx)
+                    if os.path.isdir(profiles):
+                        for sub in os.listdir(profiles):
+                            patch(os.path.join(profiles, sub, name), key)
+                except OSError:
+                    _log.debug("cod4 appdata profiles not read", exc_info=True)
+
+    prog(f"{fps} FPS / {fov} FOV: {changed} config file(s) updated.")
+    return changed
