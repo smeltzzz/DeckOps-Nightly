@@ -1374,7 +1374,8 @@ class PrelaunchFovLinesTests(unittest.TestCase):
         self.assertIn('seta sensitivity "5"', text)
         self.assertIn('seta cg_fov "90"', text)
         self.assertIn('seta thereisacow "1337"', text)
-        self.assertIn('bind F10 "cg_fov 90"', text)
+        self.assertIn('bind F10 "cg_fov 90; cg_fovscale 1.385"', text)
+        self.assertIn('seta cg_fovScale "1.385"', text)
 
     def test_other_keys_get_no_config_lines(self):
         import prelaunch
@@ -1450,8 +1451,9 @@ class FpsFovTests(unittest.TestCase):
                  patch("config.is_lcd", return_value=False):
                 gc.set_fps_fov(d, {"iw5sp": {"install_dir": d}})
             text = cfg.read_text()
-            self.assertIn('bind F10 "cg_fov 90"', text)
+            self.assertIn('bind F10 "cg_fov 90; cg_fovscale 1.385"', text)
             self.assertIn('seta thereisacow "1337"', text)
+            self.assertIn('seta cg_fovScale "1.385"', text)
 
     def test_mw2_campaign_config_gets_thereisacow_and_the_fov_bind(self):
         import game_config as gc

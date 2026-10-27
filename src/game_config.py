@@ -979,9 +979,13 @@ FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp",
 # MW3 that is still a guess); F10 re-applies it (map a button to F10 in Steam
 # Input). Only the stock config.cfg gets these.
 _FOV_UNLOCK = {"extra_dvars": {"thereisacow": "1337"}, "binds": {"F10": "cg_fov 90"}}
+# MW3: cg_fov did not take effect, so also try the scale: the view is cg_fov (65)
+# times cg_fovScale, and 65 * 1.385 is about 90.
+_FOV_UNLOCK_MW3 = {"extra_dvars": {"thereisacow": "1337", "cg_fovScale": "1.385"},
+                   "binds": {"F10": "cg_fov 90; cg_fovscale 1.385"}}
 _EXTRA_PATCHES = {
     ("iw4sp", "config.cfg"): _FOV_UNLOCK,
-    ("iw5sp", "config.cfg"): _FOV_UNLOCK,
+    ("iw5sp", "config.cfg"): _FOV_UNLOCK_MW3,
 }
 
 # BO2 SP (T6SP-Mod) keeps its settings in binary profiles. The mod runs
