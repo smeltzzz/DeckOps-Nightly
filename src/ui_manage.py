@@ -42,6 +42,63 @@ from log import get_logger
 
 _log = get_logger(__name__)
 
+
+def _update_candidates(installed, keys=None):
+    """Only update modes configured for the currently detected game source."""
+    configured = cfg.get_setup_games()
+    allowed = set(keys) if keys is not None else None
+    selected = []
+    for gd in ALL_GAMES:
+        for key in _active_keys(gd):
+            if allowed is not None and key not in allowed:
+                continue
+            game = installed.get(key)
+            entry = configured.get(key, {})
+            if not game or not entry or entry.get("source", "steam") != game.get("source", "steam"):
+                continue
+            client = entry.get("client") or KEY_CLIENT.get(key, "")
+            if client and client != "steam":
+                selected.append((key, gd, game))
+    return selected
+
+
+def _update_selection(installed, keys=None):
+    """Resolve shared Plutonium dependants before showing the confirmation."""
+    selected = _update_candidates(installed, keys)
+    original = {key for key, _, _ in selected}
+    configured = cfg.get_setup_games()
+    if any((configured.get(key, {}).get("client") or KEY_CLIENT.get(key)) == "plutonium"
+           for key in original):
+        for item in _update_candidates(installed):
+            if (item[0] not in original and
+                    (configured.get(item[0], {}).get("client") or KEY_CLIENT.get(item[0])) == "plutonium"):
+                selected.append(item)
+    return selected, {key for key, _, _ in selected} - original
+
+
+def _confirm_game_update(parent, selected, extras=()):
+    """Make the effective scope, Steam interruption and optional download explicit."""
+    groups = {}
+    for key, gd, game in selected:
+        groups.setdefault(gd['base'], []).append(
+            f"{KEY_MODE_LABEL.get(key, key)} ({game.get('source', 'steam')})")
+    lines = [f"• {title} — {', '.join(modes)}" for title, modes in groups.items()]
+    msg = QMessageBox(parent)
+    msg.setWindowTitle("Update Games")
+    msg.setText(f"Update {len(selected)} configured mode(s)?\n\n" + "\n".join(lines) +
+                ("\n\nAdditional Plutonium modes are included to keep shared files in sync."
+                 if extras else "") +
+                "\n\nYour saves will be backed up first. Steam will close during the update.")
+    msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    msg.setDefaultButton(QMessageBox.StandardButton.No)
+    zd_cb = None
+    if cfg.is_zd_installed() and any(k == "t6zm" for k, _, _ in selected):
+        zd_cb = QCheckBox("Also check Zombies Declassified (may download up to ~9 GB)")
+        msg.setCheckBox(zd_cb)
+    confirmed = msg.exec() == QMessageBox.StandardButton.Yes
+    return confirmed, bool(confirmed and zd_cb and zd_cb.isChecked())
+
+
 # Library cards are wider than the old five-column portrait tiles, while
 # still allowing three columns at 800px and five at 1280px.
 _LIBRARY_CARD_W = max(CARD_MAX_W, 220)
@@ -584,47 +641,20 @@ class ManagementScreen(QWidget):
 
     # ── Update all games (batch) ──────────────────────────────────────────
     def _update_all_games(self):
-        root = find_steam_root()
-        all_installed = self.installed
-
-        # Build selected list: all set-up games with a mod client
-        _gd_by_key = {}
-        for gd_entry in ALL_GAMES:
-            for k in _active_keys(gd_entry):
-                _gd_by_key[k] = gd_entry
-
-        selected = []
-        for key, game in all_installed.items():
-            c = KEY_CLIENT.get(key, "")
-            if c in ("steam", "", None):
-                continue
-            if not cfg.is_game_setup(key):
-                continue
-            gd_entry = _gd_by_key.get(key)
-            if gd_entry:
-                selected.append((key, gd_entry, game))
-
+        selected, extras = _update_selection(self.installed)
         if not selected:
-            self._status.setText("No installed mod-client games to update.")
+            self._status.setText("No configured mod-client modes found for the installed game sources.")
             return
-
-        names = ", ".join(s[1]["base"] for s in selected)
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Update All Games")
-        msg.setText(f"This will update {len(selected)} game(s):\n\n{names}\n\nContinue?")
-        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
-        zd_cb = None
-        if cfg.is_zd_installed() and any(k == "t6zm" for k, _, _ in selected):
-            zd_cb = QCheckBox("Also check Zombies Declassified for updates (up to ~9 GB)")
-            msg.setCheckBox(zd_cb)
-        if msg.exec() != QMessageBox.StandardButton.Yes:
+        confirmed, update_zd = _confirm_game_update(self, selected, extras)
+        if not confirmed:
             return
-
         us = get_screen(self.stack, "UpdateScreen")
-        us.update_zd = bool(zd_cb and zd_cb.isChecked())
+        us.update_zd = update_zd
+        us._zd_retry_game = None
+        us._zd_only_retry = False
         us.selected = selected
-        us.steam_root = root
+        us.all_plut_games = {k: g for k, _, g in selected}
+        us.steam_root = find_steam_root()
         go_to(self.stack, "UpdateScreen")
 
     def _offline(self, on):
@@ -792,8 +822,7 @@ class ManagementScreen(QWidget):
         """Show configure dialog with Mods, Update, and Reinstall options."""
         _MOD_CLIENTS = ("cod4r", "cod4x", "iw4x", "plutonium")
         has_mods_support = any(KEY_CLIENT.get(k, "") in _MOD_CLIENTS for k in installed_keys)
-        has_mod_client = any(KEY_CLIENT.get(k, "") not in ("steam", "") for k in installed_keys) \
-            or any(cfg.get_setup_games().get(k, {}).get("client") == "iw-pad" for k in installed_keys)
+        has_mod_client = bool(_update_candidates(self.installed, installed_keys))
 
         # Depot downgrade option: shown for any Steam-sourced game that
         # can be downgraded (MW3). Whether the downgrade
@@ -895,17 +924,21 @@ class ManagementScreen(QWidget):
             self._reinstall(gd)
 
     def _update(self, gd, keys):
-        """Route a single card's installed keys through the update flow."""
-        root = find_steam_root()
-        # Use the merged installed dict (already built in showEvent)
-        selected = [(k, gd, self.installed.get(k, {})) for k in keys
-                     if self.installed.get(k)]
+        """Update the configured modes on this card and their shared dependants."""
+        selected, extras = _update_selection(self.installed, keys)
         if not selected:
-            self._status.setText("Game not found.")
+            self._status.setText("No configured modes found for this game's installed source.")
+            return
+        confirmed, update_zd = _confirm_game_update(self, selected, extras)
+        if not confirmed:
             return
         s = get_screen(self.stack, "UpdateScreen")
-        s.selected   = selected
-        s.steam_root = root
+        s.update_zd = update_zd
+        s._zd_retry_game = None
+        s._zd_only_retry = False
+        s.selected = selected
+        s.all_plut_games = {k: g for k, _, g in selected}
+        s.steam_root = find_steam_root()
         go_to(self.stack, "UpdateScreen")
 
     def _zombies_declassified(self, gd, installed_keys):
@@ -2386,10 +2419,16 @@ class UpdateScreen(QWidget):
         self.update_zd = False
         self.selected   = []
         self.steam_root = ""
+        self.all_plut_games = {}
+        self._zd_only_retry = False
+        self._zd_retry_game = None
+        self._stop_requested = threading.Event()
+        self._did_work = False
         # (title, fn(sigs)) run in place of the game updates, e.g. adding Offline Mode
         self.task = None
         self._steam_closed = threading.Event()
         self._failed_games = []
+        self._pending_games = []
         self._failed_zd = False
         self._zd_missing = False
 
@@ -2407,7 +2446,7 @@ class UpdateScreen(QWidget):
         self.cur.setAccessibleName("Current update status")
         body.addWidget(self.cur)
         self.bar = QProgressBar(); self.bar.setRange(0, 100)
-        self.bar.setTextVisible(True); self.bar.setFormat("%p% complete")
+        self.bar.setTextVisible(True); self.bar.setFormat("%p% progress")
         self.bar.setAccessibleName("Game update progress")
         self.bar.setFixedHeight(22)
         body.addWidget(self.bar)
@@ -2447,12 +2486,16 @@ class UpdateScreen(QWidget):
         self.back_btn.setMaximumWidth(220)
         self.back_btn.setVisible(False)
         self.back_btn.clicked.connect(self._go_back)
-        self.retry_btn = _btn("Retry Failed Games", C_IW, size=11, h=44)
+        self.retry_btn = _btn("Retry Failed Updates", C_IW, size=11, h=44)
         self.retry_btn.setMaximumWidth(220)
         self.retry_btn.setVisible(False)
         self.retry_btn.clicked.connect(self._retry_failed)
+        self.stop_btn = _btn("Stop After Current Step", C_DARK_BTN, size=11, h=44)
+        self.stop_btn.setVisible(False)
+        self.stop_btn.clicked.connect(self._request_stop)
         actions.addStretch()
         actions.addWidget(self.steam_btn)
+        actions.addWidget(self.stop_btn)
         actions.addWidget(self.back_btn)
         actions.addWidget(self.retry_btn)
         actions.addStretch()
@@ -2460,7 +2503,7 @@ class UpdateScreen(QWidget):
         lay.addWidget(content, stretch=1)
 
         self._s = _Sigs()
-        self._s.progress.connect(lambda p,m: (self.bar.setValue(p), self.cur.setText(m)))
+        self._s.progress.connect(self._on_progress)
         self._s.log.connect(self._append_log)
         self._s.done.connect(self._on_done)
         self._s.plut_wait.connect(self._wait_for_plutonium)
@@ -2470,20 +2513,40 @@ class UpdateScreen(QWidget):
         self._ask_yes = False
         self._cancelled = False
 
+    def _on_progress(self, percent, message):
+        # Steps (and some installers) can report 100 independently. Only the
+        # successful final result may make the whole update 100% complete.
+        self.bar.setValue(max(self.bar.value(), min(99, max(0, percent))))
+        self.cur.setText(f"Stopping after current step — {message}" if self._stop_requested.is_set()
+                         else message)
+
+    def _request_stop(self):
+        self._stop_requested.set()
+        self._steam_closed.set()  # also release the Plutonium confirmation wait
+        self.stop_btn.setEnabled(False)
+        self.cur.setText("Stopping after the current step; completed changes will be kept...")
+
     def _wait_for_plutonium(self):
+        if self._stop_requested.is_set():
+            return
         self.steam_btn.setVisible(True)
         self.cur.setText("Close the Plutonium window, then press the button below to continue.")
         self.cur.setStyleSheet(f"color:{C_TREY};background:transparent;")
 
     def _plutonium_closed(self):
         self.steam_btn.setVisible(False)
+        if self._stop_requested.is_set():
+            return
         self.cur.setText("Checking Plutonium and finishing game updates...")
         self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
 
     def _ask_continue(self, text):
         """UI thread: answer a worker's Yes/No question (see _confirm)."""
         try:
-            self._ask_yes = QMessageBox.question(self, "Save Backup", text) == QMessageBox.StandardButton.Yes
+            self._ask_yes = QMessageBox.question(
+                self, "Save Backup", text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
         finally:
             self._ask_event.set()
 
@@ -2520,8 +2583,7 @@ class UpdateScreen(QWidget):
             self._s.log.emit("  Continuing without a complete save backup.")
             return True
         self._cancelled = True
-        self._s.log.emit("Update cancelled. Nothing was changed.")
-        self._s.progress.emit(100, "Update cancelled.")
+        self._s.log.emit("Update cancelled before changing game files or settings.")
         self._s.done.emit(False)
         return False
 
@@ -2538,14 +2600,19 @@ class UpdateScreen(QWidget):
             self._start_update()
 
     def _start_update(self):
-        self.bar.setValue(0); self.log.clear()
+        self.bar.setValue(0); self.bar.setFormat("%p% progress"); self.log.clear()
         self.cur.setText("Preparing...")
         self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
         self._log_status.setText("")
         self.title.setText(self.task[0] if self.task else "GAME UPDATES")
         self.steam_btn.setVisible(False); self.back_btn.setVisible(False)
         self.retry_btn.setVisible(False)
+        self.stop_btn.setVisible(self.task is None)
+        self.stop_btn.setEnabled(True)
+        self._stop_requested.clear()
+        self._did_work = False
         self._failed_games = []
+        self._pending_games = []
         self._failed_zd = False
         self._zd_missing = False
         self._cancelled = False
@@ -2557,36 +2624,50 @@ class UpdateScreen(QWidget):
     def _on_done(self, ok):
         inhibit.stop()
         self.steam_btn.setVisible(False)
+        self.stop_btn.setVisible(False)
         self.back_btn.setVisible(True)
         if ok:
             self.bar.setValue(100)
+            self.bar.setFormat("%p% complete")
             self.cur.setText("Complete. It is now safe to open Steam or return to My Games.")
             self.cur.setStyleSheet(f"color:{C_IW};background:transparent;")
             return
-        if self._cancelled:
-            self.cur.setText("Update cancelled. Nothing was changed.")
-            self.cur.setStyleSheet(f"color:{C_TREY};background:transparent;")
-            return
+        self.bar.setFormat("%p% reached")
         self.cur.setStyleSheet(f"color:{C_TREY};background:transparent;")
-        if self._failed_games:
-            names = ", ".join(dict.fromkeys(gd["base"] for _, gd, _ in self._failed_games))
-            if self._zd_missing:
-                self.cur.setText(f"Update incomplete: {names}. Zombies Declassified is missing; reinstall it from BO2 Options.")
+        self.retry_btn.setVisible(bool(self._failed_games or self._failed_zd))
+        if self._cancelled:
+            if not self._did_work:
+                self.cur.setText("Update cancelled before changing game files or settings.")
+            elif self._failed_games or self._failed_zd:
+                self.cur.setText("Stopped after the current step. Completed changes were kept; retry remaining work.")
             else:
-                self.cur.setText(f"Update incomplete: {names}. Retry the failed games or check the log.")
-            self.retry_btn.setVisible(bool(self._retryable_games()))
+                self.cur.setText("Stopped after the current step. Completed changes were kept.")
+        elif self._failed_games:
+            names = ", ".join(dict.fromkeys(gd["base"] for _, gd, _ in self._failed_games))
+            self.cur.setText(f"Update incomplete: {names}. Retry failed modes or check the log." +
+                             (" Zombies Declassified is missing; reinstall it from BO2 Options."
+                              if self._zd_missing else
+                              " Zombies Declassified also failed; retry it with the failed modes."
+                              if self._failed_zd else ""))
+        elif self._zd_missing:
+            self.cur.setText("Zombies Declassified is missing. Reinstall it from BO2 Options.")
+        elif self._failed_zd:
+            self.cur.setText("Zombies Declassified update failed. Retry it or check the log.")
         else:
             self.cur.setText("Update failed. Check the log, then return to My Games to try again.")
 
-    def _retryable_games(self):
-        return [item for item in self._failed_games
-                if not (self._zd_missing and item[0] == "t6zm")]
-
     def _retry_failed(self):
-        self.selected = self._retryable_games()
+        retry_games = list(self._failed_games)
         retry_zd = self._failed_zd and not self._zd_missing
-        self._start_update()
+        self._zd_retry_game = next((item for item in self.selected if item[0] == "t6zm"), None) if retry_zd else None
+        self._zd_only_retry = bool(retry_zd and not retry_games)
+        if self._zd_only_retry:
+            retry_games = [item for item in self.selected if item[0] == "t6zm"]
+        if not retry_games:
+            return
+        self.selected = retry_games
         self.update_zd = retry_zd
+        self._start_update()
 
     def _go_back(self):
         go_to(self.stack, "ManagementScreen")
@@ -2601,11 +2682,12 @@ class UpdateScreen(QWidget):
         except Exception as ex:
             import traceback
             _log.error("update failed:\n%s", traceback.format_exc())
-            if self.selected and not self._failed_games:
-                self._failed_games = list(self.selected)
+            for item in self._pending_games or (self.selected if not self._failed_games else []):
+                if item not in self._failed_games:
+                    self._failed_games.append(item)
+            self._pending_games = []
             self._restore_failed_launch_options()
             self._s.log.emit(f"✗  Update failed: {ex}")
-            self._s.progress.emit(100, "Update failed.")
             self._s.done.emit(False)
 
     def _restore_failed_launch_options(self):
@@ -2632,19 +2714,28 @@ class UpdateScreen(QWidget):
 
     def _run_steps(self):
         self._lo_snapshot = None
+        do_zd, self.update_zd = self.update_zd, False
+        zd_only, self._zd_only_retry = self._zd_only_retry, False
         task, self.task = self.task, None
         if task:
             try:
                 task[1](self._s)
             except Exception as ex:
                 self._s.log.emit(f"✗  {task[0].title()} failed: {ex}")
-                self._s.progress.emit(100, "Update failed.")
                 self._s.done.emit(False)
                 return
             self._s.progress.emit(100, "All done!")
             self._s.done.emit(True)
             return
         if not self._backup_first():
+            return
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._s.done.emit(False)
+            return
+        if zd_only:
+            self._update_zd(do_zd)
+            self._s.done.emit(not (self._failed_zd or self._zd_missing))
             return
         from wrapper import get_proton_path, find_compatdata, kill_steam, set_compat_tool
         from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
@@ -2666,39 +2757,24 @@ class UpdateScreen(QWidget):
                                         launch_bootstrapper,
                                         is_plutonium_ready)
 
-        has_plut  = any(KEY_CLIENT.get(k) == "plutonium" for k, _, _ in self.selected)
-        proton    = get_proton_path(self.steam_root)
-
-        # Auto-expand: if any Plutonium key is selected, pull in all other
-        # installed Plutonium games so the shared cache rebuild covers every
-        # prefix (OLED) or every sideload entry (LCD).
-        if has_plut:
-            _PLUT_KEYS = {"t4sp","t4mp","t5sp","t5mp","t6mp","t6zm","iw5mp","iw5mp_ds"}
-            already = {k for k, _, _ in self.selected}
-            _all_installed = find_all_games(self.steam_root)
-            # Find the right gd entry for each sibling key
-            _gd_by_key = {}
-            for gd_entry in ALL_GAMES:
-                for k in _active_keys(gd_entry):
-                    _gd_by_key[k] = gd_entry
-            extras = []
-            for pk in _PLUT_KEYS - already:
-                if pk in _all_installed and cfg.is_game_setup(pk):
-                    gd_entry = _gd_by_key.get(pk)
-                    if gd_entry:
-                        extras.append((pk, gd_entry, _all_installed[pk]))
-            if extras:
-                names = ", ".join(e[2].get("name", e[0]) for e in extras)
-                self._s.log.emit(f"Also updating {len(extras)} sibling Plutonium game(s): {names}")
-                self.selected.extend(extras)
-
-        total = len(self.selected)
-
-        # Read setup_games to determine source for each key
         setup_games = cfg.get_setup_games()
+        has_plut = any((setup_games.get(k, {}).get("client") or KEY_CLIENT.get(k)) == "plutonium"
+                       for k, _, _ in self.selected)
+        proton = get_proton_path(self.steam_root)
+        total = len(self.selected)
+        if not total:
+            self._s.log.emit("No configured game modes selected.")
+            self._s.done.emit(False)
+            return
+
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._s.done.emit(False)
+            return
 
         # ── Plutonium update: re-run bootstrapper ─────────────────────
         if has_plut:
+            self._did_work = True
             if is_lcd:
                 self._s.progress.emit(5, "Setting up Plutonium through HGL...")
                 self._s.log.emit(
@@ -2720,24 +2796,22 @@ class UpdateScreen(QWidget):
             try:
                 if is_lcd:
                     launch_bootstrapper_lcd(
-                        on_progress=lambda p, m: self._s.progress.emit(p, m),
+                        on_progress=lambda p, m: self._s.progress.emit(5 + min(10, p // 10), m),
                     )
                 else:
                     launch_bootstrapper(
                         proton,
-                        on_progress=lambda p, m: self._s.progress.emit(p, m),
+                        on_progress=lambda p, m: self._s.progress.emit(5 + min(10, p // 10), m),
                         steam_root=self.steam_root,
                     )
             except DownloadError as dl_ex:
                 self._s.log.emit(f"✗  {dl_ex.label} download failed: {dl_ex}")
                 self._failed_games = list(self.selected)
-                self._s.progress.emit(100, "Update failed.")
                 self._s.done.emit(False)
                 return
             except Exception as ex:
                 self._s.log.emit(f"✗  Plutonium launch failed: {ex}")
                 self._failed_games = list(self.selected)
-                self._s.progress.emit(100, "Update failed.")
                 self._s.done.emit(False)
                 return
 
@@ -2745,6 +2819,11 @@ class UpdateScreen(QWidget):
             self._steam_closed.wait()
             self._steam_closed.clear()
             self._s.plut_go.emit()
+            if self._stop_requested.is_set():
+                self._cancelled = True
+                self._failed_games = list(self.selected)
+                self._s.done.emit(False)
+                return
 
             _ready = is_plutonium_ready_lcd() if is_lcd else is_plutonium_ready()
             if not _ready:
@@ -2753,26 +2832,27 @@ class UpdateScreen(QWidget):
                     "   Make sure you let it finish updating."
                 )
                 self._failed_games = list(self.selected)
-                self._s.progress.emit(100, "Update incomplete.")
                 self._s.done.emit(False)
                 return
 
             self._s.log.emit("✓  Plutonium updated.")
+            # Keep the legacy shared copy: an omitted or failed prefix can
+            # still link to it. Removing it here breaks otherwise playable games.
 
-            # Remove the old shared copy prefixes used to link to. OLED games
-            # are reinstalled below and link to the master in the dedicated
-            # prefix instead; LCD reads everything from the Heroic prefix.
-            from plutonium import SHARED_PLUT_DIR
-            if os.path.isdir(SHARED_PLUT_DIR):
-                shutil.rmtree(SHARED_PLUT_DIR, ignore_errors=True)
-                self._s.log.emit("  Removed the old shared Plutonium copy")
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._failed_games = list(self.selected)
+            self._s.done.emit(False)
+            return
 
         # ── GE-Proton download (Steam may still be running) ─────────
         ge_version = None
         try:
+            self._s.progress.emit(16, "Checking GE-Proton...")
             self._s.log.emit("Checking GE-Proton...")
+            self._did_work = True
             ge_version = install_ge_proton(
-                on_progress=lambda pct, msg: self._s.progress.emit(2 + int(pct * 0.03), msg)
+                on_progress=lambda pct, msg: self._s.progress.emit(16 + int(pct * 0.08), msg)
             )
             cfg.set_ge_proton_version(ge_version)
             self._s.log.emit(f"✓  {ge_version} ready")
@@ -2787,13 +2867,19 @@ class UpdateScreen(QWidget):
             else:
                 self._s.log.emit("✗  No GE-Proton is installed; Steam's compatibility settings were left unchanged.")
 
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._failed_games = list(self.selected)
+            self._s.done.emit(False)
+            return
+
         # Always close Steam before the config writes below (launch options,
         # compat tools, Steam Input, shortcuts): Steam rewrites config.vdf and
         # localconfig.vdf when it exits, so anything written while it runs is
         # lost. This used to be skipped whenever a Plutonium game was in the
         # update -- the button only waits for the Plutonium window, not Steam.
         # Same order as InstallScreen: Plutonium step first, then close Steam.
-        self._s.progress.emit(5, "Closing Steam...")
+        self._s.progress.emit(25, "Closing Steam...")
         self._s.log.emit("Closing Steam...")
         try:
             kill_steam(on_progress=lambda msg: self._s.log.emit(f"  {msg}"))
@@ -2801,56 +2887,60 @@ class UpdateScreen(QWidget):
         except Exception as ex:
             self._s.log.emit(f"✗  Could not close Steam: {ex}")
             raise RuntimeError("Close Steam manually, then retry this update; game configuration was not continued.") from ex
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._failed_games = list(self.selected)
+            self._s.done.emit(False)
+            return
 
-        # ── Clean slate: clear launch options and compat tools ─────────
-        # Same clean-slate approach as InstallScreen.
-        # Prevents stale entries from previous installs (LCD→OLED, older
-        # DeckOps versions) interfering with the update.
-        # Launch options only for the Steam games in this update, so a
-        # per-game update doesn't wipe other games' options.
+        # Never erase an option without a usable snapshot. A failed game (or
+        # an unfinished mode after Stop) can then recover its previous value.
+        from wrapper import clear_launch_options, snapshot_launch_options
+        from detect_games import GAMES
+        run_appids = {GAMES[k]["appid"] for k, _, g in self.selected
+                      if k in GAMES and (g or {}).get("source") != "own"}
         try:
-            from wrapper import clear_launch_options, clear_compat_tool, snapshot_launch_options
-            from detect_games import GAMES
-            run_appids = {GAMES[k]["appid"] for k, _, g in self.selected
-                          if k in GAMES and (g or {}).get("source") != "own"}
-            # A game that fails below never gets its options written again;
-            # keep what it had so it can be put back (_restore_failed_launch_options)
-            try:
-                self._lo_snapshot = snapshot_launch_options(
-                    self.steam_root, [a for a in MANAGED_APPIDS if a in run_appids])
-            except Exception as ex:
-                self._s.log.emit(f"  Could not save current launch options: {ex}")
-            for appid in MANAGED_APPIDS:
-                if appid in run_appids:
-                    clear_launch_options(self.steam_root, appid)
-            # Only clear mappings that are put back below.
-            if ge_version:
-                clear_compat_tool(MANAGED_APPIDS)
-            self._s.log.emit("✓  Cleared launch options" + (" and compat tools" if ge_version else ""))
-            if "7940" in run_appids:
-                from iw3sp import apply_cod4_launch_option
-                apply_cod4_launch_option(self.steam_root)
+            self._lo_snapshot = snapshot_launch_options(self.steam_root, run_appids)
         except Exception as ex:
-            self._s.log.emit(f"  Launch option / compat tool cleanup skipped: {ex}")
+            raise RuntimeError(f"Could not save Steam launch options; no game settings were cleared: {ex}") from ex
+        try:
+            for appid in run_appids:
+                clear_launch_options(self.steam_root, appid)
+            self._s.log.emit("✓  Prepared launch options for selected games")
+            self._pending_games = list(self.selected)
+        except Exception:
+            self._failed_games = list(self.selected)
+            self._restore_failed_launch_options()
+            raise
 
-        # Build installed_games dict for Plutonium sibling key resolution
-        installed_for_plut = {k: g for k, _, g in self.selected if g}
-
+        # Retain sibling paths for a retry without reinstalling successful siblings.
+        installed_for_plut = self.all_plut_games or {k: g for k, _, g in self.selected if g}
+        succeeded = []
         for idx, (key, gd, game) in enumerate(self.selected):
+            if self._stop_requested.is_set():
+                self._cancelled = True
+                self._failed_games.extend(self.selected[idx:])
+                self._pending_games = []
+                self._s.log.emit(f"Stopped safely. {total - idx} mode(s) remain; retry to finish.")
+                break
             if not game:
+                self._failed_games.append((key, gd, game))
+                self._pending_games.pop(0)
                 continue
             base_name = gd["base"]
-            bp = int(idx / total * 90)
-            self._s.progress.emit(bp, f"Updating {base_name}...")
-            def op(pct, msg, _b=bp): self._s.progress.emit(_b + int(pct / 100 * (90 // total)), msg)
-            c = KEY_CLIENT.get(key, gd.get("client", ""))
-
-            # Determine source from setup_games config entry
+            bp = 30 + int(idx / total * 60)
+            self._s.progress.emit(bp, f"Updating {base_name} ({KEY_MODE_LABEL.get(key, key)})...")
+            def op(pct, msg, _b=bp):
+                self._s.progress.emit(_b + int(max(0, min(100, pct)) / 100 * (60 / total)), msg)
             entry = setup_games.get(key, {})
+            c = entry.get("client") or KEY_CLIENT.get(key, gd.get("client", ""))
             source = entry.get("source", "steam")
-            # Prefer the client from the original install if available
-            if key in ("cod4mp", "iw4sp", "iw5sp") and entry.get("client"):
-                c = entry["client"]
+            if not entry or source != game.get("source", "steam"):
+                self._failed_games.append((key, gd, game))
+                self._s.log.emit(f"✗  {base_name} ({key}): setup source changed; no files were touched")
+                self._pending_games.pop(0)
+                continue
+            self._did_work = True
             try:
                 from plutonium import GAME_META as _PLUT_META
                 if c == "plutonium" and key in _PLUT_META:
@@ -2923,32 +3013,51 @@ class UpdateScreen(QWidget):
                     from sp_mod import install_sp_mod
                     install_sp_mod(key, game["install_dir"], op,
                                    source=source, steam_root=self.steam_root)
+                else:
+                    raise RuntimeError(f"Unsupported configured client: {c}")
                 self._s.log.emit(f"✓  {base_name} ({key}) done")
                 # Installs that mark themselves (Plutonium) just saved fresh paths
                 entry = cfg.get_setup_games().get(key, entry)
                 cfg.mark_game_setup(key, c, source=source,
                                     wrapper_path=entry.get("wrapper_path"),
                                     lan_wrapper_path=entry.get("lan_wrapper_path"))
+                succeeded.append((key, gd, game))
             except Exception as ex:
                 self._failed_games.append((key, gd, game))
                 self._s.log.emit(f"✗  {base_name} ({key}) failed: {ex}")
+            self._pending_games.pop(0)
 
         self._restore_failed_launch_options()
 
-        # ── Re-apply GE-Proton compat + Steam Input ──────────────────
-        if ge_version:
+        # Touch only appids whose update succeeded. Never replace the custom
+        # Proton choice of an unrelated or failed game.
+        successful_steam = [(k, gd, g) for k, gd, g in succeeded
+                            if g.get("source", "steam") != "own" and k in GAMES]
+        success_appids = {GAMES[k]["appid"] for k, _, _ in successful_steam}
+        if ge_version and success_appids:
             try:
-                set_compat_tool(MANAGED_APPIDS, ge_version)
-                self._s.log.emit(f"✓  {ge_version} set for Steam game appids")
+                if set_compat_tool(success_appids, ge_version) is False:
+                    raise RuntimeError("Steam rejected the compatibility mapping")
+                self._s.log.emit(f"✓  {ge_version} set for updated Steam appids")
             except Exception as ex:
-                self._s.log.emit(f"  CompatToolMapping skipped: {ex}")
+                self._s.log.emit(f"✗  Could not set compatibility for updated games: {ex}")
+                for item in successful_steam:
+                    if item not in self._failed_games:
+                        self._failed_games.append(item)
+        if success_appids:
+            try:
+                from wrapper import set_steam_input_enabled
+                set_steam_input_enabled(self.steam_root, success_appids)
+                self._s.log.emit("✓  Steam Input enabled for updated games")
+            except Exception as ex:
+                self._s.log.emit(f"✗  Steam Input setup failed: {ex}")
+                for item in successful_steam:
+                    if item not in self._failed_games:
+                        self._failed_games.append(item)
 
-        try:
-            from wrapper import set_steam_input_enabled
-            set_steam_input_enabled(self.steam_root)
-            self._s.log.emit("✓  Steam Input enabled for all games")
-        except Exception as ex:
-            self._s.log.emit(f"  Steam Input setup skipped: {ex}")
+        if self._cancelled:
+            self._s.done.emit(False)
+            return
 
         # Steam WaW has Plutonium entries in its launch menu; a Deck default
         # from older installs would auto-pick Campaign and hide it.
@@ -2961,38 +3070,23 @@ class UpdateScreen(QWidget):
             except Exception as ex:
                 self._s.log.emit(f"  WaW launch picker reset skipped: {ex}")
 
-        # Zombies Declassified: only when the user opted in on the Update Games prompt
-        _do_zd = self.update_zd; self.update_zd = False
-        zd_game = next((item for item in self.selected if item[0] == "t6zm"), None)
-        if _do_zd and cfg.is_zd_installed() and zd_game:
-            try:
-                self._s.log.emit("Checking Zombies Declassified for updates...")
-                from zombies_declassified import resolve_zd_storage
-                _zd_storage = resolve_zd_storage({k: g for k, _, g in self.selected}.get("t6zm"))
+        # The optional pack has its own result and retry; a failed BO2 client
+        # must not be reported as a successful pack update.
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._failed_zd = bool(do_zd)
+            self._s.done.emit(False)
+            return
+        if do_zd and any(k == "t6zm" for k, _, _ in self._failed_games):
+            self._failed_zd = True
+            self._s.log.emit("  Skipped Zombies Declassified until the BO2 Zombies client is repaired.")
+        else:
+            self._update_zd(do_zd)
 
-                from zombies_declassified import is_zd_installed as _zd_at
-                if not _zd_storage or not _zd_at(_zd_storage):
-                    self._s.log.emit(f"✗  Zombies Declassified not found in {_zd_storage}; reinstall it from BO2 Options.")
-                    self._zd_missing = True
-                    if zd_game not in self._failed_games:
-                        self._failed_games.append(zd_game)
-                else:
-                    from zombies_declassified import update_zd
-                    updated = update_zd(_zd_storage,
-                                        lambda p, m: self._s.log.emit(f"  ZD: {m}"))
-                    if updated:
-                        from zombies_declassified import get_zd_info as _zdi
-                        info = _zdi(_zd_storage)
-                        if info.get("manifest_hash"):
-                            cfg.mark_zd_installed(info["manifest_hash"])
-                        self._s.log.emit("✓  Zombies Declassified updated")
-                    else:
-                        self._s.log.emit("✓  Zombies Declassified is up to date")
-            except Exception as ex:
-                self._s.log.emit(f"✗  Zombies Declassified update failed: {ex}")
-                self._failed_zd = True
-                if zd_game not in self._failed_games:
-                    self._failed_games.append(zd_game)
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._s.done.emit(False)
+            return
 
         # Clean up ZD files leaked into non-t6zm prefixes by older versions
         if has_plut and not is_lcd:
@@ -3008,6 +3102,11 @@ class UpdateScreen(QWidget):
             except Exception as ex:
                 self._s.log.emit(f"  ZD cleanup skipped: {ex}")
 
+        if self._stop_requested.is_set():
+            self._cancelled = True
+            self._s.done.emit(False)
+            return
+
         # Clean up Plutonium dirs leaked into non-Plutonium prefixes by older versions
         if has_plut and not is_lcd:
             try:
@@ -3021,6 +3120,41 @@ class UpdateScreen(QWidget):
             except Exception as ex:
                 self._s.log.emit(f"  Plutonium cleanup skipped: {ex}")
 
-        failed = len(self._failed_games)
-        self._s.progress.emit(100, "Update complete." if not failed else f"{failed} game(s) failed to update.")
+        failed = len(self._failed_games) + int(self._failed_zd or self._zd_missing)
+        self._s.progress.emit(98, "Finishing update..." if not failed else "Update incomplete; see log.")
         self._s.done.emit(not failed)
+
+    def _update_zd(self, enabled):
+        """Update the optional pack separately from the BO2 client result."""
+        zd_game = self._zd_retry_game or next((item for item in self.selected if item[0] == "t6zm"), None)
+        self._zd_retry_game = None
+        if not enabled:
+            return
+        if not zd_game or not cfg.is_zd_installed():
+            self._zd_missing = True
+            self._s.log.emit("✗  Zombies Declassified is not installed; reinstall it from BO2 Options.")
+            return
+        self._s.progress.emit(91, "Checking Zombies Declassified...")
+        try:
+            from zombies_declassified import resolve_zd_storage, is_zd_installed, update_zd, get_zd_info
+            storage = resolve_zd_storage(zd_game[2])
+            if not storage or not is_zd_installed(storage):
+                self._zd_missing = True
+                self._s.log.emit("✗  Zombies Declassified is missing; reinstall it from BO2 Options.")
+                return
+            self._did_work = True
+            self._s.log.emit("Checking Zombies Declassified for updates...")
+            def zd_progress(percent, message):
+                self._s.progress.emit(91 + int(max(0, min(100, percent)) * 0.06), message)
+                self._s.log.emit(f"  ZD: {message}")
+            updated = update_zd(storage, zd_progress)
+            if updated:
+                info = get_zd_info(storage)
+                if info.get("manifest_hash"):
+                    cfg.mark_zd_installed(info["manifest_hash"])
+                self._s.log.emit("✓  Zombies Declassified updated")
+            else:
+                self._s.log.emit("✓  Zombies Declassified is up to date")
+        except Exception as ex:
+            self._failed_zd = True
+            self._s.log.emit(f"✗  Zombies Declassified update failed: {ex}")

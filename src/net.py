@@ -9,6 +9,9 @@ UA string and retry/backoff logic so changes propagate everywhere.
 import hashlib
 import json
 import os
+import re
+import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -155,9 +158,20 @@ def download(url: str, dest: str, on_progress=None, label: str = "",
                 status = getattr(r, "status", None) or getattr(r, "code", None)
                 if resume and status != 206:
                     resume = 0
+                length = int(r.headers.get("Content-Length", 0) or 0)
+                if status == 206:
+                    # A partial response must match the requested offset and
+                    # cover the rest of the object, not splice unrelated bytes.
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)",
+                                         r.headers.get("Content-Range") or "")
+                    if not resume or not match or int(match[1]) != resume or \
+                            int(match[2]) < resume or int(match[2]) + 1 != int(match[3]) or \
+                            (length and length != int(match[2]) - resume + 1):
+                        _discard(part, meta)
+                        raise IOError("invalid Content-Range in partial download")
+                    length = int(match[3]) - resume
                 if not resume:
                     _write_validator(meta, r.headers)
-                length = int(r.headers.get("Content-Length", 0) or 0)
                 total  = resume + length if length else 0
                 done   = resume
                 t0     = time.monotonic()
@@ -194,6 +208,85 @@ def download(url: str, dest: str, on_progress=None, label: str = "",
                 raise
             _log.debug("download retry %d for %s", attempt, url)
             time.sleep(2 ** (attempt - 1))
+
+
+def safe_manifest_path(root: str, relative: str) -> str:
+    """Resolve an untrusted remote path without escaping or following install symlinks.
+
+    Manifest and archive paths use forward slashes on every platform. Reject
+    ambiguous separators, drive names, empty/dot components and symlinks in
+    existing parents (including an existing destination symlink).
+    """
+    if not isinstance(relative, str) or not relative or "\x00" in relative or "\\" in relative or ":" in relative or \
+            relative.startswith("/") or any(p in ("", ".", "..") for p in relative.split("/")):
+        raise ValueError(f"unsafe remote path: {relative!r}")
+    current = os.path.abspath(root)
+    for part in relative.split("/"):
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            raise ValueError(f"symlink in remote path: {relative!r}")
+    if os.path.commonpath((os.path.realpath(root), os.path.realpath(current))) != os.path.realpath(root):
+        raise ValueError(f"remote path escapes install: {relative!r}")
+    return current
+
+
+def commit_staged_files(install_dir: str, staged_dir: str, files, remove=()):
+    """Replace a set of staged files, restoring originals on a failed commit.
+
+    Both directories should be on the game filesystem. This handles ordinary
+    download/extraction/commit failures, not power loss during the commit.
+    """
+    files = list(dict.fromkeys(files))
+    remove = list(dict.fromkeys(remove))
+    writes = [(safe_manifest_path(staged_dir, rel), safe_manifest_path(install_dir, rel))
+              for rel in files]
+    targets = {rel: safe_manifest_path(install_dir, rel) for rel in files + remove}
+    for source, _ in writes:
+        if not os.path.isfile(source):
+            raise ValueError(f"missing staged file: {source}")
+    backup_dir = tempfile.mkdtemp(prefix=".deckops_rollback_", dir=install_dir)
+    backups = {}
+    changed = []
+    keep_backups = False
+    try:
+        # A backup failure must occur before any installed file is modified.
+        for rel, target in targets.items():
+            if os.path.lexists(target):
+                if not os.path.isfile(target):
+                    raise ValueError(f"not a regular installed file: {target}")
+                backup = safe_manifest_path(backup_dir, rel)
+                os.makedirs(os.path.dirname(backup), exist_ok=True)
+                shutil.copy2(target, backup)
+                backups[rel] = backup
+        try:
+            for rel in remove:
+                if os.path.lexists(targets[rel]):
+                    changed.append(rel)
+                    os.remove(targets[rel])
+            for rel, (source, target) in zip(files, writes):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                changed.append(rel)
+                os.replace(source, target)
+        except Exception:
+            restore_error = None
+            for rel in reversed(dict.fromkeys(changed)):
+                try:
+                    if rel in backups:
+                        shutil.copy2(backups[rel], targets[rel])
+                    elif os.path.lexists(targets[rel]):
+                        os.remove(targets[rel])
+                except OSError as ex:
+                    restore_error = ex
+            if restore_error:
+                keep_backups = True
+                raise RuntimeError(f"Rollback incomplete; originals kept in {backup_dir}") from restore_error
+            raise
+    finally:
+        if not keep_backups:
+            try:
+                shutil.rmtree(backup_dir)
+            except OSError:
+                _log.warning("could not clean up update backup %s", backup_dir, exc_info=True)
 
 
 def _discard(*paths):

@@ -141,8 +141,9 @@ def _find_all_compatdata_dirs(steam_root: str) -> list:
 
 # Only these parts of Plutonium storage/<game>/ are user data. Everything
 # else (zone/, map .iwd files, video/, ...) is Plutonium's and comes back
-# on reinstall, so backing it up would cost hundreds of MB per game.
-_PLUT_USER_PARTS = ("players", "mods")
+# on reinstall. usermaps/ contains custom maps, but for T6 it also contains
+# the optional, re-downloadable multi-GB Zombies Declassified maps.
+_PLUT_USER_PARTS = ("players", "mods", "usermaps")
 
 
 def _plut_storage(prefix: str, plut_store: str) -> str:
@@ -276,10 +277,23 @@ def _copytree_safe(src: str, dst: str, group: str, prog):
         return False
 
 
-# Re-downloadable content inside the backed-up parts, per Plutonium game:
-# storage/t6/mods/dlc5 is the ~9 GB Zombies Declassified pack, which
-# DeckOps installs again from its CDN.
-_PLUT_SKIP = {"t6": {"mods": ("dlc5",)}}
+def _plut_skips(plut_store: str, storage: str) -> dict:
+    """Exclude the known ZD pack, and its map folders only when identifiable.
+
+    ZD's mods/dlc5 and named map folders are excluded only when its
+    deckops_zd.json marker identifies the pack in this prefix. Other map
+    folders, including zm_* custom maps, are kept. Without the marker we
+    cannot identify ZD data, so all mods and usermaps are kept;
+    this may require substantial free space. Custom edits inside mods/dlc5
+    or one of ZD's named map folders cannot be distinguished without a file
+    manifest and must be saved separately. ZD raw/ scripts are not backed up.
+    """
+    if plut_store != "t6":
+        return {}
+    from zombies_declassified import _ZD_USERMAPS, is_zd_installed
+    if not is_zd_installed(storage):
+        return {}
+    return {"mods": ("dlc5",), "usermaps": tuple(_ZD_USERMAPS)}
 
 # Room left free on the drive after a backup
 _SPACE_MARGIN = 200 << 20
@@ -360,13 +374,15 @@ def _commit(staging: str, dst: str, group: str) -> bool:
 
 
 def _finish_group(staging: str, dst: str, group: str, ok: list, prog) -> bool:
-    """Commit when every copy worked, or when there's no older backup to
-    lose. A partial copy never replaces a complete older backup."""
-    if any(ok) and (all(ok) or not os.path.isdir(dst)):
-        return _commit(staging, dst, group)
+    """Only a complete copy is a backup, even if this is the first run.
+    Never replace an earlier complete backup with a partially copied group."""
+    if ok and all(ok):
+        if _commit(staging, dst, group):
+            return True
+        prog(f"  ⚠ {group}: could not save backup; the previous backup is kept if present")
+        return False
     shutil.rmtree(staging, ignore_errors=True)
-    if any(ok):
-        prog(f"  ⚠ {group}: backup incomplete, the previous backup is kept")
+    prog(f"  ⚠ {group}: backup incomplete; the previous backup is kept if present")
     return False
 
 
@@ -418,9 +434,9 @@ def backup_saves(steam_root: str = None, on_progress=None,
     steam_root       — Steam root path (defaults to ~/.local/share/Steam)
     on_progress      — callback(message: str)
     installed_games  — optional dict of key -> game info (from install flow)
-    failures         — optional list; every group that HAS save data but could
-                       not be backed up (no space, copy error) is appended, so
-                       callers never report a complete backup that is not
+    failures         — optional list; groups with save data that could not be
+                       fully backed up (or "backup list" if metadata fails) are
+                       appended, so callers never report a partial backup as complete.
 
     Returns a dict of {group_name: backup_path} for groups that were backed up.
     """
@@ -473,20 +489,24 @@ def backup_saves(steam_root: str = None, on_progress=None,
             parts = {(tag, p): os.path.join(path, p) for tag, path in storages.items()
                      for p in _PLUT_USER_PARTS if os.path.isdir(os.path.join(path, p))}
             if not parts:
-                _log.debug("save backup: %s — no players/ or mods/ found", group_name)
+                _log.debug("save backup: %s — no players/, mods/ or usermaps/ found", group_name)
                 continue
-            skips = _PLUT_SKIP.get(group["plut_store"], {})
-            need = sum(_tree_size(s, skips.get(p, ())) for (tag, p), s in parts.items())
+            skips = {tag: _plut_skips(group["plut_store"], path)
+                     for tag, path in storages.items()}
+            need = sum(_tree_size(s, skips[tag].get(p, ())) for (tag, p), s in parts.items())
             if not _has_room(need, group_name, on_progress):
                 failed.append(group_name)
                 continue
             stage = _staging(group_name)
-            ok = [_copy_part(s, os.path.join(stage, tag, p), group_name, on_progress, skips.get(p, ()))
-                  for (tag, p), s in parts.items()]
+            ok = [_copy_part(s, os.path.join(stage, tag, p), group_name, on_progress,
+                             skips[tag].get(p, ())) for (tag, p), s in parts.items()]
             if _finish_group(stage, dst, group_name, ok, on_progress):
                 backed_up[group_name] = dst
-                on_progress(f"  ✓ {group_name}: backed up players/ and mods/ "
-                            f"from {len(storages)} prefix(es), other Plutonium files skipped")
+                on_progress(f"  ✓ {group_name}: backed up players/, mods/ and usermaps/ "
+                            f"from {len(storages)} prefix(es); re-downloadable content skipped")
+                if any(skips[tag].get("usermaps") for tag in storages):
+                    on_progress("  Note: ZD map folders were skipped; custom edits inside those "
+                                "folders are not backed up")
                 _log.info("save backup: %s -> %s (%s)", group_name, dst, sorted(storages))
             else:
                 failed.append(group_name)
@@ -531,6 +551,11 @@ def backup_saves(steam_root: str = None, on_progress=None,
         except OSError as ex:
             _log.warning("save backup: could not write backup_info.json: %s", ex)
             on_progress(f"  ⚠ could not record the backup list: {ex}")
+            failed.append("backup list")
+    if failed:
+        on_progress(f"Save backup incomplete — {len(backed_up)} group(s) saved; "
+                    f"not backed up: {', '.join(dict.fromkeys(failed))}.")
+    elif backed_up:
         on_progress(f"Save backup complete — {len(backed_up)} group(s) saved.")
     else:
         on_progress("No save data found to back up.")
@@ -592,7 +617,8 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
 
         # Check if backup has content
         try:
-            has_files = any(True for _ in os.scandir(backup_dir))
+            with os.scandir(backup_dir) as entries:
+                has_files = any(True for _ in entries)
         except OSError:
             continue
         if not has_files:
@@ -665,8 +691,8 @@ def describe_backup(backed_up: dict, failures: list) -> str:
         if "settings" in failures:
             return ("⚠  Could not read DeckOps's settings (deckops.json), so it could not tell which "
                     "games to back up. Nothing was backed up.")
-        return (f"⚠  Backup incomplete for: {', '.join(failures)}. Earlier backups of those were kept. "
-                "Check your free space and the log.")
+        return (f"⚠  Backup incomplete for: {', '.join(failures)}. "
+                "Earlier complete backups were kept where available. Check your free space and the log.")
     if backed_up:
         return f"✓  Saves backed up for {len(backed_up)} game group(s) to {BACKUP_ROOT}."
     return "No save data found to back up."

@@ -1023,7 +1023,8 @@ class LaunchOptionRestoreTests(unittest.TestCase):
         self.assertEqual(w.restore_launch_options(self.root, snap, "10190"), [])
         self.assertEqual(self._options("10190"), "new %command%")
 
-    def _run_update_games(self, backup=None, confirm=None):
+    def _run_update_games(self, backup=None, confirm=None, *, ge_version=None,
+                          installer=None, snapshot=None, stop_after_first=False):
         """Run UpdateScreen's real Update Games steps for MW2 MP with Steam,
         downloads and the MW2 installer (which fails) faked. Returns
         (screen, order of the backup / Steam-close / install steps)."""
@@ -1039,6 +1040,10 @@ class LaunchOptionRestoreTests(unittest.TestCase):
         screen = ui_manage.UpdateScreen(None)
         screen.steam_root = self.root
         screen.selected = [("iw4mp", gd, {"install_dir": str(Path(self.root, "mw2")), "source": "steam"})]
+        if stop_after_first:
+            second = next(g for g in ALL_GAMES if "t6sp" in g.get("keys", []))
+            screen.selected.append(("t6sp", second, {"install_dir": str(Path(self.root, "bo2")),
+                                                     "source": "steam"}))
         order = []
 
         def fake_backup(*a, failures=None, **kw):
@@ -1047,19 +1052,29 @@ class LaunchOptionRestoreTests(unittest.TestCase):
 
         def fake_install(*a, **kw):
             order.append("install")
+            if installer is not None:
+                result = installer()
+                if stop_after_first:
+                    screen._stop_requested.set()
+                return result
             raise RuntimeError("download failed")
         with patch.object(ui_manage, "_log_to_file"), \
              patch.object(ui_manage, "inhibit"), \
              patch.object(ui_manage.cfg, "is_lcd", return_value=False), \
-             patch.object(ui_manage.cfg, "get_setup_games", return_value={"iw4mp": {"client": "iw4x"}}), \
+             patch.object(ui_manage.cfg, "get_setup_games", return_value={
+                 "iw4mp": {"client": "iw4x"}, "t6sp": {"client": "t6sp_mod"}}), \
              patch.object(screen, "_confirm", create=True, side_effect=lambda text: confirm), \
              patch("save_backup.backup_saves", side_effect=fake_backup), \
              patch("wrapper.kill_steam", side_effect=lambda **kw: order.append("close steam")), \
              patch("wrapper.get_proton_path", return_value="proton"), \
              patch("wrapper.find_compatdata", return_value=self.root), \
-             patch("wrapper.set_compat_tool"), patch("wrapper.set_steam_input_enabled"), \
+             patch("wrapper.snapshot_launch_options",
+                   side_effect=snapshot if snapshot is not None else self.wrapper.snapshot_launch_options), \
+             patch("wrapper.set_compat_tool", side_effect=lambda appids, version: order.append(
+                 ("compat", set(appids))) or True), \
+             patch("wrapper.set_steam_input_enabled"), patch.object(ui_manage.cfg, "mark_game_setup"), \
              patch("ge_proton.install_ge_proton", side_effect=OSError("offline")), \
-             patch("ge_proton.resolve_ge_version", return_value=None), \
+             patch("ge_proton.resolve_ge_version", return_value=ge_version), \
              patch("iw4x.install_iw4x", side_effect=fake_install):
             screen._run()
         app.processEvents()
@@ -1075,12 +1090,35 @@ class LaunchOptionRestoreTests(unittest.TestCase):
         _, order = self._run_update_games()
         self.assertEqual(order, ["backup", "close steam", "install"])
 
+    def test_missing_launch_option_snapshot_aborts_before_clearing(self):
+        before = self.vdf.read_bytes()
+        screen, order = self._run_update_games(snapshot=OSError("cannot snapshot"))
+        self.assertEqual(order, ["backup", "close steam"])
+        self.assertEqual(self.vdf.read_bytes(), before)
+        self.assertEqual([k for k, _, _ in screen._failed_games], ["iw4mp"])
+
+    def test_successful_single_game_sets_compat_for_its_appid_only(self):
+        screen, order = self._run_update_games(ge_version="GE-Test", installer=lambda: None)
+        self.assertEqual(order, ["backup", "close steam", "install", ("compat", {"10190"})])
+        self.assertFalse(screen._failed_games)
+        self.assertEqual(self._options("42690"), "other %command%")
+
+    def test_stop_after_current_game_leaves_others_retryable(self):
+        screen, order = self._run_update_games(
+            ge_version="GE-Test", installer=lambda: None, stop_after_first=True)
+        self.assertEqual([k for k, _, _ in screen._failed_games], ["t6sp"])
+        self.assertTrue(screen._cancelled)
+        self.assertIn(("compat", {"10190"}), order)
+        self.assertEqual(order[:3], ["backup", "close steam", "install"])
+        self.assertLess(screen.bar.value(), 100)
+        self.assertFalse(screen.retry_btn.isHidden())
+
     def test_incomplete_backup_and_player_says_no_changes_nothing(self):
         before = self.vdf.read_text()
         screen, order = self._run_update_games(backup=lambda f: f.append("cod4") or {}, confirm=False)
         self.assertEqual(order, ["backup"])
         self.assertEqual(self.vdf.read_text(), before)
-        self.assertEqual(screen.cur.text(), "Update cancelled. Nothing was changed.")
+        self.assertEqual(screen.cur.text(), "Update cancelled before changing game files or settings.")
 
     def test_incomplete_backup_and_player_says_yes_continues(self):
         _, order = self._run_update_games(backup=lambda f: f.append("cod4") or {}, confirm=True)

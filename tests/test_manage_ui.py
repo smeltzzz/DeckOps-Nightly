@@ -397,7 +397,9 @@ class ManagementUITests(unittest.TestCase):
             seen["height"] = dialog.height()
             dialog.reject()
 
-        with patch.object(ui_manage.QDialog, "exec", inspect):
+        with patch.object(ui_manage.QDialog, "exec", inspect), \
+             patch.object(ui_manage.cfg, "get_setup_games",
+                          return_value={"cod4mp": {"client": "cod4r", "source": "steam"}}):
             self.screen._configure(gd, ["cod4mp"])
         self.assertIn("Open Mod Folders", seen["buttons"])
         self.assertIn("Update Client", seen["buttons"])
@@ -565,6 +567,117 @@ class ManagementUITests(unittest.TestCase):
                 self.assertEqual(guide._heading.text(), "SETUP COMPLETE")
                 self.assertEqual(guide._continue_btn.text(), "Continue to My Games")
                 stack.close()
+
+    def test_update_selection_uses_configured_client_and_detected_source(self):
+        installed = {"iw4sp": {"source": "steam"}, "iw5sp": {"source": "own"},
+                     "cod4mp": {"source": "own"}, "cod4sp": {"source": "steam"}}
+        configured = {"iw4sp": {"client": "iw-pad", "source": "steam"},
+                      "iw5sp": {"client": "iw-pad", "source": "own"},
+                      "cod4mp": {"client": "cod4r", "source": "steam"},
+                      "cod4sp": {"client": "iw3sp", "source": "steam"}}
+        with patch.object(ui_manage.cfg, "get_setup_games", return_value=configured):
+            keys = [key for key, _, _ in ui_manage._update_candidates(installed)]
+            self.assertIn("iw4sp", keys)
+            self.assertIn("iw5sp", keys)
+            self.assertIn("cod4sp", keys)
+            self.assertNotIn("cod4mp", keys)
+            # Options on a partially configured card must not add a new mode.
+            self.assertEqual([key for key, _, _ in ui_manage._update_candidates(
+                installed, ["cod4mp", "cod4sp"])], ["cod4sp"])
+
+    def test_card_update_confirms_plutonium_siblings_before_running(self):
+        installed = {"t4sp": {"source": "steam", "install_dir": "/waw"},
+                     "t6zm": {"source": "steam", "install_dir": "/bo2"}}
+        configured = {key: {"client": "plutonium", "source": "steam"} for key in installed}
+        self.screen.set_installed(installed)
+        shown = []
+        update = SimpleNamespace(selected=[], steam_root="", update_zd=True, all_plut_games={})
+
+        def confirm(dialog):
+            shown.append((dialog.text(), dialog.standardButton(dialog.defaultButton())))
+            return ui_manage.QMessageBox.StandardButton.Yes
+
+        with patch.object(ui_manage.cfg, "get_setup_games", return_value=configured), \
+             patch.object(ui_manage.cfg, "is_zd_installed", return_value=False), \
+             patch.object(ui_manage.QMessageBox, "exec", confirm), \
+             patch.object(ui_manage, "get_screen", return_value=update), \
+             patch.object(ui_manage, "go_to") as go:
+            self.screen._update(next(g for g in ui_manage.ALL_GAMES if "t4sp" in g["keys"]), ["t4sp"])
+        self.assertEqual([key for key, _, _ in update.selected], ["t4sp", "t6zm"])
+        self.assertFalse(update.update_zd)
+        self.assertIn("Additional Plutonium modes", shown[0][0])
+        self.assertIn("Steam will close", shown[0][0])
+        self.assertEqual(shown[0][1], ui_manage.QMessageBox.StandardButton.No)
+        go.assert_called_once()
+
+    def test_update_retry_keeps_failed_bo2_client_separate_from_optional_pack(self):
+        gd = next(g for g in ui_manage.ALL_GAMES if "t6zm" in g["keys"])
+        zm = ("t6zm", gd, {"source": "steam"})
+        update = ui_manage.UpdateScreen(None)
+        update.selected = [zm]
+        update._failed_games = [zm]
+        update._zd_missing = True
+        update._failed_zd = True
+        with patch.object(update, "_start_update") as start:
+            update._retry_failed()
+        self.assertEqual(update.selected, [zm])
+        self.assertFalse(update.update_zd)
+        self.assertFalse(update._zd_only_retry)
+        start.assert_called_once()
+
+        update._failed_games = []
+        update._zd_missing = False
+        update._failed_zd = True
+        with patch.object(update, "_start_update"):
+            update._retry_failed()
+        self.assertTrue(update._zd_only_retry)
+        self.assertTrue(update.update_zd)
+
+    def test_retry_optional_pack_after_unrelated_client_failure(self):
+        gd = next(g for g in ui_manage.ALL_GAMES if "t6zm" in g["keys"])
+        zm = ("t6zm", gd, {"source": "steam", "install_dir": "/bo2"})
+        other = ("iw4mp", next(g for g in ui_manage.ALL_GAMES if "iw4mp" in g["keys"]),
+                 {"source": "steam", "install_dir": "/mw2"})
+        update = ui_manage.UpdateScreen(None)
+        update.selected = [zm, other]
+        update._failed_games = [other]
+        update._failed_zd = True
+        with patch.object(update, "_start_update"):
+            update._retry_failed()
+        self.assertEqual(update.selected, [other])
+        self.assertEqual(update._zd_retry_game, zm)
+        update._failed_zd = False  # _start_update clears the prior result
+        with patch.object(ui_manage.cfg, "is_zd_installed", return_value=True), \
+             patch("zombies_declassified.resolve_zd_storage", return_value="/zd") as storage, \
+             patch("zombies_declassified.is_zd_installed", return_value=True), \
+             patch("zombies_declassified.update_zd", return_value=False):
+            update._update_zd(True)
+        storage.assert_called_once_with(zm[2])
+        self.assertIsNone(update._zd_retry_game)
+        self.assertFalse(update._failed_zd)
+        self.assertFalse(update._zd_missing)
+
+    def test_update_progress_stop_and_opt_in_are_not_stale(self):
+        update = ui_manage.UpdateScreen(None)
+        with patch.object(ui_manage.QTimer, "singleShot"), \
+             patch.object(ui_manage.inhibit, "start"), \
+             patch.object(ui_manage.inhibit, "stop"), \
+             patch.object(ui_manage, "_log_to_file"):
+            update._start_update()
+            update._on_progress(75, "Updating...")
+            update._on_progress(5, "Checking...")
+            self.assertEqual(update.bar.value(), 75)
+            update._request_stop()
+            self.assertTrue(update._steam_closed.is_set())
+            self.assertTrue(update._stop_requested.is_set())
+            update._cancelled = True
+            update._on_done(False)
+            self.assertEqual(update.bar.value(), 75)
+            self.assertIn("cancelled before changing", update.cur.text())
+            update.update_zd = True
+            with patch.object(update, "_backup_first", return_value=False):
+                update._run_steps()
+            self.assertFalse(update.update_zd)
 
     def test_update_progress_log_and_result_fit_both_sizes(self):
         from ui_constants import _app_style, _load_font

@@ -89,6 +89,12 @@ If Steam asks about cloud saves, choose **Keep Local**. If asked about safe mode
 - **MW3 MP.** If the downgrader fails with a depot access error, add the free MW3 Dedicated Server tool to your Steam account. Paste `steam://install/42750` in a browser or Steam's URL bar, then run the downgrader again.
 - **LCD Steam Deck.** The LCD Steam Deck has a broken Proton/Wine stack. It reports the wrong serials to games. In Plutonium, this can cause a false positive HWID ban. DeckOps repairs the Proton stack for the game. DeckOps does not change hardware IDs and does not help you avoid bans. Plutonium games may take a moment to launch during shader cache cleanup. Skip Vulkan shader compilation if prompted. Quit from the in-game menu for a faster exit.
 
+### Updating games
+
+In **My Games**, choose **Update Games** to check and repair the mod-client modes you have already set up, or **Game Options → Update Client** for one game's configured modes. Review the mode list before continuing: other Plutonium modes may be included because they share client files. DeckOps backs up saves first and closes Steam before changing its settings. Checking the optional Zombies Declassified maps is a separate, unchecked choice and may download up to ~9 GB.
+
+If something fails, the result screen shows what needs attention and offers **Retry Failed Updates**. **Stop After Current Step** waits for the active operation to finish; it does not interrupt a download or installation in the middle of a write. Completed changes are kept. If a save backup is incomplete, you can decline before game files or Steam settings change.
+
 ---
 
 ## Gyro Controls

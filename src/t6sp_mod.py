@@ -22,8 +22,9 @@ Progress is reported via a callback:
 import os
 import json
 import shutil
+import tempfile
 
-from net import download as _download, github_asset
+from net import download as _download, github_asset, commit_staged_files
 
 # Rattpak's releases; the pinned URLs are only used if the GitHub API lookup fails
 _REPO = "Rattpak/T6SP-Mod-Release"
@@ -66,34 +67,33 @@ def install_t6sp_mod(game: dict, steam_root: str,
     dll_url, dll_dg = github_asset(_REPO, "t6sp-mod.dll", fallback=_PIN + "t6sp-mod.dll")
     # Two lookups: if only one fell back (e.g. a GitHub rate limit between
     # them), the exe and dll would come from different releases. Use the
-    # pinned pair for both instead.
+    # pinned pair for both instead. The pinned fallback has no published
+    # digest, so authenticity cannot be verified if GitHub's API is down.
     if exe_url.startswith(_PIN) != dll_url.startswith(_PIN):
         exe_url, exe_dg = _PIN + "T6SP-Mod.exe", None
         dll_url, dll_dg = _PIN + "t6sp-mod.dll", None
 
-    # Download mod exe
-    exe_dest = os.path.join(install_dir, "t6sp_mod_tmp.exe")
-    prog(5, "Downloading T6SP-MOD exe...")
-    _download(
-        exe_url,
-        exe_dest,
-        lambda p, m: prog(5 + int(p * 0.35), m),
-        "Downloading T6SP-MOD exe...",
-        digest=exe_dg,
-    )
+    # Do not replace either playable file until both downloads succeed. A
+    # failed second download or commit restores the previous exe/DLL pair.
+    with tempfile.TemporaryDirectory(prefix=".deckops_t6sp_", dir=install_dir) as staged:
+        prog(5, "Downloading T6SP-MOD exe...")
+        _download(
+            exe_url,
+            os.path.join(staged, MOD_EXE),
+            lambda p, m: prog(5 + int(p * 0.35), m),
+            "Downloading T6SP-MOD exe...",
+            digest=exe_dg,
+        )
 
-    # Download companion DLL
-    dll_dest = os.path.join(install_dir, "t6sp-mod.dll")
-    prog(45, "Downloading T6SP-MOD DLL...")
-    _download(
-        dll_url,
-        dll_dest,
-        lambda p, m: prog(45 + int(p * 0.30), m),
-        "Downloading T6SP-MOD DLL...",
-        digest=dll_dg,
-    )
-
-    shutil.move(exe_dest, os.path.join(install_dir, MOD_EXE))
+        prog(45, "Downloading T6SP-MOD DLL...")
+        _download(
+            dll_url,
+            os.path.join(staged, "t6sp-mod.dll"),
+            lambda p, m: prog(45 + int(p * 0.30), m),
+            "Downloading T6SP-MOD DLL...",
+            digest=dll_dg,
+        )
+        commit_staged_files(install_dir, staged, [MOD_EXE, "t6sp-mod.dll"])
 
     # Older installs replaced t6sp.exe: put the original back
     t6sp_bak = os.path.join(install_dir, "t6sp.exe.bak")

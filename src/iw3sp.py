@@ -12,9 +12,11 @@ Progress is reported via a callback:
 
 import os
 import json
+import re
+import urllib.parse
 import urllib.request
 
-from net import download as _download, BROWSER_UA as _BROWSER_UA
+from net import download as _download, BROWSER_UA as _BROWSER_UA, safe_manifest_path
 from steam_common import sha1_file as _sha1
 
 # The Gitea releases lag behind this: v4.1.5's game.dll breaks right stick
@@ -92,16 +94,22 @@ def install_iw3sp(game: dict, steam_root: str,
     except Exception as ex:
         raise RuntimeError(f"Failed to fetch IW3SP-MOD file list: {ex}")
 
-    todo = [(n, sz, h) for n, sz, h in files
-            if not (os.path.isfile(os.path.join(install_dir, n))
-                    and _sha1(os.path.join(install_dir, n)) == h.lower())]
-    total = sum(sz for _, sz, _ in todo) or 1
+    # Validate *all* paths before hashing or writing any files. The CDN's
+    # manifest is remote input, including paths for files already installed.
+    validated = []
+    for n, sz, h in files:
+        dest = safe_manifest_path(install_dir, n)
+        if not isinstance(sz, int) or sz < 0 or not isinstance(h, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", h):
+            raise ValueError(f"invalid IW3SP-MOD manifest entry: {n!r}")
+        validated.append((n, sz, h, dest))
+    todo = [(n, sz, h, dest) for n, sz, h, dest in validated
+            if not (os.path.isfile(dest) and _sha1(dest) == h.lower())]
+    total = sum(sz for _, sz, _, _ in todo) or 1
     done = 0
-    for n, sz, h in todo:
-        dest = os.path.join(install_dir, n)
+    for n, sz, h, dest in todo:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         _download(
-            f"{_CDN}/{n}", dest,
+            f"{_CDN}/{urllib.parse.quote(n, safe='/')}", dest,
             lambda p, m, _d=done, _s=sz: prog(5 + int((_d + _s * p / 100) / total * 55), m),
             f"Downloading IW3SP-MOD {os.path.basename(n)}...",
             digest=f"sha1:{h}",

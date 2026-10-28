@@ -24,10 +24,14 @@ Progress is reported via a callback:
 import os
 import json
 import shutil
+import stat
+import tempfile
+import urllib.parse
 import zipfile
 import threading
 
-from net import download as _download, github_asset
+from net import (download as _download, github_asset, safe_manifest_path,
+                 commit_staged_files)
 
 from log import get_logger
 
@@ -70,14 +74,15 @@ def _remap_dlc_path(manifest_path: str, install_dir: str) -> str:
     are all placed into zone/iw4x/x86/dlc/ to match the correct IW4x layout.
     .iwd files under iw4x/ go to main/iw4x/x86/ (launcher layout).
     """
+    safe_manifest_path(install_dir, manifest_path)
     for prefix in _FF_PREFIXES:
         if manifest_path.startswith(prefix):
             filename = manifest_path[len(prefix):]
-            return os.path.join(install_dir, "zone", "iw4x", "x86", "dlc", filename)
+            return safe_manifest_path(install_dir, "zone/iw4x/x86/dlc/" + filename)
     # iw4x/*.iwd → main/iw4x/x86/ to match launcher layout
     if manifest_path.startswith("iw4x/"):
-        return os.path.join(install_dir, "main", "iw4x", "x86", manifest_path[5:])
-    return os.path.join(install_dir, manifest_path)
+        return safe_manifest_path(install_dir, "main/iw4x/x86/" + manifest_path[5:])
+    return safe_manifest_path(install_dir, manifest_path)
 
 
 _DLC_FF_FILENAMES = {
@@ -198,8 +203,13 @@ def _migrate_old_layout(install_dir: str):
         os.makedirs(os.path.dirname(new_abs), exist_ok=True)
         if os.path.isdir(new_abs):
             for item in os.listdir(old_abs):
-                shutil.move(os.path.join(old_abs, item), os.path.join(new_abs, item))
-            shutil.rmtree(old_abs)
+                target = os.path.join(new_abs, item)
+                # A freshly installed client takes precedence over legacy
+                # files; keep any conflicting old file rather than replacing it.
+                if not os.path.exists(target):
+                    shutil.move(os.path.join(old_abs, item), target)
+            if not os.listdir(old_abs):
+                os.rmdir(old_abs)
         else:
             shutil.move(old_abs, new_abs)
         _log.info("Migrated %s → %s", old_rel, new_rel)
@@ -231,6 +241,52 @@ def _relocate_extracted(install_dir: str):
             shutil.rmtree(old_abs)
         else:
             shutil.move(old_abs, new_abs)
+
+
+def _stage_archive(archive: str, staged_files: str, relocate: bool = False):
+    """Extract regular archive files to staging, validating names before writing."""
+    with zipfile.ZipFile(archive) as zf:
+        entries = []
+        for info in zf.infolist():
+            name = info.filename.rstrip("/") if info.is_dir() else info.filename
+            safe_manifest_path(staged_files, name)
+            mode = info.external_attr >> 16
+            if stat.S_ISLNK(mode):
+                raise ValueError(f"symlink in IW4x archive: {info.filename!r}")
+            if not info.is_dir():
+                rel = name
+                if relocate:
+                    for old, new in (("iw4x/", "main/iw4x/x86/"),
+                                     ("zone/patch/", "zone/iw4x/x86/patch/"),
+                                     ("zone/zonebuilder/", "zone/iw4x/x86/zonebuilder/")):
+                        if name.startswith(old):
+                            rel = new + name[len(old):]
+                            break
+                safe_manifest_path(staged_files, rel)
+                entries.append((info, rel))
+        for info, rel in entries:
+            dest = safe_manifest_path(staged_files, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with zf.open(info) as source, open(dest, "wb") as output:
+                shutil.copyfileobj(source, output)
+
+
+def _old_client_files(install_dir: str, remove_dlc: bool):
+    """Files the former installer removed under main/iw4x/x86."""
+    root = safe_manifest_path(install_dir, "main/iw4x/x86")
+    if not os.path.isdir(root):
+        return []
+    old = []
+    for directory, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            if os.path.islink(path):
+                raise ValueError(f"symlink in existing IW4x files: {path}")
+        for name in files:
+            path = os.path.join(directory, name)
+            if remove_dlc or directory != root or not name.endswith(".iwd"):
+                old.append(os.path.relpath(path, install_dir).replace(os.sep, "/"))
+    return old
 
 
 # Steam copy launch menu entry. Launcher ships x86 and x64 (mm) clients
@@ -279,32 +335,32 @@ def install_iw4x_dlc(install_dir: str, on_progress=None):
 
     on_progress — optional callback(percent: int, status: str)
     """
-    _migrate_dlc_ff(install_dir)
-    _migrate_old_layout(install_dir)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     prog = on_progress or (lambda *a: None)
 
     # ── Fetch manifest ────────────────────────────────────────────────────
     prog(0, "Fetching DLC manifest...")
-    manifest_path = os.path.join(install_dir, "update.json")
-    _download(DLC_MANIFEST_URL, manifest_path, None, "DLC manifest", timeout=120)
-
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
-    os.remove(manifest_path)
+    # Fetch into a temporary folder: a failed or unsafe manifest must not
+    # overwrite an existing update.json in the player's game directory.
+    with tempfile.TemporaryDirectory(prefix=".deckops_iw4x_manifest_", dir=install_dir) as temp:
+        manifest_path = os.path.join(temp, "update.json")
+        _download(DLC_MANIFEST_URL, manifest_path, None, "DLC manifest", timeout=120)
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
 
     files = manifest.get("files", [])
+    # Reject the entire manifest before legacy migrations or directory writes.
+    dirs_needed = {os.path.dirname(_remap_dlc_path(entry["path"], install_dir))
+                   for entry in files}
+    _migrate_dlc_ff(install_dir)
+    _migrate_old_layout(install_dir)
     if not files:
         prog(100, "No DLC files found in manifest.")
         return
 
     # ── Create destination directories ────────────────────────────────────
     prog(2, "Creating DLC directories...")
-    dirs_needed = set()
-    for entry in files:
-        dest = _remap_dlc_path(entry["path"], install_dir)
-        dirs_needed.add(os.path.dirname(dest))
     for d in dirs_needed:
         os.makedirs(d, exist_ok=True)
 
@@ -318,9 +374,11 @@ def install_iw4x_dlc(install_dir: str, on_progress=None):
         rel_path = entry["path"]
         dest     = _remap_dlc_path(rel_path, install_dir)
         name     = entry.get("asset_name", os.path.basename(rel_path))
-        url      = DLC_CDN_BASE + rel_path
+        url      = DLC_CDN_BASE + urllib.parse.quote(rel_path, safe="/")
 
-        # Skip if file already exists and matches expected size
+        # This CDN manifest provides sizes but no trustworthy hashes. A
+        # size match is not an integrity check; downloaded DLC cannot be
+        # cryptographically verified until the upstream publishes digests.
         expected_size = entry.get("size", 0)
         if os.path.exists(dest) and expected_size:
             try:
@@ -372,8 +430,6 @@ def install_iw4x(game: dict, steam_root: str,
     For Steam games, adds a "Play IW4x" launch menu entry (iw4x-launcher.exe --arch x86).
     """
     install_dir = game["install_dir"]
-    _migrate_dlc_ff(install_dir)
-    _migrate_old_layout(install_dir)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -407,10 +463,7 @@ def install_iw4x(game: dict, steam_root: str,
     dll_url, dll_dg = github_asset("iw4x/iw4x-client", "iw4x.dll", fallback=DLL_URL)
     zip_url, zip_dg = github_asset("iw4x/iw4x-rawfiles", "release.zip", fallback=ZIP_URL)
 
-    staging = os.path.join(install_dir, ".deckops_iw4x_download")
-    shutil.rmtree(staging, ignore_errors=True)
-    os.makedirs(staging)
-    try:
+    with tempfile.TemporaryDirectory(prefix=".deckops_iw4x_", dir=install_dir) as staging:
         # ── Download iw4x.dll, release.zip, and launcher concurrently ────
         prog(5, "Downloading iw4x files...")
 
@@ -457,38 +510,52 @@ def install_iw4x(game: dict, steam_root: str,
                 raise RuntimeError(f"{os.path.basename(z)} is corrupt at {bad} "
                                    f"(existing IW4x left untouched)")
 
-        # ── Everything is here: now replace the old client files ─────────
-        iw4x_dir = os.path.join(install_dir, "main", "iw4x", "x86")
-        if os.path.exists(iw4x_dir):
-            if remove_dlc:
-                shutil.rmtree(iw4x_dir)
-            else:
-                for entry in os.listdir(iw4x_dir):
-                    p = os.path.join(iw4x_dir, entry)
-                    if os.path.isdir(p):
-                        shutil.rmtree(p)
-                    elif not entry.endswith(".iwd"):
-                        os.remove(p)
-
-        if remove_dlc:
-            _remove_dlc_ff(install_dir)
-
-        # ── Extract release.zip and relocate to launcher layout ──────────
+        # Extract to a separate tree. No playable file is touched until all
+        # archives have passed validation and extraction.
+        staged_files = os.path.join(staging, "files")
+        os.makedirs(staged_files)
         prog(50, "Extracting release.zip...")
-        with zipfile.ZipFile(staged_zip) as zf:
-            zf.extractall(install_dir)
-
-        prog(60, "Relocating files to launcher layout...")
-        _relocate_extracted(install_dir)
-        os.replace(staged_dll, os.path.join(install_dir, "iw4x.dll"))
-
-        # ── Extract launcher ─────────────────────────────────────────────
+        _stage_archive(staged_zip, staged_files, relocate=True)
+        shutil.copy2(staged_dll, os.path.join(staged_files, "iw4x.dll"))
         if launcher_url:
             prog(70, "Extracting iw4x-launcher...")
-            with zipfile.ZipFile(launcher_zip) as zf:
-                zf.extractall(install_dir)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+            _stage_archive(launcher_zip, staged_files)
+
+        staged_paths = []
+        for directory, _, names in os.walk(staged_files):
+            for name in names:
+                staged_paths.append(os.path.relpath(os.path.join(directory, name), staged_files)
+                                    .replace(os.sep, "/"))
+        remove = _old_client_files(install_dir, remove_dlc)
+        # Old DLC files are intentionally removed only when the caller asked
+        # for it; include them in the same rollback as the base update.
+        if remove_dlc:
+            for dlc_dir in ("zone/iw4x/x86/dlc", "zone/dlc"):
+                for name in _DLC_FF_FILENAMES:
+                    rel = dlc_dir + "/" + name
+                    if os.path.isfile(safe_manifest_path(install_dir, rel)):
+                        remove.append(rel)
+            legacy = safe_manifest_path(install_dir, "iw4x")
+            if os.path.isdir(legacy):
+                for name in os.listdir(legacy):
+                    if name.endswith(".iwd"):
+                        rel = "iw4x/" + name
+                        if os.path.isfile(safe_manifest_path(install_dir, rel)):
+                            remove.append(rel)
+        prog(75, "Installing IW4x files...")
+        commit_staged_files(install_dir, staged_files, staged_paths, remove)
+
+    # Legacy layout migrations are deferred until after the base commit. A
+    # failed download or replacement must not move an existing installation.
+    try:
+        if not remove_dlc:
+            _migrate_dlc_ff(install_dir)
+        _migrate_old_layout(install_dir)
+    except OSError as ex:
+        # Legacy migration is best-effort; the newly committed client remains
+        # playable even when an old-layout file cannot be moved.
+        _log.warning("IW4x legacy layout migration incomplete: %s", ex)
+        prog(77, f"Could not migrate all legacy files: {ex}")
 
     # ── Launch menu (Steam only) ─────────────────────────────────────────
     # "Play IW4x" runs the launcher directly, which updates and then starts the

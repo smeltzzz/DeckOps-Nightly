@@ -835,9 +835,11 @@ def set_compat_tool(appids, version):
                     count=1,
                 )
 
-    if _write_and_validate_vdf(STEAM_CONFIG, data):
-        for appid in appids:
-            _record_config_vdf(str(appid), "CompatToolMapping", version)
+    if not _write_and_validate_vdf(STEAM_CONFIG, data):
+        return False
+    for appid in appids:
+        _record_config_vdf(str(appid), "CompatToolMapping", version)
+    return True
 
 
 def clear_compat_tool(appids):
