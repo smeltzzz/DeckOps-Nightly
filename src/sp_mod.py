@@ -112,10 +112,10 @@ def update_iw_pad(game_key: str, install_dir: str, log=_log.info):
     _fetch_iw_pad(game_key, install_dir, arch, lambda p, m: None, release=(url, dg))
 
 
-# Optional DXVK frame limit (setting dxvk_frame_cap, off by default): MW2 (2009) and
-# MW3 (2011) render through Direct3D 9, so DXVK's limiter caps them whatever the
-# game's own settings do. Normally the in-game com_maxfps, held by fovwatch.py, does
-# the job instead.
+# DXVK frame limit (setting dxvk_frame_cap, on by default): MW2 (2009) and MW3 (2011)
+# render through Direct3D 9, so DXVK's limiter caps them whatever the game's own
+# settings do. The 64-bit SP builds have no com_maxfps (fovwatch.py never found its
+# record), so there is no in-game cap to use instead.
 _DXVK_CAP = 'DXVK_CONFIG="d3d9.maxFrameRate=90" '
 _CAP_GAMES = ("iw4sp", "iw5sp")
 

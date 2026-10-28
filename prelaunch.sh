@@ -42,10 +42,10 @@ if [ -n "$DECKOPS_MENU" ]; then
 fi
 
 # MW2 / MW3 campaign: cg_fov can't be set from config or console in the 64-bit Steam
-# builds, and the engine's FPS cap is held the same way, so fovwatch.py runs the game as
-# its child and holds cg_fov and com_maxfps at 90 (see its header). It gets Steam's
-# LD_PRELOAD / LD_LIBRARY_PATH only for the game, like the check above. If the Python
-# can't run at all, the game is started as usual.
+# builds, so fovwatch.py runs the game as its child and holds the dvar at 90 (see its
+# header). (These SP builds have no com_maxfps, so FPS is capped by DXVK in the launch
+# option instead.) It gets Steam's LD_PRELOAD / LD_LIBRARY_PATH only for the game, like
+# the check above. If the Python can't run at all, the game is started as usual.
 case "$KEY" in
     iw4sp) WATCH_EXE=iw4sp.exe ;;
     iw5sp) WATCH_EXE=iw5sp.exe ;;
@@ -54,6 +54,6 @@ esac
 if [ -n "$WATCH_EXE" ] && [ -x "$DIR/.venv/bin/python3" ] && [ -f "$DIR/src/fovwatch.py" ]; then
     exec env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
         DECKOPS_LD_PRELOAD="$LD_PRELOAD" DECKOPS_LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
-        "$DIR/.venv/bin/python3" "$DIR/src/fovwatch.py" "$WATCH_EXE" cg_fov=90 com_maxfps=90 -- "$@"
+        "$DIR/.venv/bin/python3" "$DIR/src/fovwatch.py" "$WATCH_EXE" cg_fov=90 -- "$@"
 fi
 exec "$@"

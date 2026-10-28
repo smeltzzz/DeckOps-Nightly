@@ -1470,15 +1470,15 @@ class ConfigureScreen(QWidget):
         _head(left, "FPS and FOV")
         left.addWidget(_lbl("Sets a 90 FPS cap and 90 FOV for MW1, MW2, MW3, WaW, BO1 and BO2 "
                             "(campaign, multiplayer, zombies). Only those lines change in each "
-                            "config. In the MW2 and MW3 campaigns FOV and FPS are held at 90 "
-                            "automatically while the game runs. MW2 also keeps an F10 key that sets "
-                            "FOV 90 as a fallback (map a back paddle to F10 in Steam Input).",
+                            "config. In the MW2 and MW3 campaigns FOV is held at 90 automatically "
+                            "while the game runs. MW2 also keeps an F10 key that sets FOV 90 as a "
+                            "fallback (map a back paddle to F10 in Steam Input).",
                             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
         left.addWidget(fps_btn)
-        left.addWidget(_lbl("MW2 and MW3 campaign: DXVK frame cap at 90 FPS in the Steam launch option, "
-                            "on top of the in-game cap. Closes Steam to apply.",
+        left.addWidget(_lbl("MW2 and MW3 campaign: caps the frame rate at 90 with DXVK in the Steam "
+                            "launch option (these builds have no in-game cap). Closes Steam to apply.",
                             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         self._cap_btn = _btn("", C_DARK_BTN, size=12, h=40)
         self._cap_btn.setFixedWidth(220); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)

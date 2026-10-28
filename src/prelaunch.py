@@ -50,15 +50,15 @@ def _plutonium(key, cmd):
 
 
 def _fov_lines(key, install_dir):
-    """MW2 / MW3 campaign: the game drops cg_fov, com_maxfps and the F10 bind
-    from config.cfg when it writes the file on exit, so put them back before
-    each launch (before the IW-Pad update, so a network failure can't skip it)."""
-    from game_config import (_patch_dvars, _dest_from_install, _EXTRA_PATCHES,
-                             DEFAULT_FPS, DEFAULT_FOV)
+    """MW2 / MW3 campaign: the game drops cg_fov and the F10 bind from config.cfg
+    when it writes the file on exit, so put them back before each launch (before
+    the IW-Pad update, so a network failure can't skip it). com_maxfps is not
+    written: these SP builds don't have it (FPS is capped by DXVK instead)."""
+    from game_config import _patch_dvars, _dest_from_install, _EXTRA_PATCHES, DEFAULT_FOV
     extra = _EXTRA_PATCHES.get((key, "config.cfg"))
     if not extra:
         return
-    values = {"cg_fov": str(DEFAULT_FOV), "com_maxfps": str(DEFAULT_FPS), **extra["extra_dvars"]}
+    values = {"cg_fov": str(DEFAULT_FOV), **extra["extra_dvars"]}
     path = os.path.join(_dest_from_install(key, install_dir), "config.cfg")
     if _patch_dvars(path, values, binds=extra["binds"]):
         _log.info("prelaunch %s: FOV / FPS lines put back in config.cfg", key)

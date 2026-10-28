@@ -1358,7 +1358,14 @@ class SpLaunchOptionRepairTests(unittest.TestCase):
     def _cap(self, on):
         return patch("config.get_dxvk_frame_cap", return_value=on)
 
-    def test_frame_cap_is_off_by_default(self):
+    def test_frame_cap_is_on_by_default(self):
+        import config
+        with patch("config.load", return_value={}):
+            self.assertTrue(config.get_dxvk_frame_cap())
+        with patch("config.load", return_value={"dxvk_frame_cap": False}):
+            self.assertFalse(config.get_dxvk_frame_cap())
+
+    def test_frame_cap_can_be_switched_off(self):
         import sp_mod
         with self._cap(False):
             for key in ("iw4sp", "iw5sp"):
@@ -1424,7 +1431,7 @@ class PrelaunchFovLinesTests(unittest.TestCase):
     def test_mw2_lines_are_restored_before_the_iw_pad_update(self):
         text, upd = self._run("iw4sp", 'seta thereisacow "1337"\r\n')
         self.assertIn('seta cg_fov "90"', text)
-        self.assertIn('seta com_maxfps "90"', text)
+        self.assertNotIn("com_maxfps", text)          # these SP builds have no such dvar
         self.assertIn('bind F10 "cg_fov 90"', text)
         upd.assert_called_once()
 
