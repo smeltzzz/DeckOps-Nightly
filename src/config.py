@@ -55,6 +55,8 @@ DEFAULTS = {
                                  #   WaW/BO1/BO2/MW3 MP bot matches. None = not chosen yet (older installs)
     "manifest_mods": {},         # manifest_mods.py: { mod_id: { "option" (component mods: "a+b"), "games_root", "option_hash", "complete", "installed_at" } }
     "manifest_cdn":  None,       # manifest_mods.py: CDN base shared by all manifest mods, typed by the user
+    "dxvk_frame_cap": False,     # sp_mod.py: also cap MW2 / MW3 SP at 90 FPS with DXVK in the launch option
+                                 #   (off: the in-game com_maxfps held by fovwatch.py does it)
 }
 
 
@@ -533,6 +535,11 @@ def clear_depot_patched(game_id: str):
     if game_id in dp:
         del dp[game_id]
         save(config)
+
+
+def get_dxvk_frame_cap() -> bool:
+    """True if MW2 / MW3 SP launch options carry a DXVK 90 FPS cap (off by default)."""
+    return bool(load().get("dxvk_frame_cap", False))
 
 
 def get_cod4mp_profile_type(default: str = "other") -> str:

@@ -112,37 +112,45 @@ def update_iw_pad(game_key: str, install_dir: str, log=_log.info):
     _fetch_iw_pad(game_key, install_dir, arch, lambda p, m: None, release=(url, dg))
 
 
-# DXVK frame limit per game: MW2 (2009) and MW3 (2011) render through Direct3D 9,
-# so DXVK's limiter caps them whatever the game's own settings do.
-_FRAME_CAP = {
-    "iw4sp": 'DXVK_CONFIG="d3d9.maxFrameRate=90" ',
-    "iw5sp": 'DXVK_CONFIG="d3d9.maxFrameRate=90" ',
-}
+# Optional DXVK frame limit (setting dxvk_frame_cap, off by default): MW2 (2009) and
+# MW3 (2011) render through Direct3D 9, so DXVK's limiter caps them whatever the
+# game's own settings do. Normally the in-game com_maxfps, held by fovwatch.py, does
+# the job instead.
+_DXVK_CAP = 'DXVK_CONFIG="d3d9.maxFrameRate=90" '
+_CAP_GAMES = ("iw4sp", "iw5sp")
+
+
+def _frame_cap(game_key: str) -> str:
+    if game_key not in _CAP_GAMES:
+        return ""
+    from config import get_dxvk_frame_cap
+    return _DXVK_CAP if get_dxvk_frame_cap() else ""
 
 
 def build_sp_launch_option(game_key: str) -> str:
     """Launch option (Steam app or own shortcut) that swaps the original SP exe for iw-pad.exe,
-    with the game's DXVK frame cap in front when it has one."""
+    with the DXVK frame cap in front when the setting is on."""
     exe = _SP_MOD_CONFIG[game_key]["original_exe"]
     from steam_common import prelaunch_prefix
-    return (f"{_FRAME_CAP.get(game_key, '')}{prelaunch_prefix(game_key)}"
+    return (f"{_frame_cap(game_key)}{prelaunch_prefix(game_key)}"
             f"bash -c 'exec \"${{@/{exe}/iw-pad.exe}}\"' -- %command%")
 
 
 def _launch_option_ok(game_key: str, value: str) -> bool:
-    """True if a tile's current launch option still has what DeckOps puts there:
-    the iw-pad.exe swap, and the frame cap for games that have one."""
+    """True if a tile's current launch option is what DeckOps puts there: the iw-pad.exe
+    swap, and the DXVK frame cap exactly when the setting asks for it."""
     if "iw-pad.exe" not in value:
         return False
-    return not _FRAME_CAP.get(game_key) or "d3d9.maxFrameRate" in value
+    return ("d3d9.maxFrameRate" in value) == bool(_frame_cap(game_key))
 
 
 def repair_sp_launch_options(steam_root: str, log=lambda m: None) -> list:
     """Steam MW2 / MW3 SP set up with IW-Pad: put IW-Pad's launch option back
     when the tile's current one doesn't run iw-pad.exe (empty, or left over
-    from something else such as an old AlterWare client), or lacks the frame
-    cap of a game that has one (MW2, MW3). An option that has both is never
-    touched. Steam must be closed. Returns the game keys fixed."""
+    from something else such as an old AlterWare client), or has the DXVK
+    frame cap when the setting is off (or lacks it when it is on). An option
+    that matches is never touched. Steam must be closed. Returns the game
+    keys fixed."""
     from config import get_setup_games
     from wrapper import snapshot_launch_options, clear_launch_options, set_launch_options
     setup = get_setup_games()

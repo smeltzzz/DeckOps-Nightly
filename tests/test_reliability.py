@@ -1355,33 +1355,51 @@ class SpLaunchOptionRepairTests(unittest.TestCase):
         clear.assert_not_called()
         set_.assert_not_called()
 
-    def test_mw2_and_mw3_options_have_the_dxvk_frame_cap(self):
-        import sp_mod
-        for key in ("iw4sp", "iw5sp"):
-            opt = sp_mod.build_sp_launch_option(key)
-            self.assertTrue(opt.startswith('DXVK_CONFIG="d3d9.maxFrameRate=90" '), key)
-            self.assertIn("iw-pad.exe", opt)
+    def _cap(self, on):
+        return patch("config.get_dxvk_frame_cap", return_value=on)
 
-    def test_mw3_option_without_the_cap_is_replaced(self):
+    def test_frame_cap_is_off_by_default(self):
+        import sp_mod
+        with self._cap(False):
+            for key in ("iw4sp", "iw5sp"):
+                opt = sp_mod.build_sp_launch_option(key)
+                self.assertNotIn("DXVK_CONFIG", opt)
+                self.assertIn("iw-pad.exe", opt)
+
+    def test_frame_cap_can_be_switched_on(self):
+        import sp_mod
+        with self._cap(True):
+            for key in ("iw4sp", "iw5sp"):
+                self.assertTrue(sp_mod.build_sp_launch_option(key).startswith(
+                    'DXVK_CONFIG="d3d9.maxFrameRate=90" '), key)
+
+    def test_option_with_the_cap_is_replaced_while_the_setting_is_off(self):
+        import sp_mod
+        with self._cap(True):
+            capped = sp_mod.build_sp_launch_option("iw4sp").replace('"', '\\"')
+        with self._cap(False):
+            fixed, clear, set_ = self._repair({"10180": {"u": capped}},
+                                              setup={"iw4sp": {"client": "iw-pad", "source": "steam"}})
+        self.assertEqual(fixed, ["iw4sp"])
+        clear.assert_called_once_with("steam", 10180)
+        self.assertNotIn("DXVK_CONFIG", set_.call_args[0][2])
+
+    def test_option_without_the_cap_is_replaced_while_the_setting_is_on(self):
         old = {"42680": {"u": "bash -c 'exec \\\"${@/iw5sp.exe/iw-pad.exe}\\\"' -- %command%"}}
-        fixed, clear, set_ = self._repair(old)
+        with self._cap(True):
+            fixed, clear, set_ = self._repair(old)
         self.assertEqual(fixed, ["iw5sp"])
         self.assertIn("d3d9.maxFrameRate=90", set_.call_args[0][2])
 
-    def test_mw2_option_without_the_cap_is_replaced(self):
-        old = {"10180": {"u": "bash -c 'exec \\\"${@/iw4sp.exe/iw-pad.exe}\\\"' -- %command%"}}
-        fixed, clear, set_ = self._repair(old, setup={"iw4sp": {"client": "iw-pad", "source": "steam"}})
-        self.assertEqual(fixed, ["iw4sp"])
-        clear.assert_called_once_with("steam", 10180)
-        self.assertIn("d3d9.maxFrameRate=90", set_.call_args[0][2])
-
-    def test_mw2_option_with_the_cap_is_left_alone(self):
+    def test_option_matching_the_setting_is_left_alone(self):
         import sp_mod
-        ok = {"10180": {"u": sp_mod.build_sp_launch_option("iw4sp").replace('"', '\\"')}}
-        fixed, clear, set_ = self._repair(ok, setup={"iw4sp": {"client": "iw-pad", "source": "steam"}})
-        self.assertEqual(fixed, [])
-        clear.assert_not_called()
-        set_.assert_not_called()
+        for on in (False, True):
+            with self._cap(on):
+                ok = {"10180": {"u": sp_mod.build_sp_launch_option("iw4sp").replace('"', '\\"')}}
+                fixed, clear, set_ = self._repair(ok, setup={"iw4sp": {"client": "iw-pad", "source": "steam"}})
+            self.assertEqual(fixed, [])
+            clear.assert_not_called()
+            set_.assert_not_called()
 
     def test_games_not_set_up_with_iw_pad_are_skipped(self):
         fixed, clear, _ = self._repair({}, setup={"iw5sp": {"client": "steam", "source": "steam"}})
@@ -1464,38 +1482,50 @@ class FakeMem:
 
 
 class FovWatchTests(unittest.TestCase):
-    """fovwatch: find the cg_fov dvar_t in the game's memory and hold its value."""
+    """fovwatch: find dvar_t records in the game's memory and hold their values."""
 
     BASE = 0x140000000
     EXE = "iw5sp.exe"
+    FOV_STR, FPS_STR = 0x101, 0x121       # name string offsets inside the .rdata region
 
-    def _world(self, value=65.0, string=b"\x00cg_fov\x00"):
+    def _world(self, fov=65.0, fps=85, strings=(b"cg_fov", b"com_maxfps")):
         import struct
         rdata, data = bytearray(0x1000), bytearray(0x1000)
-        rdata[0x100:0x100 + len(string)] = string
-        name_addr = self.BASE + 0x1000 + 0x101
-        rec = 0x200                                   # a dvar_t: name pointer at +0, value at +0x10
-        data[rec:rec + 8] = struct.pack("<Q", name_addr)
-        data[rec + 0x10:rec + 0x14] = struct.pack("<f", value)
+        for off, s in zip((0x100, 0x120), strings):
+            rdata[off:off + len(s) + 2] = b"\x00" + s + b"\x00"
+        # dvar_t records: name pointer at +0, current value at +0x10
+        data[0x200:0x208] = struct.pack("<Q", self.BASE + 0x1000 + self.FOV_STR)
+        data[0x210:0x214] = struct.pack("<f", fov)
+        data[0x300:0x308] = struct.pack("<Q", self.BASE + 0x1000 + self.FPS_STR)
+        data[0x310:0x314] = struct.pack("<i", fps)
         mem = FakeMem({self.BASE + 0x1000: rdata, self.BASE + 0x2000: data})
         maps = [(self.BASE + 0x1000, self.BASE + 0x2000, "r--p", f"/g/{self.EXE}"),
                 (self.BASE + 0x2000, self.BASE + 0x3000, "rw-p", f"/g/{self.EXE}")]
-        return mem, maps, self.BASE + 0x2000 + rec + 0x10
+        return mem, maps
 
-    def test_finds_the_dvar_value_address(self):
+    def _find(self, mem, maps, names=("cg_fov", "com_maxfps"), **kw):
         import fovwatch
-        mem, maps, want = self._world()
-        self.assertEqual(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None), want)
+        return fovwatch.find_dvars(mem, maps, self.EXE, names, log=lambda m: None, **kw)
 
-    def test_ignores_a_record_with_an_unreasonable_value(self):
-        import fovwatch
-        mem, maps, _ = self._world(value=0.0)
-        self.assertIsNone(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None))
+    def test_finds_both_dvars(self):
+        mem, maps = self._world()
+        self.assertEqual(self._find(mem, maps),
+                         {"cg_fov": self.BASE + 0x2000 + 0x210, "com_maxfps": self.BASE + 0x2000 + 0x310})
 
-    def test_no_cg_fov_string_means_no_result(self):
+    def test_ignores_records_with_unreasonable_values(self):
+        mem, maps = self._world(fov=0.0, fps=0)
+        self.assertEqual(self._find(mem, maps), {})
+
+    def test_one_dvar_can_be_found_without_the_other(self):
+        mem, maps = self._world(strings=(b"cg_fov", b"com_other"))
+        self.assertEqual(list(self._find(mem, maps)), ["cg_fov"])
+
+    def test_settings_are_parsed_by_name_and_type(self):
         import fovwatch
-        mem, maps, _ = self._world(string=b"\x00cg_other\x00")
-        self.assertIsNone(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None))
+        self.assertEqual(fovwatch.parse_settings(["cg_fov=90", "com_maxfps=90"]),
+                         {"cg_fov": 90.0, "com_maxfps": 90})
+        with self.assertRaises(ValueError):
+            fovwatch.parse_settings(["g_gravity=1"])
 
     def test_search_backs_off_and_the_heap_scan_is_limited(self):
         import fovwatch
@@ -1507,29 +1537,33 @@ class FovWatchTests(unittest.TestCase):
 
     def test_heap_scan_can_be_switched_off(self):
         import struct
-        import fovwatch
-        mem, maps, _ = self._world()
-        # the dvar record only exists in an anonymous region outside the image window
+        mem, maps = self._world()
+        # the cg_fov record only exists in an anonymous region outside the image window
         far = 0x7f0000000000
         heap = bytearray(0x1000)
-        heap[0x40:0x48] = struct.pack("<Q", self.BASE + 0x1000 + 0x101)
+        heap[0x40:0x48] = struct.pack("<Q", self.BASE + 0x1000 + self.FOV_STR)
         heap[0x50:0x54] = struct.pack("<f", 65.0)
         mem.regions[far] = heap
         mem.regions[self.BASE + 0x2000] = bytearray(0x1000)         # nothing in the image's data
         maps = maps + [(far, far + 0x1000, "rw-p", "")]
-        self.assertIsNone(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None, heap=False))
-        self.assertEqual(fovwatch.find_cg_fov(mem, maps, self.EXE, log=lambda m: None, heap=True), far + 0x50)
+        self.assertEqual(self._find(mem, maps, heap=False), {})
+        self.assertEqual(self._find(mem, maps, heap=True), {"cg_fov": far + 0x50})
 
-    def test_hold_writes_only_when_the_value_differs(self):
+    def test_hold_writes_floats_and_ints_only_when_the_value_differs(self):
         import struct
         import fovwatch
-        mem, maps, addr = self._world(value=65.0)
-        self.assertTrue(fovwatch.hold(mem, addr, 90.0))
-        self.assertEqual(struct.unpack("<f", mem.read(addr, 4))[0], 90.0)
-        self.assertFalse(fovwatch.hold(mem, addr, 90.0))           # already there
-        mem.write(addr, struct.pack("<f", 65.0))                    # a level load puts 65 back
-        self.assertTrue(fovwatch.hold(mem, addr, 90.0))
-        self.assertIsNone(fovwatch.hold(mem, addr + 0x10000, 90.0))  # unreadable
+        mem, maps = self._world()
+        found = self._find(mem, maps)
+        fov, fps = found["cg_fov"], found["com_maxfps"]
+        self.assertTrue(fovwatch.hold(mem, fov, "cg_fov", 90.0))
+        self.assertEqual(struct.unpack("<f", mem.read(fov, 4))[0], 90.0)
+        self.assertTrue(fovwatch.hold(mem, fps, "com_maxfps", 90))
+        self.assertEqual(struct.unpack("<i", mem.read(fps, 4))[0], 90)
+        self.assertFalse(fovwatch.hold(mem, fov, "cg_fov", 90.0))     # already there
+        self.assertFalse(fovwatch.hold(mem, fps, "com_maxfps", 90))
+        mem.write(fov, struct.pack("<f", 65.0))                        # a level load puts 65 back
+        self.assertTrue(fovwatch.hold(mem, fov, "cg_fov", 90.0))
+        self.assertIsNone(fovwatch.hold(mem, fov + 0x10000, "cg_fov", 90.0))  # unreadable
 
     def test_child_gets_steams_preload_back_and_runs_to_completion(self):
         import fovwatch
@@ -1539,8 +1573,14 @@ class FovWatchTests(unittest.TestCase):
         self.assertNotIn("DECKOPS_LD_PRELOAD", env)
         self.assertNotIn("LD_LIBRARY_PATH", env)
         # the game's exit code is passed on even if the watcher can't do anything (no /proc here)
-        rc = fovwatch.main(["90", "iw5sp.exe", "--", sys.executable, "-c", "import sys; sys.exit(3)"])
+        rc = fovwatch.main(["iw5sp.exe", "cg_fov=90", "com_maxfps=90", "--",
+                            sys.executable, "-c", "import sys; sys.exit(3)"])
         self.assertEqual(rc, 3)
+
+    def test_bad_settings_do_not_stop_the_game(self):
+        import fovwatch
+        rc = fovwatch.main(["iw5sp.exe", "bogus=1", "--", sys.executable, "-c", "import sys; sys.exit(4)"])
+        self.assertEqual(rc, 4)
 
 
 class FpsFovTests(unittest.TestCase):

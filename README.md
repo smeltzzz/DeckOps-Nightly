@@ -114,7 +114,7 @@ DeckOps installs a controller profile for every game. Choose your gyro mode duri
 | Background Music | Turn on/off and adjust volume |
 | Controller Profiles | Switch gyro mode and re-apply controller templates |
 | Player Name | Change your in-game name for CoD4R, CoD4x, IW4x, and Plutonium offline |
-| FPS and FOV | Set a 90 FPS cap and 90 FOV in the configs of MW1, MW2, MW3, WaW, BO1, and BO2 (all modes). Only those lines change. MW2 campaign also gets `thereisacow` and an F10 bind for FOV 90 (map a back paddle to F10 in Steam Input; DeckOps puts the lines back before each launch), and the MW2 and MW3 campaign Steam launch options cap the frame rate at 90 with DXVK. MW3 campaign FOV can't be set from the config in the 64-bit build, so DeckOps holds it at 90 while the game runs (experimental, see `fovwatch.py`). |
+| FPS and FOV | Set a 90 FPS cap and 90 FOV in the configs of MW1, MW2, MW3, WaW, BO1, and BO2 (all modes). Only those lines change. In the MW2 and MW3 campaigns (64-bit Steam builds) the game ignores both settings in the config, so DeckOps runs the game under ovwatch.py, which holds `cg_fov` and `com_maxfps` at 90 in the running game (experimental). MW2 campaign also still gets 	hereisacow and an F10 bind as a fallback (map a back paddle to F10 in Steam Input). A DXVK frame cap for those two launch options is available as the dxvk_frame_cap setting in deckops.json (off by default). |
 | Shader Cache (LCD only) | Clear shader cache data for all set-up games |
 | Check for Updates | Check for and apply DeckOps updates |
 | Full Uninstall | Remove DeckOps-managed files while preserving save backups and unrelated Plutonium data. If Stable is also installed, shared game files and Steam settings stay in place. |
