@@ -28,7 +28,7 @@ from ui_constants import (
     _show_preflight,
     ALL_GAMES, KEY_CLIENT, KEY_MODE_LABEL,
     _active_keys, _active_client, _active_appid,
-    SP_IMAGE_URLS, CARD_COLS, CARD_MAX_W,
+    SP_IMAGE_URLS, IMG_RATIO, CARD_COLS, CARD_MAX_W,
     HEROES_DIR, PROJECT_ROOT,
     _music_volume, _music_enabled,
     _set_audio_volume, _set_audio_enabled, _start_audio, _kill_audio,
@@ -44,7 +44,9 @@ _log = get_logger(__name__)
 # Library cards are wider than the old five-column portrait tiles, while
 # still allowing three columns at 800px and five at 1280px.
 _LIBRARY_CARD_W = max(CARD_MAX_W, 220)
-_LIBRARY_COVER_H = 128
+# Steam library covers are portrait (2:3). Give them their full height rather
+# than turning them into shallow banners that hide most of the artwork.
+_LIBRARY_COVER_H = round(_LIBRARY_CARD_W * IMG_RATIO)
 
 
 # VERSION is per install; the repo still tracks an old copy from 2026-05
@@ -230,8 +232,12 @@ class ManagementCard(QFrame):
         self._img.setStyleSheet("color:#8492A0;background:transparent;border:none;")
         self._dim_art = state != "Ready"
 
-        # Client badge — overlaid top-left on the image
-        self._client_badge = QPushButton(client.split(" + ")[0].upper(), img_container)
+        # Keep the client label outside the artwork: even its corner should
+        # remain visible, rather than being covered by a badge overlay.
+        badge_strip = QWidget()
+        badge_strip.setFixedHeight(28)
+        badge_strip.setStyleSheet(f"background:{C_CARD};border:none;")
+        self._client_badge = QPushButton(client.split(" + ")[0].upper(), badge_strip)
         self._client_badge.setToolTip(client)
         self._client_badge.setFont(font(9, True)); self._client_badge.setEnabled(False)
         self._client_badge.setStyleSheet(
@@ -242,6 +248,7 @@ class ManagementCard(QFrame):
         self._client_badge.raise_()
 
         self._img_container = img_container
+        lay.addWidget(badge_strip)
         lay.addWidget(img_container)
 
         info = QWidget()
@@ -345,16 +352,16 @@ class ManagementCard(QFrame):
         self._scale_image()
 
     def _scale_image(self):
-        # Portrait Steam art is cropped to the fixed cover. A missing or broken
-        # cached file leaves the deliberate text placeholder visible instead.
+        # Contain, never crop: both Steam's portrait covers and the local
+        # Offline Mode artwork remain fully visible at their native ratio.
+        # A missing or broken cached file retains the text placeholder.
         if self._raw_pixmap and not self._raw_pixmap.isNull():
             w, h = self._img.width(), self._img.height()
             scaled = self._raw_pixmap.scaled(
-                w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                w, h, Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
             self._img.setText("")
-            self._img.setPixmap(scaled.copy((scaled.width() - w) // 2,
-                                            (scaled.height() - h) // 2, w, h))
+            self._img.setPixmap(scaled)
             if self._dim_art and self._img.graphicsEffect() is None:
                 effect = QGraphicsOpacityEffect(self._img)
                 effect.setOpacity(0.65)

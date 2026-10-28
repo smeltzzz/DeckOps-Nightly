@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from qt import QApplication, QStackedWidget, QWidget, QPushButton
+    from qt import QApplication, QStackedWidget, QWidget, QPushButton, QPixmap, QColor, Qt
     import ui_manage
 except ImportError:
     QApplication = None
@@ -117,6 +117,8 @@ class ManagementUITests(unittest.TestCase):
                         self.assertEqual(card._img_container.height(), ui_manage._LIBRARY_COVER_H)
                         badge_bottom = card._client_badge.mapTo(
                             card, card._client_badge.rect().bottomLeft()).y()
+                        cover_top = card._img_container.mapTo(
+                            card, card._img_container.rect().topLeft()).y()
                         cover_bottom = card._img_container.mapTo(
                             card, card._img_container.rect().bottomLeft()).y()
                         title_top = card._title_label.mapTo(
@@ -133,7 +135,7 @@ class ManagementUITests(unittest.TestCase):
                             card, card._summary_label.rect().bottomLeft()).y()
                         actions_top = card._btn_bar.mapTo(
                             card, card._btn_bar.rect().topLeft()).y()
-                        self.assertLess(badge_bottom, cover_bottom)
+                        self.assertLess(badge_bottom, cover_top)
                         self.assertGreater(title_top, cover_bottom, (card.height(), card.sizeHint().height(), card._img_container.geometry(), card._title_label.geometry(), card._btn_bar.geometry()))
                         self.assertGreater(status_top, title_bottom)
                         self.assertGreater(summary_top, status_bottom)
@@ -144,9 +146,11 @@ class ManagementUITests(unittest.TestCase):
                             art = card._img.pixmap()
                             self.assertIsNotNone(art)
                             self.assertFalse(art.isNull())
-                            self.assertEqual((art.width(), art.height()),
-                                             (ui_manage._LIBRARY_CARD_W,
-                                              ui_manage._LIBRARY_COVER_H))
+                            expected = card._raw_pixmap.scaled(
+                                ui_manage._LIBRARY_CARD_W, ui_manage._LIBRARY_COVER_H,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation)
+                            self.assertEqual(art.size(), expected.size())
                 for i, card in enumerate(cards):
                     for other in cards[i + 1:]:
                         self.assertFalse(card.geometry().intersects(other.geometry()),
@@ -161,6 +165,29 @@ class ManagementUITests(unittest.TestCase):
                     self.assertEqual(screen._columns, 5)
                     self.assertFalse(cards[0].geometry().intersects(cards[5].geometry()))
                 stack.close()
+
+    def test_game_covers_are_contained_without_cropping(self):
+        self.screen.set_installed({})
+        card = self.screen._cards[0]
+        self.assertEqual(ui_manage._LIBRARY_COVER_H,
+                         round(ui_manage._LIBRARY_CARD_W * ui_manage.IMG_RATIO))
+        self.assertEqual(card._img.alignment(), Qt.AlignmentFlag.AlignCenter)
+        for size in ((200, 400), (400, 200), (600, 900)):
+            with self.subTest(image=size):
+                source = QPixmap(*size)
+                source.fill(QColor("#C83232"))
+                card._raw_pixmap = source
+                card._scale_image()
+                visible = card._img.pixmap()
+                expected = source.scaled(
+                    ui_manage._LIBRARY_CARD_W, ui_manage._LIBRARY_COVER_H,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation)
+                self.assertEqual(visible.size(), expected.size())
+                self.assertLessEqual(visible.width(), card._img.width())
+                self.assertLessEqual(visible.height(), card._img.height())
+                self.assertTrue(visible.width() == card._img.width() or
+                                visible.height() == card._img.height())
 
     def test_columns_and_actions_fit_both_window_sizes(self):
         self.assertLessEqual(self.stack.width(), 800)
