@@ -1466,19 +1466,22 @@ class ConfigureScreen(QWidget):
 
         # ── Left: FPS and FOV ─────────────────────────────────────────────
         _head(left, "FPS and FOV")
-        _desc(left, "Sets 90 FOV and a 90 FPS cap in the configs of MW1, MW2, MW3, WaW, BO1 and BO2 "
-                    "(all modes). Only those lines change. Steam can stay open.")
+        _desc(left, "Writes 90 FOV and a 90 FPS limit into the configs of MW1, MW2, MW3, WaW, BO1 and "
+                    "BO2 (every mode). Nothing else in those files changes. Steam can stay open.")
         fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
         left.addWidget(fps_btn)
-        _desc(left, "MW2 and MW3 campaign: DeckOps holds FOV at 90 while the game runs, and DXVK caps "
-                    "the frame rate at 90 in the Steam launch option, because these builds have no "
-                    "in-game cap. The button below closes Steam. MW2 also keeps an F10 key for FOV 90: "
-                    "map a back paddle to F10 in Steam Input.")
+        left.addSpacing(6)
+        left.addWidget(_lbl("MW2 and MW3 campaign", 12, "#AAA", bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(left, "These builds ignore FOV and FPS in the config. DeckOps holds FOV at 90 while the "
+                    "game runs, and the button below limits the frame rate to 90 with DXVK. "
+                    "Changing it closes Steam.")
         self._cap_btn = _btn("", C_DARK_BTN, size=12, h=40)
         self._cap_btn.setFixedWidth(220); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
         self._refresh_cap_btn()
         left.addWidget(self._cap_btn)
+        _desc(left, "MW2 also has an F10 key that sets FOV 90 if you want a button: map a back "
+                    "paddle to F10 in Steam Input.")
 
         # ── Left: Shader Cache (LCD only) ─────────────────────────────────
         self._shader_row = QWidget()
@@ -1773,7 +1776,7 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _refresh_cap_btn(self):
-        self._cap_btn.setText("DXVK Frame Cap: " + ("On" if cfg.get_dxvk_frame_cap() else "Off"))
+        self._cap_btn.setText("MW2/MW3 FPS Limit: " + ("On" if cfg.get_dxvk_frame_cap() else "Off"))
 
     def _toggle_dxvk_cap(self):
         """Flip the setting, then run Repair Shortcuts, which closes Steam and rewrites
@@ -1798,7 +1801,7 @@ class ConfigureScreen(QWidget):
                 installed = _find_all(steam_root) if steam_root else {}
                 count = set_fps_fov(steam_root, installed,
                                     on_progress=lambda msg: _log.info("fps/fov: %s", msg.strip()))
-                s.log.emit(f"✓  90 FPS / 90 FOV set in {count} config file(s). "
+                s.log.emit(f"✓  Wrote 90 FOV and 90 FPS to {count} config file(s). "
                            "Close the games first if they are running.")
             except Exception as ex:
                 _log.error("fps/fov failed", exc_info=True)
