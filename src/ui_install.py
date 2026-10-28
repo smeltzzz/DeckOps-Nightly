@@ -8,7 +8,7 @@ Extracted from ui_qt.py — all hardcoded stack indices replaced with named look
 import html, os, subprocess, threading, time
 
 from qt import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLayout,
     QLabel, QCheckBox, QProgressBar, QPushButton, QButtonGroup,
     QPlainTextEdit, QFileDialog, QMessageBox,
 )
@@ -20,8 +20,8 @@ import inhibit
 from net import DownloadError
 
 from ui_constants import (
-    C_IW, C_TREY, C_DIM, C_DARK_BTN, C_BLUE_BTN, C_CARD,
-    font, _btn, _lbl, _title_block, _header_bar, _badge, _log_to_file, _log_html, _copy_log_to_clipboard, _Sigs,
+    C_BG, C_IW, C_TREY, C_DIM, C_DARK_BTN, C_BLUE_BTN, C_CARD,
+    font, _btn, _lbl, _title_block, _header_bar, _log_to_file, _log_html, _copy_log_to_clipboard, _Sigs,
     ALL_GAMES, KEY_CLIENT, KEY_MODE_LABEL,
     _active_keys, _active_client,
     _show_preflight,
@@ -34,18 +34,15 @@ class WelcomeScreen(QWidget):
     def __init__(self, stack):
         super().__init__(); self.stack=stack; self.installed={}; self.screen_name = "WelcomeScreen"
         self.steam_installed={}; self.own_installed={}; self.steam_root=""
-        lay = QVBoxLayout(self); lay.setContentsMargins(60,30,60,30); lay.setSpacing(12)
-        # Smaller title than other screens: the results + notice need the vertical room at 800px
-        _title_block(lay, main_size=40)
-        lay.addSpacing(6)
+        lay = QVBoxLayout(self); lay.setContentsMargins(24,12,24,16); lay.setSpacing(8)
+        _title_block(lay, main_size=30)
         self.status = _lbl("Scanning for games...", 14, C_DIM)
         lay.addWidget(self.status)
         self.bar = QProgressBar(); self.bar.setMaximum(100); self.bar.setTextVisible(False)
         self.bar.setFixedHeight(14)
         bw = QHBoxLayout(); bw.addStretch(); bw.addWidget(self.bar,6); bw.addStretch()
         lay.addLayout(bw)
-        lay.addSpacing(10)
-        self.results = _lbl("", 13, C_IW)
+        self.results = _lbl("", 13, C_IW, align=Qt.AlignmentFlag.AlignLeft)
         self.results.setTextFormat(Qt.TextFormat.RichText)
         self.notice = _lbl(
             "Before you continue:\n"
@@ -59,22 +56,24 @@ class WelcomeScreen(QWidget):
             f"color:{C_TREY};background:#2A1A08;border:1px solid {C_TREY};"
             "border-radius:8px;padding:10px 16px;")
         self.notice.setVisible(False)
-        # Games list and notice side by side so neither gets squeezed
-        mid = QHBoxLayout(); mid.setSpacing(30)
-        mid.addWidget(self.results, 1, Qt.AlignmentFlag.AlignTop)
-        mid.addWidget(self.notice, 1, Qt.AlignmentFlag.AlignTop)
-        lay.addLayout(mid)
-        lay.addStretch()
+        # Results and safety advice can scroll independently of the navigation.
+        self.details = QScrollArea(); self.details.setWidgetResizable(True)
+        self.details.setFrameShape(QScrollArea.Shape.NoFrame)
+        details_body = QWidget(); mid = QVBoxLayout(details_body)
+        mid.setContentsMargins(4, 4, 4, 4); mid.setSpacing(8)
+        mid.addWidget(self.results); mid.addWidget(self.notice); mid.addStretch()
+        self.details.setWidget(details_body)
+        lay.addWidget(self.details, 1)
         self._scanning = False
-        self.back = _btn("<< Back", C_DARK_BTN, h=52); self.back.setFixedWidth(180)
+        self.back = _btn("Back", C_DARK_BTN, size=11, h=42)
         self.back.clicked.connect(self._go_back)
-        self.retry = _btn("Scan Again", C_DARK_BTN, h=52); self.retry.setFixedWidth(200)
+        self.retry = _btn("Scan Again", C_DARK_BTN, size=11, h=42)
         self.retry.clicked.connect(self._start_scan)
-        self.cont = _btn("Continue >>", C_IW, h=52)
-        self.cont.setFixedWidth(260); self.cont.setVisible(False)
+        self.cont = _btn("Continue >>", C_IW, size=11, h=42)
+        self.cont.setVisible(False)
         self.cont.clicked.connect(self._go_next)
-        cw = QHBoxLayout(); cw.setSpacing(16); cw.addStretch()
-        cw.addWidget(self.back); cw.addWidget(self.retry); cw.addWidget(self.cont); cw.addStretch()
+        cw = QHBoxLayout(); cw.setSpacing(8)
+        cw.addWidget(self.back); cw.addWidget(self.retry); cw.addWidget(self.cont, 1)
         lay.addLayout(cw)
 
     def showEvent(self, e):
@@ -99,10 +98,12 @@ class WelcomeScreen(QWidget):
 
     def _do_scan(self):
         root, merged = "", {}
+        self._scan_error = False
         try:
             root = find_steam_root() or ""
             if root: merged = find_all_games(root)
         except Exception as ex:
+            self._scan_error = True
             _log_to_file(f"[WelcomeScreen] scan failed: {ex}")
         self.steam_root, self._merged = root, merged
         self._s.done.emit(bool(root))
@@ -110,6 +111,15 @@ class WelcomeScreen(QWidget):
     def _on_scanned(self, steam_found):
         self._scanning = False
         self.back.setVisible(True)
+        if getattr(self, "_scan_error", False):
+            self.bar.setValue(100); self.retry.setVisible(True)
+            self.status.setText("Game scan couldn't finish. Try again" +
+                                (", or choose a game folder manually." if self.steam_root else
+                                 " after opening Steam once."))
+            self.status.setStyleSheet(f"color:{C_TREY};background:transparent;")
+            if cfg.is_first_run() and self.steam_root:
+                self.cont.setText("Choose Folder >>"); self.cont.setVisible(True)
+            return
         if not steam_found:
             self.bar.setValue(100); self.retry.setVisible(True)
             self.status.setText("Steam not found. Install Steam and open it once, then scan again.")
@@ -143,22 +153,19 @@ class WelcomeScreen(QWidget):
             else:
                 self.status.setText("No supported games found.")
             return
-        unique = len({g["name"].split(" - ")[0].split(" (")[0] for g in self.installed.values()})
+        unique = len({gd["base"] for gd in ALL_GAMES
+                      if any(k in self.installed for k in _active_keys(gd))})
         self.status.setText(f"Found {unique} supported game(s)!")
         self.status.setStyleSheet(f"color:{C_IW};background:transparent;")
         lines = []
-        seen_steam = set()
-        for g in sorted(self.steam_installed.values(), key=lambda x: x.get("order",99)):
-            base = g["name"].split(" - ")[0].split(" (")[0]
-            if base not in seen_steam:
-                seen_steam.add(base)
-                lines.append(f'<span style="color:{C_IW}">{base} (Steam)</span>')
-        seen_own = set()
-        for g in sorted(self.own_installed.values(), key=lambda x: x.get("order",99)):
-            base = g["name"].split(" - ")[0].split(" (")[0]
-            if base not in seen_own:
-                seen_own.add(base)
-                lines.append(f'<span style="color:{C_TREY}">{base} (Non-Steam)</span>')
+        for source, games, color in (("Steam", self.steam_installed, C_IW),
+                                     ("Non-Steam", self.own_installed, C_TREY)):
+            for key, game in sorted(games.items(), key=lambda item: item[1].get("order", 99)):
+                gd = next((g for g in ALL_GAMES if key in _active_keys(g)), None)
+                name = gd["base"] if gd else game.get("name", key)
+                mode = SetupScreen._mode_name(key)
+                lines.append(f'<span style="color:{color}">'
+                             f'{html.escape(name)} · {html.escape(mode)} · {source}</span>')
         self.results.setText("<br>".join(lines)); self.cont.setVisible(True)
         self.notice.setVisible(cfg.is_first_run())
 
@@ -173,6 +180,7 @@ class WelcomeScreen(QWidget):
                             if k not in self.steam_installed}
             s.own_installed   = {**self.own_installed, **folder_found}
             s.steam_root      = self.steam_root
+            s._from_manage = False
             go_to(self.stack, "SetupScreen")
         else:
             get_screen(self.stack, "ManagementScreen").set_installed(self.installed)
@@ -187,7 +195,10 @@ class SetupScreen(QWidget):
     def __init__(self, stack):
         super().__init__(); self.stack=stack; self.screen_name = "SetupScreen"
         self.steam_installed={}; self.own_installed={}; self.steam_root=""
+        self._from_manage = False  # set by ManagementScreen._add_games on entry
         self._checks={}
+        self._choices = {}  # key -> explicit choice, including choices across Back and folder scans
+        self._extra_choices = {}
         self._extra_paths = []
         self._folder_found = {}
         self._cod4_choice = "cod4r"
@@ -200,43 +211,51 @@ class SetupScreen(QWidget):
 
         # ── Content area ───────────────────────────────────────────────
         content = QWidget()
-        clay = QVBoxLayout(content); clay.setContentsMargins(60,20,60,40); clay.setSpacing(14)
+        clay = QVBoxLayout(content); clay.setContentsMargins(16,10,16,12); clay.setSpacing(6)
         clay.addWidget(_lbl(
-            "Choose which games to set up. DeckOps creates the Proton prefixes for you.", 13, C_DIM))
-        selrow = QHBoxLayout(); selrow.setSpacing(8); selrow.addStretch()
+            "Choose games and modes. DeckOps creates their Proton prefixes.", 11, C_DIM,
+            align=Qt.AlignmentFlag.AlignLeft))
+        selrow = QHBoxLayout(); selrow.setSpacing(8)
+        selrow.addWidget(_lbl("Scroll for more games", 10, C_DIM,
+                              align=Qt.AlignmentFlag.AlignLeft, wrap=False))
+        selrow.addStretch()
         for _txt, _on in (("Select All", True), ("Select None", False)):
-            _b = _btn(_txt, C_DARK_BTN, size=10, h=30); _b.setFixedWidth(110)
+            _b = _btn(_txt, C_DARK_BTN, size=10, h=32)
+            _b.setMinimumWidth(max(110, _b.sizeHint().width()))
             _b.clicked.connect(lambda _c, v=_on: self._set_all(v))
             selrow.addWidget(_b)
         clay.addLayout(selrow)
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        # Two columns (IW/SHG | Treyarch) so the whole list fits at 1280x800 without scrolling
-        self._lw = QWidget(); cols = QHBoxLayout(self._lw)
-        cols.setContentsMargins(0,0,0,0); cols.setSpacing(24)
-        self._cols = {}
-        for dev, title, color in (("iw", "INFINITY WARD / SLEDGEHAMMER", C_IW), ("trey", "TREYARCH", C_TREY)):
-            col = QVBoxLayout(); col.setSpacing(0)
-            col.addWidget(_lbl(title, 11, color, bold=True, align=Qt.AlignmentFlag.AlignLeft, wrap=False))
-            col.addStretch()
-            cols.addLayout(col, 1); self._cols[dev] = col
-        scroll.setWidget(self._lw); clay.addWidget(scroll, stretch=1)
-        # Extras: optional add-ons as tiles under both columns, filled by _build_extras
-        self._extras = QWidget(); ex = QVBoxLayout(self._extras); ex.setContentsMargins(0,0,0,0); ex.setSpacing(8)
-        ex.addWidget(_lbl("EXTRAS", 11, C_DIM, bold=True, align=Qt.AlignmentFlag.AlignLeft, wrap=False))
-        self._tiles = QHBoxLayout(); self._tiles.setSpacing(12); ex.addLayout(self._tiles)
-        clay.addWidget(self._extras)
+        # One fluid column: the mode labels never compete with fixed-width badges.
+        # Extras live in the same scroll area, leaving navigation visible at 800x500.
+        self._lw = QWidget(); self._list = QVBoxLayout(self._lw)
+        self._list.setContentsMargins(0,0,4,0); self._list.setSpacing(6)
+        # QScrollArea otherwise forces this widget down to the viewport height,
+        # compressing every game row below its minimum height under the app QSS.
+        self._list.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self._list.addWidget(_lbl("INFINITY WARD / SLEDGEHAMMER · TREYARCH", 10, C_DIM,
+                                  bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        self._extras = QWidget(); ex = QVBoxLayout(self._extras)
+        ex.setContentsMargins(0,4,0,0); ex.setSpacing(6)
+        ex.addWidget(_lbl("OPTIONAL EXTRAS", 10, C_DIM, bold=True,
+                          align=Qt.AlignmentFlag.AlignLeft))
+        self._tiles = QVBoxLayout(); self._tiles.setSpacing(6); ex.addLayout(self._tiles)
+        self._list.addWidget(self._extras)
+        self._list.addStretch()
+        scroll.setWidget(self._lw); self.scroll = scroll
+        clay.addWidget(scroll, stretch=1)
 
-        self.warning = _lbl("", 12, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
+        self.warning = _lbl("", 10, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
         self.warning.setVisible(False); clay.addWidget(self.warning)
-        brow = QHBoxLayout(); brow.setSpacing(16)
-        back = _btn("<< Back", C_DARK_BTN, h=52); back.setFixedWidth(180)
-        back.clicked.connect(lambda: go_to(self.stack, "WelcomeScreen"))
-        self._folder_btn = _btn("Choose Folder", C_DARK_BTN, h=52)
-        self._folder_btn.setFixedWidth(200)
+        brow = QHBoxLayout(); brow.setSpacing(6)
+        back = _btn("Back", C_DARK_BTN, size=10, h=40)
+        self.back = back
+        back.clicked.connect(self._go_back)
+        self._folder_btn = _btn("Choose Folder", C_DARK_BTN, size=10, h=40)
         self._folder_btn.clicked.connect(self._pick_folder)
-        self.inst_btn = _btn("Install Selected >>", C_IW, h=52)
+        self.inst_btn = _btn("Review and install →", C_IW, size=10, h=40)
         self.inst_btn.clicked.connect(self._go_install)
         brow.addWidget(back); brow.addWidget(self._folder_btn)
         brow.addWidget(self.inst_btn, stretch=1); clay.addLayout(brow)
@@ -249,6 +268,9 @@ class SetupScreen(QWidget):
         self.warning.setVisible(False)
         self._build()
 
+    def _go_back(self):
+        go_to(self.stack, "ManagementScreen" if self._from_manage else "WelcomeScreen")
+
     def _set_all(self, on):
         """Only touches rows the user could tick anyway."""
         for cb, _gd, _src in self._checks.values():
@@ -256,27 +278,20 @@ class SetupScreen(QWidget):
                 cb.setChecked(on)
 
     def _add_row(self, gd, widget):
-        col = self._cols["iw" if gd["dev"] == "iw" else "trey"]
-        col.insertWidget(col.count() - 1, widget)
+        self._list.insertWidget(self._list.indexOf(self._extras), widget)
 
     @staticmethod
-    def _short_name(base):
-        return base.replace("Call of Duty 4: Modern Warfare", "Modern Warfare 1").replace("Call of Duty: ", "")
+    def _mode_name(key):
+        return {"MP": "Multiplayer", "SP": "Singleplayer", "S/Z": "Solo / Zombies",
+                "ZM": "Zombies", "DS": "Dedicated Server"}.get(KEY_MODE_LABEL.get(key), key)
 
     def _build(self):
-        for col in self._cols.values():
-            # keep the column title (first) and trailing stretch (last)
-            while col.count() > 2:
-                item = col.takeAt(1)
-                if item.widget(): item.widget().deleteLater()
+        while self._list.indexOf(self._extras) > 1:
+            item = self._list.takeAt(1)
+            if item.widget(): item.widget().deleteLater()
         self._checks.clear()
         self._iw4x_dlc_cb = None; self._iw4x_dlc_present = False
         self._zd_cb = None; self._lan_cb = None
-
-        MAX_SLOTS  = 3
-        SLOT_W     = 28
-        SLOT_GAP   = 8
-        CHECKS_W   = MAX_SLOTS * SLOT_W + (MAX_SLOTS - 1) * SLOT_GAP
 
         all_installed = {**self.steam_installed, **self.own_installed}
 
@@ -290,80 +305,47 @@ class SetupScreen(QWidget):
             if not ik:
                 _iw5_keys = {"iw5mp", "iw5mp_ds"}
                 if _iw5_keys.intersection(keys) and not _iw5_keys.intersection(all_installed):
-                    self._add_mw3_free_row(gd, CHECKS_W)
+                    self._add_mw3_free_row(gd)
                     continue
             # Games that aren't found still show, greyed out, so users know DeckOps supports them
 
-            color  = C_IW if gd["dev"] == "iw" else C_TREY
-            client = _active_client(gd)
+            color = C_IW if gd["dev"] == "iw" else C_TREY
 
-            cw = QWidget()
-            outer = QVBoxLayout(cw); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(4)
-            row = QHBoxLayout(); row.setSpacing(10)
-
-            checks_widget = QWidget()
-            checks_widget.setFixedWidth(CHECKS_W)
-            checks_layout = QHBoxLayout(checks_widget)
-            checks_layout.setContentsMargins(0, 0, 0, 0)
-            checks_layout.setSpacing(SLOT_GAP)
-
-            for key in keys:
-                is_steam = key in self.steam_installed
-                is_own   = key in self.own_installed
-                installed = is_steam or is_own
-                source = "own" if is_own and not is_steam else "steam"
-                already_done = cfg.is_game_setup_for_source(key, source)
-
-                slot = QWidget()
-                slot.setFixedWidth(SLOT_W)
-                slot_lay = QVBoxLayout(slot)
-                slot_lay.setContentsMargins(0, 0, 0, 0)
-                slot_lay.setSpacing(2)
-                slot_lay.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
-                cb = QCheckBox()
-                if not installed:
-                    cb.setChecked(False); cb.setEnabled(False)
-                elif already_done:
-                    cb.setChecked(False)
-                else:
-                    cb.setChecked(True)
-
-                mode_color = C_TREY if not installed else "#666677"
-                mode_lbl = _lbl(KEY_MODE_LABEL.get(key, key), 10, mode_color,
-                                 align=Qt.AlignmentFlag.AlignHCenter, wrap=False)
-
-                slot_lay.addWidget(cb, alignment=Qt.AlignmentFlag.AlignHCenter)
-                slot_lay.addWidget(mode_lbl)
-                checks_layout.addWidget(slot)
-                self._checks[key] = (cb, gd, source)
-
-            for _ in range(MAX_SLOTS - len(keys)):
-                spacer = QWidget()
-                spacer.setFixedSize(SLOT_W, 38)
-                spacer.setStyleSheet("background: transparent;")
-                checks_layout.addWidget(spacer)
-
-            row.addWidget(checks_widget)
-            row.addWidget(_lbl(self._short_name(gd["base"]), 13, "#FFF" if ik else "#555566",
-                               align=Qt.AlignmentFlag.AlignLeft, wrap=False), stretch=1)
-
+            cw = QWidget(); cw.setObjectName("gameRow")
+            cw.setStyleSheet(f"#gameRow{{background:{C_CARD};border-radius:6px;}}")
+            outer = QVBoxLayout(cw); outer.setContentsMargins(10, 6, 10, 6); outer.setSpacing(3)
             row_has_own = any(k in self.own_installed and k not in self.steam_installed for k in ik)
             row_has_steam = any(k in self.steam_installed for k in ik)
-            if not ik:
-                src_text, src_color = "NOT FOUND", C_DARK_BTN
-            elif row_has_own and row_has_steam:
-                src_text, src_color = "BOTH", C_TREY
-            elif row_has_own:
-                src_text, src_color = "OWN", C_TREY
-            else:
-                src_text, src_color = "STEAM", C_IW
-            row.addWidget(_badge(src_text, src_color, 84, h=24, size=9, radius=4))
-            row.addWidget(_badge(client.upper(), color, 170, h=28, size=9))
-            outer.addLayout(row)
-
-            # Options sit under the row, indented past the checkbox column
-            opts = QVBoxLayout(); opts.setContentsMargins(CHECKS_W + 10, 0, 0, 0); opts.setSpacing(4)
+            source_text = ("Steam + Non-Steam" if row_has_own and row_has_steam else
+                           "Non-Steam" if row_has_own else "Steam" if row_has_steam else "Not found")
+            title = _lbl(gd["base"], 12, color if ik else C_DIM, bold=True,
+                         align=Qt.AlignmentFlag.AlignLeft)
+            title.setAccessibleName(gd["base"])
+            outer.addWidget(title)
+            outer.addWidget(_lbl(f"{source_text} · {_active_client(gd)}", 10, C_DIM,
+                                 align=Qt.AlignmentFlag.AlignLeft))
+            modes = QHBoxLayout(); modes.setSpacing(12)
+            for key in keys:
+                is_steam = key in self.steam_installed
+                is_own = key in self.own_installed
+                installed = is_steam or is_own
+                source = "own" if is_own and not is_steam else "steam"
+                mode = self._mode_name(key)
+                cb = QCheckBox(mode)
+                mode_source = "Steam" if is_steam else "Non-Steam" if is_own else "Not found"
+                cb.setAccessibleName(f"{gd['base']} · {mode} · {mode_source}")
+                cb.setToolTip(cb.accessibleName())
+                cb.setFont(font(10))
+                cb.setChecked(installed and self._choices.get(
+                    key, not cfg.is_game_setup_for_source(key, source)))
+                cb.setEnabled(installed)
+                if installed:
+                    cb.toggled.connect(lambda checked, k=key: self._choices.__setitem__(k, checked))
+                modes.addWidget(cb)
+                self._checks[key] = (cb, gd, source)
+            modes.addStretch()
+            outer.addLayout(modes)
+            opts = QVBoxLayout(); opts.setContentsMargins(0, 0, 0, 0); opts.setSpacing(3)
             self._row_options(opts, keys, all_installed)
             outer.addLayout(opts)
             self._add_row(gd, cw)
@@ -387,18 +369,21 @@ class SetupScreen(QWidget):
             if checked is None and not missing:
                 v.addWidget(_lbl(f"{title}: Already Installed", 12, C_DIM, bold=True, align=Qt.AlignmentFlag.AlignLeft))
             else:
-                cb = QCheckBox(title); cb.setFont(font(12, True)); cb.setChecked(bool(checked) and not missing)
+                cb = QCheckBox(title); cb.setFont(font(11, True))
+                cb.setChecked(self._extra_choices.get(title, bool(checked)) and not missing)
+                if not missing:
+                    cb.toggled.connect(lambda on, name=title: self._extra_choices.__setitem__(name, on))
                 cb.setStyleSheet("QCheckBox{color:#FFF;background:transparent;} QCheckBox:disabled{color:#666677;}")
                 v.addWidget(cb)
             n = _lbl(f"{note} \u00b7 {missing}" if missing else note, 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft); v.addWidget(n)
             if missing:
-                cb.setEnabled(False); self._tiles.addWidget(w, 1)
+                cb.setEnabled(False); self._tiles.addWidget(w)
                 return None
             gcb = self._checks.get(game, (None,))[0]
             if cb and gcb:
                 def sync(on): cb.setEnabled(on); n.setText(note if on else f"{note} \u00b7 {needs}")
                 sync(gcb.isChecked()); gcb.toggled.connect(sync)
-            self._tiles.addWidget(w, 1)
+            self._tiles.addWidget(w)
             return cb
 
         # Offline Mode: one setting for every Plutonium game, so never greyed out
@@ -458,22 +443,21 @@ class SetupScreen(QWidget):
                 b = QPushButton(text); b.setCheckable(True); b.setFont(font(10, True)); b.setFixedHeight(34)
                 b.setStyleSheet(
                     f"QPushButton{{background:{C_DARK_BTN};color:#AAA;border:none;border-radius:6px;padding:0 12px;}}"
-                    f"QPushButton:checked{{background:{C_IW};color:#FFF;}}")
+                    f"QPushButton:checked{{background:{C_IW};color:{C_BG};}}")
                 grp.addButton(b); b.setChecked(self._cod4_choice == val)
                 b.toggled.connect(lambda on, v_=val: on and (setattr(self, "_cod4_choice", v_), note.setText(notes[v_])))
                 h.addWidget(b)
             h.addStretch(); v.addLayout(h); v.addWidget(note)
             lay.addWidget(w); _bind("cod4mp", w)
 
-    def _add_mw3_free_row(self, gd, checks_w):
-        cw = QWidget()
-        row = QHBoxLayout(cw); row.setSpacing(10); row.setContentsMargins(6, 6, 6, 6)
-        btn = _btn("Get Free", C_BLUE_BTN, size=11, h=40); btn.setFixedWidth(checks_w)
+    def _add_mw3_free_row(self, gd):
+        cw = QWidget(); row = QHBoxLayout(cw)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.addWidget(_lbl(f"{gd['base']} · Not found", 11, C_DIM,
+                           align=Qt.AlignmentFlag.AlignLeft), 1)
+        btn = _btn("Get Free MW3 Server", C_BLUE_BTN, size=10, h=36)
         btn.clicked.connect(self._add_mw3_ds)
         row.addWidget(btn)
-        row.addWidget(_lbl(self._short_name(gd["base"]), 13, "#555566", align=Qt.AlignmentFlag.AlignLeft, wrap=False), stretch=1)
-        color = C_IW if gd["dev"] == "iw" else C_TREY
-        row.addWidget(_badge(_active_client(gd).upper(), color, 170, h=28, size=9))
         self._add_row(gd, cw)
 
     def _add_mw3_ds(self):
@@ -549,7 +533,7 @@ class SetupScreen(QWidget):
             own = {k: v for k, v in own.items() if k in lcd_allowed}
         added = len(set(own) - set(self.own_installed))
         self.own_installed = own
-        self._folder_found = own        # WelcomeScreen merges these back after Back -> Continue
+        self._folder_found = own  # rescans all saved folders; don't keep removed games
         self._folder_btn.setEnabled(True); self.inst_btn.setEnabled(True)
         self._build()
         self.warning.setText(f"Found {added} new game(s)." if added else "No new supported games in that folder.")
@@ -574,6 +558,32 @@ class SetupScreen(QWidget):
             return True
         return _show_preflight(self, checks)
 
+    def _review_install(self, steam_selected, own_selected):
+        rows = [(key, gd, "Steam") for key, gd, _ in steam_selected]
+        rows += [(key, gd, "Non-Steam") for key in own_selected for gd in ALL_GAMES
+                 if key in _active_keys(gd)]
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Review installation")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        games = "<br>".join(
+            f"• {html.escape(gd['base'])} · {html.escape(self._mode_name(key))} "
+            f"({source})" for key, gd, source in rows)
+        extras = []
+        if self._iw4x_dlc_cb and self._iw4x_dlc_cb.isEnabled() and self._iw4x_dlc_cb.isChecked():
+            extras.append("IW4x DLC maps (~3 GB)")
+        if self._zd_cb and self._zd_cb.isEnabled() and self._zd_cb.isChecked():
+            extras.append("Zombies Declassified (~9 GB)")
+        if self._lan_cb:
+            extras.append("Plutonium Offline: " + ("on" if self._lan_cb.isChecked() else "off"))
+        msg.setText("<b>Set up these games and modes?</b><br><br>" + games +
+                    ("<br><br><b>Options:</b> " + html.escape(", ".join(extras)) if extras else "") +
+                    "<br><br>Downloads and game-file changes may take time. "
+                    "You can return to selection without losing your choices.")
+        start = msg.addButton("Start Installation", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("Back to Selection", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        return msg.clickedButton() is start
+
     def _go_install(self):
         steam_selected = []
         own_selected = {}
@@ -591,11 +601,15 @@ class SetupScreen(QWidget):
 
         if not self._preflight_ok(steam_selected, own_selected):
             return
+        if not self._review_install(steam_selected, own_selected):
+            return
 
         s = get_screen(self.stack, "InstallScreen")
         s.steam_selected = steam_selected
         s.own_selected = own_selected
         s.steam_root = self.steam_root
+        s._return_to_management = self._from_manage
+        s._selection_entry = True
         all_tuples = list(steam_selected)
         for _k, _g in own_selected.items():
             for _gd in ALL_GAMES:
@@ -639,6 +653,8 @@ class _BaseInstallScreen(QWidget):
         self._zd_accept = False
         self._return_to_management = False
         self._from_manage = False
+        self._selection_entry = False
+        self._from_setup_selection = False
         self.zd_choice = None
         self.offline_mode = None
         self._results = []
@@ -651,11 +667,11 @@ class _BaseInstallScreen(QWidget):
         lay.addWidget(_header_bar()[0])
 
         content = QWidget()
-        clay = QVBoxLayout(content); clay.setContentsMargins(80,20,80,60); clay.setSpacing(20)
+        clay = QVBoxLayout(content); clay.setContentsMargins(20,10,20,12); clay.setSpacing(6)
         self.cur = _lbl("Preparing...", 16, "#CCC"); clay.addWidget(self.cur)
         self.bar = QProgressBar(); self.bar.setMaximum(100); self.bar.setTextVisible(False)
         self.bar.setFixedHeight(22)
-        bw = QHBoxLayout(); bw.setContentsMargins(60,0,60,0); bw.addWidget(self.bar)
+        bw = QHBoxLayout(); bw.addWidget(self.bar)
         clay.addLayout(bw)
         self.stat = _lbl("", 13, C_IW); clay.addWidget(self.stat)
         self.iw5_qr_box = QWidget()
@@ -681,7 +697,7 @@ class _BaseInstallScreen(QWidget):
         qb.addWidget(self.iw5_qr_info)
         clay.addWidget(self.iw5_qr_box)
 
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFont(font(11))
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFont(font(10))
         self.log.setStyleSheet("QPlainTextEdit{color:#666677;background:transparent;border:none;padding:10px;}")
         clay.addWidget(self.log, stretch=1)
 
@@ -692,10 +708,9 @@ class _BaseInstallScreen(QWidget):
         clay.addLayout(lr)
 
         self.plut_warn = _lbl(
-            "⚠  LCD: Plutonium takes a while to download and launch.\n"
-            "Wait until it has fully loaded, you have logged in and you have closed its "
-            "window, then press the button below.",
-            12, C_TREY, align=Qt.AlignmentFlag.AlignCenter,
+            "Wait for Plutonium to finish downloading. Log in, close its window, "
+            "then confirm below. Do not continue while it is still open.",
+            11, C_TREY, align=Qt.AlignmentFlag.AlignCenter,
         )
         self.plut_warn.setStyleSheet(
             f"color:{C_TREY};background:#2A1A08;border:1px solid {C_TREY};"
@@ -705,16 +720,19 @@ class _BaseInstallScreen(QWidget):
         clay.addWidget(self.plut_warn)
 
         self.plut_btn = _btn("I've closed Plutonium  ✓", C_TREY, size=13, h=52)
-        self.plut_btn.setFixedWidth(460); self.plut_btn.setVisible(False)
+        self.plut_btn.setVisible(False)
         self.plut_btn.clicked.connect(self._confirm_plut)
         pw = QHBoxLayout(); pw.addStretch(); pw.addWidget(self.plut_btn); pw.addStretch()
         clay.addLayout(pw)
 
         self.iw5_dg_btn = _btn("Download complete, continue  ✓", C_IW, size=13, h=52)
-        self.iw5_dg_btn.setFixedWidth(460); self.iw5_dg_btn.setVisible(False)
+        self.iw5_dg_btn.setVisible(False)
         self.iw5_dg_btn.clicked.connect(self._confirm_iw5_dg)
         dw = QHBoxLayout(); dw.addStretch(); dw.addWidget(self.iw5_dg_btn); dw.addStretch()
         clay.addLayout(dw)
+        self.manual_step = _lbl("", 10, C_TREY, align=Qt.AlignmentFlag.AlignCenter)
+        self.manual_step.setVisible(False)
+        clay.addWidget(self.manual_step)
 
         self.zd_info = _lbl(
             "Zombies Declassified adds 10 classic Zombies maps to BO2 through Plutonium.\n"
@@ -728,33 +746,36 @@ class _BaseInstallScreen(QWidget):
         self.zd_info.setVisible(False)
         clay.addWidget(self.zd_info)
         self.zd_yes = _btn("Install Zombies Declassified (~9 GB)", C_IW, size=13, h=52)
-        self.zd_yes.setFixedWidth(460); self.zd_yes.setVisible(False)
+        self.zd_yes.setVisible(False)
         self.zd_yes.clicked.connect(lambda: self._confirm_zd(True))
         self.zd_skip = _btn("Skip", C_DARK_BTN, size=13, h=52)
-        self.zd_skip.setFixedWidth(200); self.zd_skip.setVisible(False)
+        self.zd_skip.setVisible(False)
         self.zd_skip.clicked.connect(lambda: self._confirm_zd(False))
         zw = QHBoxLayout(); zw.addStretch(); zw.addWidget(self.zd_yes); zw.addSpacing(12); zw.addWidget(self.zd_skip); zw.addStretch()
         clay.addLayout(zw)
 
         self.summary = _lbl("", 12, "#CCC", align=Qt.AlignmentFlag.AlignLeft)
-        self.summary.setTextFormat(Qt.TextFormat.RichText); self.summary.setVisible(False)
+        self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setStyleSheet(
             f"color:#CCC;background:#1A1A2A;border:1px solid {C_DIM};"
-            "border-radius:8px;padding:10px 16px;")
-        sw = QHBoxLayout(); sw.addStretch(); sw.addWidget(self.summary, 3); sw.addStretch()
-        clay.addLayout(sw)
+            "border-radius:8px;padding:8px 12px;")
+        self.summary_scroll = QScrollArea(); self.summary_scroll.setWidgetResizable(True)
+        self.summary_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.summary_scroll.setMaximumHeight(132)
+        self.summary_scroll.setWidget(self.summary)
+        self.summary_scroll.setVisible(False)
+        clay.addWidget(self.summary_scroll)
 
         self.retry_btn = _btn("Retry Failed", C_TREY, size=13, h=52)
-        self.retry_btn.setFixedWidth(280); self.retry_btn.setVisible(False)
+        self.retry_btn.setVisible(False)
         self.retry_btn.clicked.connect(self._retry_failed)
 
         self.cont_btn = _btn("Continue  >>", C_IW, size=13, h=52)
-        self.cont_btn.setFixedWidth(320); self.cont_btn.setVisible(False)
+        self.cont_btn.setVisible(False)
         self.cont_btn.clicked.connect(lambda: go_to(self.stack, "SetupCompleteScreen"))
-        cw = QHBoxLayout(); cw.addStretch(); cw.addWidget(self.retry_btn)
-        cw.addSpacing(12); cw.addWidget(self.cont_btn); cw.addStretch()
+        cw = QHBoxLayout(); cw.setSpacing(8)
+        cw.addWidget(self.retry_btn); cw.addWidget(self.cont_btn, 1)
         clay.addLayout(cw)
-        clay.addStretch()
         lay.addWidget(content, stretch=1)
 
         self._s = _Sigs()
@@ -790,6 +811,8 @@ class _BaseInstallScreen(QWidget):
         self._last_pct = min(max(int(p), self._last_pct), 100)
         self.bar.setValue(self._last_pct)
         if m: self.cur.setText(m)
+        if self._plan and self._phase_i >= 0:
+            self._update_stat()
 
     def _update_stat(self):
         if not self._plan: return
@@ -845,8 +868,7 @@ class _BaseInstallScreen(QWidget):
         self._pulse_timer.stop()
 
     def _show_plut_wait(self):
-        is_lcd = cfg.is_lcd()
-        self.plut_warn.setVisible(is_lcd)
+        self.plut_warn.setVisible(True)
         self.plut_btn.setVisible(True)
 
     def _hide_plut_wait(self):
@@ -856,11 +878,15 @@ class _BaseInstallScreen(QWidget):
     def _show_iw5_dg_wait(self, cmd, step_label):
         from depot_downgrade import copy_to_clipboard
         copy_to_clipboard(cmd)
+        self.manual_step.setText(f"{step_label}: command copied. Paste it in Steam Console, "
+                                 "wait for the download to finish, then continue.")
+        self.manual_step.setVisible(True)
         self.iw5_dg_btn.setText(f"{step_label} complete, continue  ✓")
         self.iw5_dg_btn.setVisible(True)
 
     def _hide_iw5_dg_wait(self):
         self.iw5_dg_btn.setVisible(False)
+        self.manual_step.setVisible(False)
 
     def _confirm_iw5_dg(self):
         self._iw5_dg_event.set()
@@ -883,7 +909,7 @@ class _BaseInstallScreen(QWidget):
         from depot_downgrade import qr_text_to_pixmap
         pm = qr_text_to_pixmap(qr_text, scale=8)
         if pm:
-            pm = pm.scaled(350, 350, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+            pm = pm.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
             self.iw5_qr_lbl.setPixmap(pm)
             self.iw5_qr_lbl.setFixedSize(pm.size())
         else:
@@ -1157,25 +1183,27 @@ class _BaseInstallScreen(QWidget):
                 r["status"] = status; r["reason"] = reason; return
 
     def _retryable(self):
-        return [r for r in self._results if r["status"] in ("failed", "pending")]
+        return [r for r in self._results if r["status"] in ("failed", "pending", "skipped")]
 
     def _render_summary(self):
         icons = {"ok": ("✓", C_IW), "failed": ("✗", C_TREY),
                  "skipped": ("–", "#777788"), "pending": ("–", "#777788")}
-        rows = []
+        counts = {status: sum(r["status"] == status for r in self._results)
+                  for status in ("ok", "failed", "skipped", "pending")}
+        rows = [f'<b>{counts["ok"]} ready · {counts["failed"]} failed · '
+                f'{counts["skipped"]} skipped · {counts["pending"]} not attempted</b>']
         for r in self._results:
             icon, col = icons.get(r["status"], icons["pending"])
-            label = html.escape(f"{r['name']} - {KEY_MODE_LABEL.get(r['key'], r['key'])}")
-            txt = f'<span style="color:{col}">{icon}&nbsp;&nbsp;{label}</span>'
-            if r["status"] == "failed" and r["reason"]:
-                txt += f'<span style="color:#777788"> - {html.escape(r["reason"][:120])}</span>'
-            elif r["status"] == "pending":
-                txt += '<span style="color:#777788"> - not attempted</span>'
-            elif r["status"] == "skipped":
-                txt += f'<span style="color:#777788"> - {html.escape(r["reason"] or "skipped")}</span>'
+            label = html.escape(f"{r['name']} · {SetupScreen._mode_name(r['key'])}")
+            state = {"ok": "ready", "failed": "failed", "skipped": "skipped",
+                     "pending": "not attempted"}.get(r["status"], "not attempted")
+            txt = f'<span style="color:{col}">{icon}&nbsp;&nbsp;{label} — {state}</span>'
+            if r["reason"]:
+                txt += f'<span style="color:{C_DIM}"> · {html.escape(r["reason"][:120])}</span>'
             rows.append(txt)
         self.summary.setText("<br>".join(rows))
         self.summary.setVisible(True)
+        self.summary_scroll.setVisible(True)
 
     def _retry_failed(self):
         keys = {r["key"] for r in self._retryable()}
@@ -1183,8 +1211,11 @@ class _BaseInstallScreen(QWidget):
         self.steam_selected = [(k, gd, g) for k, gd, g in (self.steam_selected or [])
                                if k in keys]
         self.own_selected = {k: g for k, g in self.own_selected.items() if k in keys}
-        # _return_to_management was consumed by the first run
+        # Entry flags were consumed by the first run; preserve them for a retry.
         self._return_to_management = self._from_manage
+        self._selection_entry = self._from_setup_selection
+        self.zd_choice = self._last_zd_choice
+        self.offline_mode = self._last_offline_mode
         self._reset_and_run()
 
     def _append_log(self, text):
@@ -1200,10 +1231,12 @@ class _BaseInstallScreen(QWidget):
     def _show_retry_dl_dialog(self, label, error_msg):
         msg = QMessageBox(self)
         msg.setWindowTitle(f"{label} — Download Failed")
+        msg.setTextFormat(Qt.TextFormat.RichText)
         msg.setText(
-            f"<b>{label}</b> download failed after multiple attempts.<br><br>"
-            f"Error: {error_msg}<br><br>"
-            f"Would you like to retry, download manually, or skip?"
+            f"<b>{html.escape(label)}</b> download failed after multiple attempts.<br><br>"
+            f"{html.escape(error_msg)}<br><br>"
+            "Retry now, download the file yourself, or skip this game. "
+            "A skipped game will appear in the final results and can be retried."
         )
         retry_btn = msg.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
         manual_btn = msg.addButton("Download Manually", QMessageBox.ButtonRole.ActionRole)
@@ -1230,11 +1263,11 @@ class _BaseInstallScreen(QWidget):
         msg.setWindowTitle(f"{label} — Download Failed")
         msg.setTextFormat(Qt.TextFormat.RichText)
         msg.setText(
-            f"<b>{label}</b> could not be downloaded automatically.<br><br>"
+            f"<b>{html.escape(label)}</b> could not be downloaded automatically.<br><br>"
             f'Download it manually here:<br>'
-            f'<a href="{url}">{url}</a><br><br>'
-            f'Then place <b>{filename}</b> in:<br>'
-            f'<code>{dest_folder}</code><br><br>'
+            f'<a href="{html.escape(url, quote=True)}">{html.escape(url)}</a><br><br>'
+            f'Then place <b>{html.escape(filename)}</b> in:<br>'
+            f'<code>{html.escape(dest_folder)}</code><br><br>'
             f'Click <b>Open Folder</b> to open the destination, then '
             f'<b>I\'ve Placed It</b> when the file is in place.'
         )
@@ -1264,6 +1297,19 @@ class _BaseInstallScreen(QWidget):
                 self._manual_dl_event.set()
                 return
 
+    def _finish_run(self, has_own):
+        """Finalize only a fully successful selection; a skip is not completion."""
+        complete = bool(self._results) and all(r["status"] == "ok" for r in self._results)
+        if complete and cfg.is_first_run():
+            cfg.complete_first_run(self.steam_root)
+        if has_own and complete:
+            self._DONE_MSG = (
+                "Installation complete!\n\n"
+                "If you enjoy these mods, please consider starring "
+                "the original creators' GitHub repositories!")
+        self._s.progress.emit(100, "All done!" if complete else "Finished with incomplete games.")
+        self._s.done.emit(complete)
+
     def _on_done(self, ok):
         self._stop_pulse()
         self._tick.stop()
@@ -1272,24 +1318,37 @@ class _BaseInstallScreen(QWidget):
         self.stat.setText(f"Finished in {el // 60}:{el % 60:02d}")
         self.zd_choice = None
         self.offline_mode = None
-        if ok:
-            self.cur.setText(self._DONE_MSG)
+        incomplete = self._retryable()
+        complete = ok and bool(self._results) and not incomplete
+        if self._results:
+            self._render_summary()
         else:
-            if self._results:
-                self._render_summary()
+            self.summary_scroll.setVisible(False)
+        if complete:
+            self.cur.setText(self._DONE_MSG)
+            setup = get_screen(self.stack, "SetupScreen")
+            if setup is not None:
+                setup._choices.clear()
+                setup._extra_choices.clear()
+        else:
+            failed = sum(r["status"] == "failed" for r in self._results)
+            skipped = sum(r["status"] == "skipped" for r in self._results)
+            pending = sum(r["status"] == "pending" for r in self._results)
+            if incomplete:
+                message = (f"Setup incomplete: {failed} failed, {skipped} skipped, "
+                           f"{pending} not attempted. Review results and log.")
+            elif self._results:
+                message = "Finalization stopped before completion. Check the log and try again."
             else:
-                self.summary.setVisible(False)
-            n = len([r for r in self._results if r["status"] == "failed"])
-            self.cur.setText(
-                f"Finished with {n} problem(s). See the summary below."
-                if n else "Setup did not finish. Check the log above, then try again.")
+                message = "Setup stopped before game setup. Check the log and try again."
+            self.cur.setText(message)
             self.cur.setStyleSheet(f"color:{C_TREY};background:transparent;")
-            self.retry_btn.setText(f"Retry Failed ({len(self._retryable())})")
-            self.retry_btn.setVisible(bool(self._retryable()))
-            if not self._from_manage:
+            self.retry_btn.setText(f"Retry Incomplete ({len(incomplete)})")
+            self.retry_btn.setVisible(bool(incomplete))
+            if self._from_setup_selection:
                 try: self.cont_btn.clicked.disconnect()
                 except Exception: pass
-                self.cont_btn.setText("<< Back to Game Selection")
+                self.cont_btn.setText("Back to Game Selection")
                 self.cont_btn.clicked.connect(lambda: go_to(self.stack, "SetupScreen"))
         self.cont_btn.setVisible(True)
         # Deferred to the end so Steam isn't killed mid-verify by the install
@@ -1317,14 +1376,17 @@ class _BaseInstallScreen(QWidget):
         self.plut_btn.setVisible(False)
         self.plut_warn.setVisible(False)
         self.iw5_dg_btn.setVisible(False)
+        self.manual_step.setVisible(False)
         self.iw5_qr_box.setVisible(False)
         self.zd_info.setVisible(False); self.zd_yes.setVisible(False); self.zd_skip.setVisible(False)
         self._zd_event.clear(); self._zd_accept = False
-        self.summary.setVisible(False); self.retry_btn.setVisible(False)
+        self.summary_scroll.setVisible(False); self.retry_btn.setVisible(False)
         self._results = []
         self._plan = []; self._bands = {}
         self._phase_i = -1; self._phase_id = None
         self._last_pct = 0; self._t0 = time.time()
+        self._last_zd_choice = self.zd_choice
+        self._last_offline_mode = self.offline_mode
         self._tick.start(1000)
         inhibit.start("DeckOps is installing")
         self.cont_btn.setVisible(False)
@@ -1344,6 +1406,8 @@ class _BaseInstallScreen(QWidget):
         except Exception:
             pass
         self._from_manage = self._return_to_management
+        self._from_setup_selection = self._selection_entry
+        self._selection_entry = False
         if self._return_to_management:
             self.cont_btn.setText("Back to My Games  >>")
             self.cont_btn.clicked.connect(self._go_management)
@@ -2118,14 +2182,23 @@ class _BaseInstallScreen(QWidget):
                     install_sp_mod(_sp_key, _g["install_dir"], op_sp,
                                    source=source, steam_root=self.steam_root)
                     cfg.mark_game_setup(_sp_key, "iw-pad", source=source)
+                    self._mark(_sp_key, "ok")
                     self._s.log.emit(f"✓  IW-Pad installed ({_sp_key}, {source})")
                 except Exception as ex:
                     _g["_own_launch_options"] = ""
                     self._s.log.emit(f"✗  IW-Pad install failed ({_sp_key}): {ex}")
+                    self._mark(_sp_key, "failed", f"IW-Pad: {ex}")
 
         # --- Zombies Declassified (optional DLC5 for BO2 Zombies via Plutonium)
         if plut_ok and "t6zm" in selected_keys:
             self._phase("zd")
+            _zd_requested = self.zd_choice is True
+
+            def _zd_incomplete(reason, status="skipped"):
+                if _zd_requested and any(r["key"] == "t6zm" and r["status"] == "ok"
+                                         for r in self._results):
+                    self._mark("t6zm", status, f"Zombies Declassified: {reason}")
+
             try:
                 # Check BO2 Zombies DLC prerequisite
                 _bo2_dir = None
@@ -2137,6 +2210,7 @@ class _BaseInstallScreen(QWidget):
                 from zombies_declassified import has_bo2_zm_dlc
                 if not _bo2_dir or not has_bo2_zm_dlc(_bo2_dir):
                     self._s.log.emit("Zombies Declassified skipped (requires all BO2 Zombies DLC)")
+                    _zd_incomplete("requires all BO2 Zombies DLC")
                 else:
                     from zombies_declassified import resolve_zd_storage
                     _zd_storage = resolve_zd_storage({k: g for k, gd, g in self.selected}.get("t6zm"))
@@ -2153,6 +2227,7 @@ class _BaseInstallScreen(QWidget):
                             self._zd_event.wait()
                             self._s.zd_go.emit()
                             _zd_yes = self._zd_accept
+                        _zd_requested = bool(_zd_yes)
 
                         if _zd_yes:
                             self._s.progress.emit(self._ppct(5), "Installing Zombies Declassified...")
@@ -2166,14 +2241,17 @@ class _BaseInstallScreen(QWidget):
                                 cfg.mark_zd_installed(info["manifest_hash"])
                             if errors:
                                 self._s.log.emit(f"⚠  Zombies Declassified installed with {len(errors)} error(s)")
+                                _zd_incomplete(f"{len(errors)} install error(s)", "failed")
                             else:
                                 self._s.log.emit("✓  Zombies Declassified installed")
                         else:
                             self._s.log.emit("Zombies Declassified skipped (can install later from Manage)")
                     else:
                         self._s.log.emit("⚠  Zombies Declassified skipped (paths not resolved)")
+                        _zd_incomplete("game paths not resolved")
             except Exception as ex:
                 self._s.log.emit(f"⚠  Zombies Declassified skipped: {ex}")
+                _zd_incomplete(str(ex), "failed")
 
         # --- Clean up ZD files leaked into non-t6zm prefixes
         if has_plut and not cfg.is_lcd():
@@ -2356,15 +2434,7 @@ class _BaseInstallScreen(QWidget):
 
         # --- Done
         _log_to_file("[BREADCRUMB] all phases complete, finishing up")
-        cfg.complete_first_run(self.steam_root)
-        if has_own:
-            self._DONE_MSG = (
-                "Installation complete!\n\n"
-                "If you enjoy these mods, please consider starring "
-                "the original creators' GitHub repositories!")
-        _failed = [r for r in self._results if r["status"] == "failed"]
-        self._s.progress.emit(100, "All done!" if not _failed else "Finished with errors.")
-        self._s.done.emit(not _failed)
+        self._finish_run(has_own)
 
 
 

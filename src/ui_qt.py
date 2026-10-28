@@ -11,7 +11,7 @@ All screen classes are imported from split modules:
 
 import sys, os
 
-from qt import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QWidget, QMessageBox
+from qt import QApplication, QMainWindow, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QWidget, QMessageBox, QStatusBar
 from qt import Qt, QTimer
 
 import config as cfg
@@ -19,10 +19,10 @@ import inhibit
 from identity import APP_TITLE
 
 from ui_constants import (
-    C_DIM, C_DARK_BTN, font, _lbl, _title_block,
+    C_CARD, C_DIM, C_DARK_BTN, C_LINE, C_TEXT, font, _lbl, _title_block,
     _load_font, _app_style, _start_audio, _kill_audio,
     _set_audio_enabled,
-    go_to,
+    go_to, get_screen,
 )
 
 from ui_setup import SetupFlowScreen
@@ -112,59 +112,71 @@ class DeckOpsWindow(QMainWindow):
 
         self.stack.setCurrentIndex(0)
 
-        # Debug label — shows current screen name and index in bottom-left
-        self._dbg_label = QLabel(self)
-        self._dbg_label.setStyleSheet(
-            "color:#444455;background:transparent;padding:4px 8px;"
-        )
+        # A compact status strip owns the persistent music control. Unlike the
+        # old floating button it never covers a wizard action or a result card.
+        strip = QStatusBar(self)
+        strip.setFixedHeight(38)
+        strip.setSizeGripEnabled(False)
+        strip.setStyleSheet(
+            f"QStatusBar{{background:{C_CARD};border-top:1px solid {C_LINE};}}"
+            f"QStatusBar QLabel{{background:transparent;color:{C_DIM};padding:0 10px;}}")
+        self.setStatusBar(strip)
+        self._screen_label = QLabel()
+        self._screen_label.setFont(font(9, bold=True))
+        strip.addWidget(self._screen_label)
+        self._dbg_label = QLabel()
         self._dbg_label.setFont(font(9))
-        self._dbg_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._dbg_label.raise_()
+        strip.addPermanentWidget(self._dbg_label)
         self._dbg_label.setVisible(os.environ.get("DECKOPS_DEBUG") == "1")
+
+        self._muted = not cfg.get_music_enabled()
+        self._mute_btn = QPushButton(self)
+        self._mute_btn.setFixedSize(112, 30)
+        self._mute_btn.setFont(font(10, bold=True))
+        self._mute_btn.setStyleSheet(
+            f"QPushButton{{background:{C_DARK_BTN};color:{C_TEXT};border:1px solid {C_LINE};"
+            "border-radius:6px;padding:0 8px;}"
+            "QPushButton:hover,QPushButton:focus{border:2px solid #FFFFFF;}")
+        self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mute_btn.clicked.connect(self._toggle_mute)
+        strip.addPermanentWidget(self._mute_btn)
+        self._sync_mute_button()
         self.stack.currentChanged.connect(self._update_dbg_label)
         self._update_dbg_label(0)
-
-        # Persistent mute button — bottom-right, always visible
-        self._muted = not cfg.get_music_enabled()
-        self._mute_btn = QPushButton("\U0001F507" if self._muted else "\U0001F50A", self)
-        self._mute_btn.setFixedSize(42, 42)
-        self._mute_btn.setFont(font(16))
-        self._mute_btn.setStyleSheet(
-            f"QPushButton{{background:{C_DARK_BTN};border:none;border-radius:21px;}}"
-            f"QPushButton:hover{{background:#444455;}}"
-        )
-        self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mute_btn.setToolTip("Unmute music" if self._muted else "Mute music")
-        self._mute_btn.setAccessibleName("Unmute music" if self._muted else "Mute music")
-        self._mute_btn.clicked.connect(self._toggle_mute)
-        self._mute_btn.raise_()
 
     def _update_dbg_label(self, idx):
         w = self.stack.widget(idx)
         name = getattr(w, "screen_name", w.__class__.__name__)
+        titles = {
+            "BootstrapScreen": "OPENING", "SetupFlowScreen": "DEVICE SETUP",
+            "ManifestModsScreen": "OPTIONAL MODS", "WelcomeScreen": "FIND GAMES",
+            "SetupScreen": "SELECT GAMES", "InstallScreen": "INSTALLATION",
+            "ManagementScreen": "GAME LIBRARY", "ConfigureScreen": "SETTINGS",
+            "SetupCompleteScreen": "GUIDE", "UpdateScreen": "GAME UPDATES",
+        }
+        self._screen_label.setText(titles.get(name, name.upper()))
         self._dbg_label.setText(f"[{idx}] {name}")
-        self._dbg_label.adjustSize()
+        self._muted = not cfg.get_music_enabled()
+        self._sync_mute_button()
+
+    def _sync_mute_button(self):
+        self._mute_btn.setText("Music: Off" if self._muted else "Music: On")
+        label = "Unmute music" if self._muted else "Mute music"
+        self._mute_btn.setToolTip(label)
+        self._mute_btn.setAccessibleName(label)
 
     def _toggle_mute(self):
         self._muted = not self._muted
         if self._muted:
             _kill_audio()
             _set_audio_enabled(False)
-            self._mute_btn.setText("\U0001F507")
         else:
             _set_audio_enabled(True)
             _start_audio()
-            self._mute_btn.setText("\U0001F50A")
-        label = "Unmute music" if self._muted else "Mute music"
-        self._mute_btn.setToolTip(label)
-        self._mute_btn.setAccessibleName(label)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._dbg_label.move(8, self.height() - self._dbg_label.height() - 8)
-        self._dbg_label.raise_()
-        self._mute_btn.move(self.width() - 54, self.height() - 54)
-        self._mute_btn.raise_()
+        self._sync_mute_button()
+        settings = get_screen(self.stack, "ConfigureScreen")
+        if settings is not None:
+            settings._sync_music_toggle()
 
     def closeEvent(self, e):
         # Workers are daemon threads: quitting mid-install killed them in the
@@ -191,6 +203,7 @@ def run():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     _load_font()
+    app.setFont(font(11))
     app.setStyleSheet(_app_style())
     win = DeckOpsWindow()
     # With a sys.excepthook set, PyQt no longer aborts on an error in a slot;

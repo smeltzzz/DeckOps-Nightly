@@ -19,6 +19,10 @@ from qt import QFont, QFontDatabase
 import config as cfg
 from identity import BUILD_BADGE, BRANCH
 from log import get_logger
+from ui_theme import (
+    C_BG, C_CARD, C_SURFACE, C_LINE, C_TEXT, C_DIM, C_IW, C_TREY,
+    C_DARK_BTN, C_RED_BTN, C_BLUE_BTN, C_FOCUS,
+)
 
 _log = get_logger(__name__)
 
@@ -71,19 +75,10 @@ def _copy_log_to_clipboard(status_widget=None):
 
 
 # ── Colors ────────────────────────────────────────────────────────────────────
-
-C_BG       = "#141416"
-C_CARD     = "#1E1E26"
-C_IW       = "#6DC62B"
-C_TREY     = "#F47B20"
-C_DIM      = "#888899"
-C_DARK_BTN = "#33333F"
-C_RED_BTN  = "#7A1515"
-C_BLUE_BTN = "#1A5FAA"
-
-# Branch accent — green for stable, orange for nightly
+# Branch accent — green for stable, amber for nightly. Game-family color is
+# never used as the sole indication of success or failure.
 C_ACCENT    = C_IW if BRANCH == "stable" else C_TREY
-C_ACCENT_BG = "#0A2A08" if BRANCH == "stable" else "#2A1A08"
+C_ACCENT_BG = "#243623" if BRANCH == "stable" else "#3B2C21"
 
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────
@@ -105,8 +100,17 @@ def _load_font():
     fid = QFontDatabase.addApplicationFont(russo)
     fams = QFontDatabase.applicationFontFamilies(fid)
     if fams:
-        _FONT_FAMILY      = fams[0]
         _FONT_FAMILY_DISP = fams[0]
+    # Bundle an OFL body face rather than relying on the host's Qt font
+    # database. Some Wine/offscreen installations otherwise resolve every
+    # generic sans-serif request to our only bundled face, Russo One.
+    for filename in ("AtkinsonHyperlegible-Regular.ttf", "AtkinsonHyperlegible-Bold.ttf"):
+        body = os.path.join(FONTS_DIR, filename)
+        if os.path.exists(body):
+            body_id = QFontDatabase.addApplicationFont(body)
+            body_families = QFontDatabase.applicationFontFamilies(body_id)
+            if body_families:
+                _FONT_FAMILY = body_families[0]
     _FONT_LOADED = True
 
 def font(size=13, bold=False, weight=None, display=False):
@@ -276,14 +280,24 @@ def _set_audio_enabled(enabled: bool):
 def _header_path(appid: int) -> str:
     return os.path.join(HEADERS_DIR, f"{appid}_grid.jpg")
 
+def _button_style(color):
+    """Shared button variant; light faction colors always use dark ink."""
+    foreground = C_BG if color in (C_IW, C_TREY) else C_TEXT
+    return (
+        f"QPushButton{{background:{color};color:{foreground};border:2px solid transparent;"
+        "border-radius:8px;padding:0 18px;}"
+        f"QPushButton:hover{{border-color:{C_DIM};}}"
+        f"QPushButton:focus{{border-color:{C_FOCUS};}}"
+        f"QPushButton:pressed{{background:{C_SURFACE};color:{C_TEXT};}}"
+        f"QPushButton:disabled{{background:{C_CARD};color:{C_DIM};border-color:{C_LINE};}}"
+    )
+
+
 def _btn(text, color, size=13, h=44):
     b = QPushButton(text); b.setFont(font(size, True)); b.setFixedHeight(h)
-    b.setStyleSheet(
-        f"QPushButton{{background:{color};color:#FFF;border:none;border-radius:8px;padding:0 18px;}}"
-        f"QPushButton:hover{{background:{color}CC;}}"
-        f"QPushButton:pressed{{background:{color}99;}}"
-        f"QPushButton:disabled{{background:#333344;color:#666677;}}"
-    )
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setAccessibleName(text.replace("&&", "&"))
+    b.setStyleSheet(_button_style(color))
     return b
 
 def _lbl(text, size=14, color="#FFF", bold=False, align=Qt.AlignmentFlag.AlignCenter, wrap=True):
@@ -292,41 +306,44 @@ def _lbl(text, size=14, color="#FFF", bold=False, align=Qt.AlignmentFlag.AlignCe
     return w
 
 def _header_bar():
-    """Compact top bar used by list screens. Returns (bar, row layout) so callers can append buttons."""
-    hdr = QWidget(); hdr.setFixedHeight(60); hdr.setStyleSheet(f"background:{C_CARD};")
-    hl = QHBoxLayout(hdr); hl.setContentsMargins(20,0,20,0)
-    t = QLabel("DECKOPS"); t.setFont(font(22, display=True))
-    t.setStyleSheet("color:#FFF;background:transparent;"); hl.addWidget(t)
-    b = QLabel(BRANCH.upper()); b.setFont(font(10, bold=True))
+    """Shared compact screen header; screen-specific actions follow the build badge."""
+    hdr = QWidget(); hdr.setFixedHeight(60)
+    hdr.setObjectName("deckopsHeader")
+    hdr.setStyleSheet(f"QWidget#deckopsHeader{{background:{C_CARD};border-bottom:1px solid {C_LINE};}}")
+    hl = QHBoxLayout(hdr); hl.setContentsMargins(20,0,20,0); hl.setSpacing(10)
+    t = QLabel("DECKOPS"); t.setFont(font(21, display=True))
+    t.setStyleSheet(f"color:{C_TEXT};background:transparent;"); hl.addWidget(t)
+    b = QLabel(BUILD_BADGE.upper()); b.setFont(font(9, bold=True))
     b.setStyleSheet(
         f"color:{C_ACCENT};background:{C_ACCENT_BG};border:1px solid {C_ACCENT};"
-        "border-radius:4px;padding:1px 6px;")
+        "border-radius:4px;padding:3px 8px;")
     hl.addWidget(b); hl.addStretch()
     return hdr, hl
 
 def _badge(text, color, w, h=30, size=10, radius=6):
     b = QPushButton(text); b.setFont(font(size, True)); b.setFixedSize(w, h); b.setEnabled(False)
+    ink = C_BG if color in (C_IW, C_TREY) else C_TEXT
     b.setStyleSheet(
-        f"QPushButton{{background:{color};color:#FFF;border:none;border-radius:{radius}px;}}"
-        f"QPushButton:disabled{{background:{color};color:#FFF;}}")
+        f"QPushButton{{background:{color};color:{ink};border:none;border-radius:{radius}px;}}"
+        f"QPushButton:disabled{{background:{color};color:{ink};}}")
     return b
 
 def _back_row(lay, slot):
-    b = _btn("<< Back", C_DARK_BTN, size=12, h=44); b.setFixedWidth(140)
+    b = _btn("← Back", C_DARK_BTN, size=12, h=40); b.setFixedWidth(120)
     b.clicked.connect(slot)
     row = QHBoxLayout(); row.addWidget(b); row.addStretch(); lay.addLayout(row)
     return b
 
 def _log_html(text: str) -> str:
     """Colorize a log line by its leading marker. Everything else stays dim."""
-    color = {"✓": C_IW, "✗": C_TREY, "⚠": C_TREY}.get(text.lstrip()[:1], "#666677")
+    color = {"✓": C_IW, "✗": "#FF817A", "⚠": C_TREY}.get(text.lstrip()[:1], C_DIM)
     body = html.escape(text).replace("\n", "<br>").replace("  ", "&nbsp;&nbsp;")
     return f'<span style="color:{color};white-space:pre-wrap">{body}</span>'
 
 
 def _hdiv():
     d = QFrame(); d.setFrameShape(QFrame.Shape.HLine); d.setFixedHeight(1)
-    d.setStyleSheet("background:#252530;border:none;"); return d
+    d.setStyleSheet(f"background:{C_LINE};border:none;"); return d
 
 def _detached_open(args):
     """
@@ -435,7 +452,7 @@ def _title_block(lay, main_size=56):
     t = QLabel("DECKOPS")
     t.setFont(font(main_size, display=True))
     t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    t.setStyleSheet("color:#FFFFFF; background:transparent;")
+    t.setStyleSheet(f"color:{C_TEXT}; background:transparent;")
     lay.addWidget(t)
     sub = QLabel()
     sub.setTextFormat(Qt.TextFormat.RichText)
@@ -492,18 +509,27 @@ class _Sigs(QObject):
 # ── App stylesheet ────────────────────────────────────────────────────────────
 
 def _app_style():
+    check = os.path.join(PROJECT_ROOT, "assets", "images", "check.svg").replace("\\", "/")
     return f"""
-* {{ font-family: "{_FONT_FAMILY}"; }}
-QWidget {{ background-color:{C_BG}; color:#FFF; }}
+QWidget {{ background-color:{C_BG}; color:{C_TEXT}; }}
+QLabel {{ background:transparent; }}
+QDialog, QMessageBox {{ background:{C_CARD}; }}
 QScrollArea, QScrollArea > QWidget > QWidget {{ background:{C_BG}; border:none; }}
-QScrollBar:vertical {{ background:#1E1E28; width:8px; border-radius:4px; }}
-QScrollBar::handle:vertical {{ background:#44445A; border-radius:4px; min-height:30px; }}
+QScrollBar:vertical {{ background:{C_CARD}; width:10px; border-radius:5px; }}
+QScrollBar::handle:vertical {{ background:{C_LINE}; border-radius:5px; min-height:32px; }}
+QScrollBar::handle:vertical:hover {{ background:{C_DIM}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
-QProgressBar {{ background:#252535; border-radius:7px; border:none; }}
-QProgressBar::chunk {{ background:{C_ACCENT}; border-radius:7px; }}
-QCheckBox::indicator {{ width:22px; height:22px; border:2px solid #555568; border-radius:4px; background:#252535; }}
-QCheckBox::indicator:checked {{ background:{C_IW}; border-color:{C_IW}; }}
-QPushButton:focus, QCheckBox:focus {{ border:2px solid #FFFFFF; }}
+QProgressBar {{ background:{C_SURFACE}; color:{C_TEXT}; border:1px solid {C_LINE}; border-radius:6px; text-align:center; }}
+QProgressBar::chunk {{ background:{C_ACCENT}; border-radius:5px; }}
+QCheckBox, QRadioButton {{ spacing:8px; background:transparent; }}
+QCheckBox::indicator {{ width:20px; height:20px; border:2px solid {C_LINE}; border-radius:5px; background:{C_SURFACE}; }}
+QCheckBox::indicator:checked {{ background:{C_IW}; border-color:{C_IW}; image:url("{check}"); }}
+QCheckBox::indicator:disabled {{ background:{C_CARD}; border-color:{C_LINE}; }}
+QRadioButton::indicator {{ width:20px; height:20px; }}
+QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{ background:{C_CARD}; color:{C_TEXT}; border:1px solid {C_LINE}; border-radius:7px; padding:6px 10px; selection-background-color:{C_BLUE_BTN}; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border:2px solid {C_FOCUS}; }}
+QPushButton:focus, QCheckBox:focus, QRadioButton:focus {{ border:2px solid {C_FOCUS}; }}
+QToolTip {{ background:{C_SURFACE}; color:{C_TEXT}; border:1px solid {C_LINE}; padding:6px; }}
 """
 
 

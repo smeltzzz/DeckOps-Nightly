@@ -1,19 +1,21 @@
 """
-ui_manifest.py -- optional manifest mods step before the game scan
+ui_manifest.py -- optional manifest mods during setup or from the game library
 
 Lists manifest .json files found in the Games folders, lets the user
 tick mods, pick one option each, enter the shared CDN and a target
-Games folder, then installs. Skipped entirely when no manifests exist.
+Games folder, then installs. Setup skips ahead when no manifests exist;
+the library entry stays open with guidance.
 """
 
 import html, os, threading
 
 from qt import (
-    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QScrollArea, QCheckBox, QPushButton,
-    QButtonGroup, QProgressBar, QLineEdit, QPlainTextEdit, QMessageBox,
+    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QScrollArea, QCheckBox, QRadioButton,
+    QButtonGroup, QProgressBar, QLineEdit, QPlainTextEdit, QMessageBox, QComboBox, QSizePolicy,
 )
 from qt import Qt
 
+import config as cfg
 import inhibit
 import manifest_mods as mm
 from net import _fmt_size
@@ -24,84 +26,121 @@ from ui_constants import (
 )
 
 _NEXT_TO_JSON = "@json"
-_BOX_CSS = f"color:#CCC;background:#1A1A2A;border:1px solid {C_DIM};border-radius:8px;padding:10px 16px;"
-
-
-def _pill(text):
-    b = QPushButton(text); b.setCheckable(True); b.setFont(font(10, True)); b.setFixedHeight(34)
-    b.setStyleSheet(
-        f"QPushButton{{background:{C_DARK_BTN};color:#AAA;border:none;border-radius:6px;padding:0 12px;}}"
-        f"QPushButton:checked{{background:{C_IW};color:#FFF;}}")
-    return b
+_BOX_CSS = f"color:#E5E5EC;background:#1A1A2A;border:1px solid {C_DIM};border-radius:8px;padding:10px 14px;"
 
 
 class ManifestModsScreen(QWidget):
     def __init__(self, stack):
         super().__init__(); self.stack = stack; self.screen_name = "ManifestModsScreen"
         self._found = []; self._rows = []; self._busy = False; self._roots = []
+        self._first_run = cfg.is_first_run(); self._scan_error = False
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         lay.addWidget(_header_bar()[0])
 
-        # --- pick view
-        self._pick = QWidget(); clay = QVBoxLayout(self._pick); clay.setContentsMargins(60,20,60,30); clay.setSpacing(12)
-        self.status = _lbl("Looking for mod manifests...", 13, C_DIM); clay.addWidget(self.status)
+        # Keep the choices and actions visible at handheld sizes; only the mod list scrolls.
+        self._pick = QWidget(); clay = QVBoxLayout(self._pick)
+        clay.setContentsMargins(24, 14, 24, 16); clay.setSpacing(10)
+        clay.addWidget(_lbl("OPTIONAL MODS", 17, "#FFF", bold=True,
+                            align=Qt.AlignmentFlag.AlignLeft, wrap=False))
+        self.status = _lbl("Looking for mod manifests...", 11, C_DIM,
+                           align=Qt.AlignmentFlag.AlignLeft)
+        self.status.setAccessibleDescription("Mod scan status"); clay.addWidget(self.status)
 
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        settings = QHBoxLayout(); settings.setSpacing(12)
+        cdn_col = QVBoxLayout(); cdn_col.setSpacing(4)
+        cdn_col.addWidget(_lbl("MOD CDN", 10, C_DIM, bold=True,
+                               align=Qt.AlignmentFlag.AlignLeft, wrap=False))
+        self.cdn = QLineEdit(); self.cdn.setPlaceholderText("cdn.example.com/mods")
+        self.cdn.setAccessibleName("Mod CDN address"); self.cdn.setFixedHeight(38)
+        self.cdn.setFont(font(11))
+        self.cdn.setStyleSheet(f"QLineEdit{{background:{C_CARD};color:#FFF;border:1px solid #555568;"
+                               f"border-radius:7px;padding:0 10px;}}QLineEdit:focus{{border-color:{C_IW};}}")
+        cdn_col.addWidget(self.cdn); settings.addLayout(cdn_col, 1)
+
+        root_col = QVBoxLayout(); root_col.setSpacing(4)
+        root_col.addWidget(_lbl("INSTALL LOCATION", 10, C_DIM, bold=True,
+                                align=Qt.AlignmentFlag.AlignLeft, wrap=False))
+        self.root_choice = QComboBox(); self.root_choice.setFixedHeight(38)
+        self.root_choice.setAccessibleName("Install location for selected mods")
+        self.root_choice.setToolTip("Choose where the selected mods will be installed")
+        self.root_choice.setStyleSheet(
+            f"QComboBox{{background:{C_CARD};color:#FFF;border:1px solid #555568;"
+            "border-radius:7px;padding:0 10px;}"
+            f"QComboBox:focus{{border-color:{C_IW};}}"
+            f"QComboBox QAbstractItemView{{background:{C_CARD};color:#FFF;selection-background-color:{C_DARK_BTN};}}")
+        self.root_choice.currentIndexChanged.connect(lambda _i: self._refresh_rows())
+        root_col.addWidget(self.root_choice); settings.addLayout(root_col, 1)
+        clay.addLayout(settings)
+
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setAccessibleName("Available mods and their install options")
         self._lw = QWidget(); self._list = QVBoxLayout(self._lw)
-        self._list.setContentsMargins(0,0,0,0); self._list.setSpacing(10); self._list.addStretch()
+        self._list.setContentsMargins(0, 0, 4, 0); self._list.setSpacing(8); self._list.addStretch()
         scroll.setWidget(self._lw); clay.addWidget(scroll, stretch=1)
 
-        crow = QHBoxLayout(); crow.setSpacing(12)
-        crow.addWidget(_lbl("Mod CDN:", 13, "#FFF", bold=True, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wrap=False))
-        self.cdn = QLineEdit(); self.cdn.setPlaceholderText("cdn.example.com/mods"); self.cdn.setFixedHeight(44)
-        self.cdn.setFont(font(13))
-        self.cdn.setStyleSheet(f"QLineEdit{{background:{C_CARD};color:#FFF;border:2px solid #33333F;"
-                               f"border-radius:8px;padding:0 14px;}}QLineEdit:focus{{border-color:{C_IW};}}")
-        crow.addWidget(self.cdn, 1); clay.addLayout(crow)
+        self.warning = _lbl("", 11, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
+        self.warning.setAccessibleDescription("Mod selection warning")
+        self.warning.setVisible(False); clay.addWidget(self.warning)
 
-        self._root_row = QHBoxLayout(); self._root_row.setSpacing(8)
-        self._root_row.addWidget(_lbl("Install to:", 13, "#FFF", bold=True, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, wrap=False))
-        self._root_row.addSpacing(4)
-        self._root_grp = QButtonGroup(self); self._root_grp.buttonClicked.connect(lambda _b: self._refresh_rows())
-        self._root_row.addStretch(); clay.addLayout(self._root_row)
-
-        self.warning = _lbl("", 12, C_TREY, align=Qt.AlignmentFlag.AlignLeft); self.warning.setVisible(False); clay.addWidget(self.warning)
-
-        brow = QHBoxLayout(); brow.setSpacing(16)
-        self.back = _btn("<< Back", C_DARK_BTN, h=52); self.back.setFixedWidth(180)
-        self.back.clicked.connect(lambda: go_to(self.stack, "SetupFlowScreen"))
-        self.skip = _btn("Skip >>", C_DARK_BTN, h=52); self.skip.setFixedWidth(200)
-        self.skip.clicked.connect(lambda: go_to(self.stack, "WelcomeScreen"))
-        self.inst = _btn("Install Selected", C_IW, h=52); self.inst.clicked.connect(self._install)
-        brow.addWidget(self.back); brow.addWidget(self.skip); brow.addWidget(self.inst, 1); clay.addLayout(brow)
+        brow = QHBoxLayout(); brow.setSpacing(8)
+        self.back = _btn("Back", C_DARK_BTN, size=11, h=44)
+        self.back.setAccessibleName("Back to setup")
+        self.back.clicked.connect(self._go_back)
+        self.skip = _btn("Skip mods", C_DARK_BTN, size=11, h=44)
+        self.skip.setAccessibleName("Skip mods and scan games")
+        self.skip.clicked.connect(self._go_next)
+        self.inst = _btn("Install selected", C_IW, size=11, h=44)
+        self.inst.clicked.connect(self._install)
+        brow.addWidget(self.back, 1); brow.addWidget(self.skip, 1)
+        brow.addWidget(self.inst, 2); clay.addLayout(brow)
         lay.addWidget(self._pick, stretch=1)
 
-        # --- install view, same layout as the game install screen
-        self._run = QWidget(); rlay = QVBoxLayout(self._run); rlay.setContentsMargins(80,20,80,60); rlay.setSpacing(20)
-        self.cur = _lbl("Preparing...", 16, "#CCC"); rlay.addWidget(self.cur)
-        self.bar = QProgressBar(); self.bar.setMaximum(100); self.bar.setTextVisible(False); self.bar.setFixedHeight(22)
-        bw = QHBoxLayout(); bw.setContentsMargins(60,0,60,0); bw.addWidget(self.bar); rlay.addLayout(bw)
+        # Progress, log and results share the space without forcing the actions off screen.
+        self._run = QWidget(); rlay = QVBoxLayout(self._run)
+        rlay.setContentsMargins(24, 16, 24, 16); rlay.setSpacing(10)
+        self.cur = _lbl("Preparing...", 14, "#E5E5EC", bold=True,
+                        align=Qt.AlignmentFlag.AlignLeft)
+        self.cur.setAccessibleDescription("Mod operation status"); rlay.addWidget(self.cur)
+        self.bar = QProgressBar(); self.bar.setRange(0, 100)
+        self.bar.setFormat("%p% complete"); self.bar.setFixedHeight(22)
+        self.bar.setAccessibleName("Mod operation progress")
+        rlay.addWidget(self.bar)
 
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFont(font(11))
-        self.log.setStyleSheet("QPlainTextEdit{color:#666677;background:transparent;border:none;padding:10px;}")
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFont(font(10))
+        self.log.setAccessibleName("Mod operation log")
+        self.log.setMinimumHeight(80)
+        self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.log.setStyleSheet(f"QPlainTextEdit{{color:#BDBDCD;background:{C_CARD};"
+                               "border:1px solid #444455;border-radius:8px;padding:8px;}")
         rlay.addWidget(self.log, stretch=1)
-        self._log_status = _lbl("", 11, C_DIM, wrap=False)
-        log_btn = _btn("Copy Log", C_DARK_BTN, size=11, h=40); log_btn.setFixedWidth(130)
-        log_btn.clicked.connect(lambda: _copy_log_to_clipboard(self._log_status))
-        lr = QHBoxLayout(); lr.addStretch(); lr.addWidget(log_btn); lr.addWidget(self._log_status); lr.addStretch()
+        self._log_status = _lbl("", 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        log_btn = _btn("Copy log", C_DARK_BTN, size=10, h=36)
+        log_btn.clicked.connect(lambda: (self._log_status.setVisible(True), _copy_log_to_clipboard(self._log_status)))
+        lr = QHBoxLayout(); lr.setSpacing(10)
+        lr.addWidget(log_btn); lr.addWidget(self._log_status, 1)
         rlay.addLayout(lr)
 
-        self.summary = _lbl("", 12, "#CCC", align=Qt.AlignmentFlag.AlignLeft); self.summary.setTextFormat(Qt.TextFormat.RichText)
-        self.summary.setStyleSheet(_BOX_CSS); self.summary.setVisible(False)
-        sw = QHBoxLayout(); sw.addStretch(); sw.addWidget(self.summary, 3); sw.addStretch(); rlay.addLayout(sw)
+        self.summary = _lbl("", 11, "#E5E5EC", align=Qt.AlignmentFlag.AlignLeft)
+        self.summary.setTextFormat(Qt.TextFormat.RichText)
+        self.summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.summary.setStyleSheet(_BOX_CSS)
+        self.summary.setAccessibleDescription("Mod operation results")
+        self._summary_scroll = QScrollArea(); self._summary_scroll.setWidgetResizable(True)
+        self._summary_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._summary_scroll.setFixedHeight(104)
+        self._summary_scroll.setWidget(self.summary); self._summary_scroll.setVisible(False)
+        rlay.addWidget(self._summary_scroll)
 
-        self.mods_btn = _btn("<< Back to Mods", C_DARK_BTN, size=13, h=52); self.mods_btn.setFixedWidth(280)
+        self.mods_btn = _btn("Back to mods", C_DARK_BTN, size=11, h=44)
         self.mods_btn.clicked.connect(self._show_pick)
-        self.cont = _btn("Continue  >>", C_IW, size=13, h=52); self.cont.setFixedWidth(320)
-        self.cont.clicked.connect(lambda: go_to(self.stack, "WelcomeScreen"))
-        cw = QHBoxLayout(); cw.addStretch(); cw.addWidget(self.mods_btn); cw.addSpacing(12); cw.addWidget(self.cont); cw.addStretch()
+        self.cont = _btn("Continue to game scan", C_IW, size=11, h=44)
+        self.cont.clicked.connect(self._go_next)
+        cw = QHBoxLayout(); cw.setSpacing(8)
+        cw.addWidget(self.mods_btn, 1); cw.addWidget(self.cont, 1)
         rlay.addLayout(cw)
         self._run.setVisible(False); lay.addWidget(self._run, stretch=1)
 
@@ -109,49 +148,105 @@ class ManifestModsScreen(QWidget):
         super().showEvent(e)
         # Window restored (not a screen change): keep the user's picks
         if self._busy or e.spontaneous(): return
+        self._first_run = cfg.is_first_run()
+        self.back.setText("Back" if self._first_run else "Back to library")
+        self.back.setAccessibleName("Back to setup" if self._first_run else "Back to game library")
+        self.skip.setText("Skip mods" if self._first_run else "Close mods")
+        self.skip.setAccessibleName("Skip mods and scan games" if self._first_run else "Close mods and return to game library")
+        self.cont.setText("Continue to game scan" if self._first_run else "Return to library")
+        self.cont.setAccessibleName("Continue to game scan" if self._first_run else "Return to game library")
         self._show_pick(); self._set_enabled(False)
         self.status.setText("Looking for mod manifests...")
         self._sigs = _Sigs(); self._sigs.done.connect(self._on_scanned)
         threading.Thread(target=self._scan, daemon=True).start()
 
+    def _go_back(self):
+        go_to(self.stack, "SetupFlowScreen" if self._first_run else "ManagementScreen")
+
+    def _go_next(self):
+        go_to(self.stack, "WelcomeScreen" if self._first_run else "ManagementScreen")
+
     def _show_pick(self):
         self._run.setVisible(False); self._pick.setVisible(True); self.warning.setVisible(False)
 
     def _scan(self):
+        self._scan_error = False
         try:
             self._found = mm.scan_manifests(); self._roots = mm.games_roots()
         except Exception as ex:
-            _log_to_file(f"[ManifestModsScreen] scan failed: {ex}"); self._found = []
+            _log_to_file(f"[ManifestModsScreen] scan failed: {ex}")
+            self._found = []; self._roots = []; self._scan_error = True
         self._sigs.done.emit(bool(self._found))
 
     def _on_scanned(self, any_found):
-        # Nothing to offer: go straight on to the game scan.
-        if not any_found:
-            go_to(self.stack, "WelcomeScreen"); return
-        ok = [f for f in self._found if "manifest" in f]; bad = len(self._found) - len(ok)
-        self.status.setText(f"{len(ok)} mod(s) found in your Games folder. Tick the ones to install, "
-                            "or skip to the game scan." + (f" {bad} could not be read." if bad else ""))
+        # The setup wizard skips this optional step; the library's Mods entry stays open.
+        if not any_found and self._first_run:
+            self._go_next(); return
         if not self.cdn.text(): self.cdn.setText(mm.get_saved_cdn())
         self._build_roots(); self._build_rows(); self._set_enabled(True)
+        if not any_found:
+            self.status.setText("Could not scan for mod manifests." if self._scan_error else "No mod manifests found.")
+            detail = ("Check that your Games folders are accessible, then close and reopen Mods to scan again."
+                      if self._scan_error else
+                      "Place a supported manifest .json file in a Games folder (internal storage or SD card), "
+                      "then close and reopen Mods to scan again. Your installed games are unchanged.")
+            empty = _lbl(detail, 12, "#E5E5EC", align=Qt.AlignmentFlag.AlignLeft)
+            empty.setStyleSheet(_BOX_CSS)
+            self._list.insertWidget(0, empty)
+            self.cdn.setEnabled(False); self.root_choice.setEnabled(False)
+            return
+        ok = [f for f in self._found if "manifest" in f]; bad = len(self._found) - len(ok)
+        action = "skip to the game scan" if self._first_run else "return to your game library"
+        if not ok:
+            self.status.setText(f"No usable mods found. Review the {bad} unreadable manifest(s) below, or {action}.")
+            self.cdn.setEnabled(False); self.root_choice.setEnabled(False)
+        else:
+            self.status.setText(f"{len(ok)} mod(s) found. Choose mods and options below, or {action}."
+                                + (f" {bad} manifest(s) could not be read." if bad else ""))
 
     def _build_roots(self):
-        for b in self._root_grp.buttons():
-            self._root_grp.removeButton(b); b.deleteLater()
+        previous = self._root()
         home = os.path.expanduser("~")
+        self.root_choice.blockSignals(True)
+        self.root_choice.clear()
         # Default: each mod goes to the Games folder its manifest is in; a drive sends all there.
         for r in [_NEXT_TO_JSON] + self._roots:
-            b = _pill("Next to each manifest" if r == _NEXT_TO_JSON else
-                      "Internal: ~/" + os.path.relpath(r, home) if r.startswith(home + os.sep) else f"SD / drive: {r}")
-            b.setProperty("root", r); b.setChecked(r == _NEXT_TO_JSON)
-            self._root_grp.addButton(b); self._root_row.insertWidget(self._root_row.count() - 1, b)
+            name = ("Next to each manifest" if r == _NEXT_TO_JSON else
+                    "Internal: ~/" + os.path.relpath(r, home) if r.startswith(home + os.sep)
+                    else f"SD / drive: {r}")
+            self.root_choice.addItem(name, r)
+            self.root_choice.setItemData(self.root_choice.count() - 1, r, Qt.ItemDataRole.ToolTipRole)
+        index = self.root_choice.findData(previous)
+        self.root_choice.setCurrentIndex(index if index >= 0 else 0)
+        self.root_choice.blockSignals(False)
 
     def _root(self):
-        b = self._root_grp.checkedButton()
-        return b.property("root") if b else ""
+        return self.root_choice.currentData() or ""
 
     def _target(self, r):
         root = self._root()
         return r["dir"] if root == _NEXT_TO_JSON else root
+
+    @staticmethod
+    def _choice_line(button, title, detail=""):
+        """A full-width choice with a wrapping label, instead of clipped option pills."""
+        w = QWidget(); w.setObjectName("mmoption")
+        w.setStyleSheet("QWidget#mmoption{background:#292932;border-radius:6px;}")
+        row = QHBoxLayout(w); row.setContentsMargins(10, 6, 10, 6); row.setSpacing(8)
+        button.setAccessibleName(title)
+        button.setMinimumHeight(30); row.addWidget(button, alignment=Qt.AlignmentFlag.AlignTop)
+        text = QVBoxLayout(); text.setSpacing(2)
+        label = _lbl(title, 11, "#F0F0F4", align=Qt.AlignmentFlag.AlignLeft)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setCursor(Qt.CursorShape.PointingHandCursor)
+        label.mousePressEvent = lambda _e: button.isEnabled() and button.click()
+        text.addWidget(label)
+        if detail:
+            note = _lbl(detail, 10, "#B6B6C5", align=Qt.AlignmentFlag.AlignLeft)
+            note.setTextFormat(Qt.TextFormat.PlainText)
+            text.addWidget(note)
+        row.addLayout(text, 1)
+        return w
 
     def _build_rows(self):
         while self._list.count() > 1:
@@ -160,46 +255,58 @@ class ManifestModsScreen(QWidget):
         self._rows = []
         for f in self._found:
             card = QFrame(); card.setObjectName("mmcard")
-            card.setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid #333344;border-radius:8px;}}")
-            v = QVBoxLayout(card); v.setContentsMargins(16,12,16,12); v.setSpacing(6)
+            card.setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid #444455;border-radius:8px;}}")
+            v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(7)
             if "error" in f:
-                v.addWidget(_lbl(f"{f['file']}: {f['error']}", 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+                error = _lbl(f"Could not read {f['file']}: {f['error']}", 11, C_TREY,
+                             align=Qt.AlignmentFlag.AlignLeft)
+                error.setTextFormat(Qt.TextFormat.PlainText); v.addWidget(error)
                 self._list.insertWidget(self._list.count() - 1, card); continue
             m = f["manifest"]
-            head = QHBoxLayout(); head.setSpacing(10)
-            cb = QCheckBox(m["name"]); cb.setFont(font(13, True)); cb.setStyleSheet("color:#FFF;background:transparent;")
-            head.addWidget(cb)
-            if m["version"]: head.addWidget(_lbl(f"v{m['version']}", 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft, wrap=False))
-            head.addStretch()
-            state = _badge("", C_IW, 110, h=24, size=9, radius=4); state.setVisible(False); head.addWidget(state)
-            unin = _btn("Uninstall", C_DARK_BTN, size=10, h=28); unin.setFixedWidth(110); unin.setVisible(False)
-            head.addWidget(unin)
+            head = QHBoxLayout(); head.setSpacing(8)
+            cb = QCheckBox(); cb.setAccessibleName(f"Select {m['name']} for installation")
+            cb.setMinimumHeight(32); head.addWidget(cb, alignment=Qt.AlignmentFlag.AlignTop)
+            title = m["name"] + (f"  ·  v{m['version']}" if m["version"] else "")
+            name = _lbl(title, 12, "#FFF", bold=True, align=Qt.AlignmentFlag.AlignLeft)
+            name.setTextFormat(Qt.TextFormat.PlainText)
+            name.setCursor(Qt.CursorShape.PointingHandCursor)
+            name.mousePressEvent = lambda _e, b=cb: b.isEnabled() and b.setChecked(not b.isChecked())
+            head.addWidget(name, 1)
+            state = _badge("", C_IW, 108, h=24, size=9, radius=4)
+            state.setVisible(False); head.addWidget(state, alignment=Qt.AlignmentFlag.AlignTop)
+            unin = _btn("Uninstall", C_DARK_BTN, size=10, h=32)
+            unin.setAccessibleName(f"Uninstall {m['name']} from selected location")
+            unin.setVisible(False); head.addWidget(unin, alignment=Qt.AlignmentFlag.AlignTop)
             v.addLayout(head)
-            if m["description"]: v.addWidget(_lbl(m["description"], 10, "#777788", align=Qt.AlignmentFlag.AlignLeft))
-            orow = QHBoxLayout(); orow.setContentsMargins(32,0,0,0); orow.setSpacing(8)
+            if m["description"]:
+                desc = _lbl(m["description"], 10, "#B6B6C5", align=Qt.AlignmentFlag.AlignLeft)
+                desc.setTextFormat(Qt.TextFormat.PlainText); v.addWidget(desc)
+            choices = QVBoxLayout(); choices.setContentsMargins(30, 0, 0, 0); choices.setSpacing(5)
             if m["mode"] == "components":
                 grp, boxes = None, []
                 for c in m["components"]:
                     if not c["show"]: continue
-                    ob = QCheckBox(f"{c['name']}  ({_fmt_size(sum(x['size'] for x in c['files']))})"); ob.setFont(font(11))
-                    ob.setStyleSheet("color:#CCC;background:transparent;"); ob.setProperty("oid", c["id"])
+                    ob = QCheckBox(); ob.setProperty("oid", c["id"])
                     ob.setProperty("req", c["required"]); ob.setProperty("def", c["default"])
                     ob.setChecked(c["required"] or c["default"]); ob.setEnabled(not c["required"])
-                    if c["description"]: ob.setToolTip(c["description"])
+                    title = f"{c['name']}  ·  {_fmt_size(sum(x['size'] for x in c['files']))}"
+                    if c["required"]: title += "  ·  Required"
+                    choices.addWidget(self._choice_line(ob, title, c["description"]))
                     # Ticking a part ticks the mod without re-running the mod's check-all.
                     ob.toggled.connect(lambda on, mc=cb: (on and not mc.isChecked() and (mc.blockSignals(True), mc.setChecked(True), mc.blockSignals(False)),
                                                           self._update_total()))
-                    boxes.append(ob); orow.addWidget(ob); orow.addSpacing(10)
+                    boxes.append(ob)
                 cb.toggled.connect(lambda on, bs=boxes: ([b.setChecked(on) for b in bs if not b.property("req")], self._update_total()))
             else:
                 grp, boxes = QButtonGroup(card), None
                 for i, o in enumerate(m["options"]):
-                    b = _pill(f"{o['name']}  ({_fmt_size(mm.total_size(o))})"); b.setProperty("oid", o["id"]); b.setChecked(i == 0)
-                    if o["description"]: b.setToolTip(o["description"])
-                    grp.addButton(b); orow.addWidget(b)
+                    b = QRadioButton(); b.setProperty("oid", o["id"])
+                    grp.addButton(b); b.setChecked(i == 0)
+                    title = f"{o['name']}  ·  {_fmt_size(mm.total_size(o))}"
+                    choices.addWidget(self._choice_line(b, title, o["description"]))
                 cb.toggled.connect(lambda _on: self._update_total())
                 grp.buttonClicked.connect(lambda _b, mc=cb: (mc.setChecked(True), self._update_total()))
-            orow.addStretch(); v.addLayout(orow)
+            v.addLayout(choices)
             row = {"m": m, "dir": os.path.dirname(f["path"]), "cb": cb, "grp": grp, "boxes": boxes,
                    "state": state, "card": card, "unin": unin}
             unin.clicked.connect(lambda _c=False, rr=row: self._uninstall(rr))
@@ -208,10 +315,11 @@ class ManifestModsScreen(QWidget):
         self._refresh_rows()
 
     def _set_state(self, r, text, color):
-        r["card"].setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid {color or '#333344'};border-radius:8px;}}")
+        r["card"].setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid {color or '#444455'};border-radius:8px;}}")
         b = r["state"]; b.setVisible(bool(text)); b.setText(text)
-        b.setStyleSheet(f"QPushButton{{background:{color};color:#FFF;border:none;border-radius:4px;}}"
-                        f"QPushButton:disabled{{background:{color};color:#FFF;}}")
+        b.setAccessibleName(f"{r['m']['name']}: {text.lower()}" if text else "")
+        b.setStyleSheet(f"QPushButton{{background:{color};color:#151518;border:none;border-radius:4px;}}"
+                        f"QPushButton:disabled{{background:{color};color:#151518;}}")
 
     def _refresh_rows(self):
         for r in self._rows:
@@ -252,12 +360,14 @@ class ManifestModsScreen(QWidget):
     def _update_total(self):
         sel = self._selected()
         size = sum(mm.total_size(mm.get_option(m, oid)) for m, oid, _r in sel)
-        self.inst.setText(f"Install Selected ({_fmt_size(size)})" if sel else "Install Selected")
+        count = len(sel)
+        self.inst.setText(f"Install {count} mod{'s' if count != 1 else ''} · {_fmt_size(size)}" if sel else "Select mods to install")
+        self.inst.setAccessibleName(f"Install {count} selected mod{'s' if count != 1 else ''}" if sel else "Select mods to install")
         self.inst.setEnabled(bool(sel) and not self._busy)
 
     def _set_enabled(self, on):
         self.back.setEnabled(on); self.skip.setEnabled(on); self.cdn.setEnabled(on); self._lw.setEnabled(on)
-        for b in self._root_grp.buttons(): b.setEnabled(on)
+        self.root_choice.setEnabled(on)
         if on: self._update_total()
         else: self.inst.setEnabled(False)
 
@@ -271,12 +381,14 @@ class ManifestModsScreen(QWidget):
         try:
             cdn = mm.normalize_cdn(self.cdn.text())
         except mm.ManifestError as ex:
-            self._warn(f"Mod CDN: {ex}"); return
+            self._warn(f"Mod CDN: {ex}"); self.cdn.setFocus(); return
         self._busy = True; self._set_enabled(False)
         self._pick.setVisible(False); self._run.setVisible(True)
-        self.cur.setText("Preparing..."); self.cur.setStyleSheet("color:#CCC;background:transparent;")
-        self.bar.setValue(0); self.log.clear(); self._log_status.setVisible(False)
-        self.summary.setVisible(False); self.mods_btn.setVisible(False); self.cont.setVisible(False)
+        self.cur.setText(f"Installing {len(sel)} mod{'s' if len(sel) != 1 else ''}...")
+        self.cur.setStyleSheet("color:#E5E5EC;background:transparent;")
+        self.bar.setRange(0, 100); self.bar.setValue(0); self.bar.setTextVisible(True)
+        self.log.clear(); self._log_status.setText(""); self._log_status.setVisible(False)
+        self._summary_scroll.setVisible(False); self.mods_btn.setVisible(False); self.cont.setVisible(False)
         self._isigs = _Sigs()
         self._isigs.progress.connect(lambda p, m: (self.bar.setValue(p), self.cur.setText(m)))
         self._isigs.log.connect(self._append_log)
@@ -327,9 +439,11 @@ class ManifestModsScreen(QWidget):
             return
         self._busy = True; self._set_enabled(False)
         self._pick.setVisible(False); self._run.setVisible(True)
-        self.cur.setText(f"Removing {r['m']['name']}..."); self.cur.setStyleSheet("color:#CCC;background:transparent;")
-        self.bar.setValue(0); self.log.clear(); self._log_status.setVisible(False)
-        self.summary.setVisible(False); self.mods_btn.setVisible(False); self.cont.setVisible(False)
+        self.cur.setText(f"Removing {r['m']['name']}...")
+        self.cur.setStyleSheet("color:#E5E5EC;background:transparent;")
+        self.bar.setRange(0, 0); self.bar.setTextVisible(False)  # No uninstall percentages.
+        self.log.clear(); self._log_status.setText(""); self._log_status.setVisible(False)
+        self._summary_scroll.setVisible(False); self.mods_btn.setVisible(False); self.cont.setVisible(False)
         self._usigs = _Sigs()
         self._usigs.log.connect(self._append_log)
         self._usigs.done.connect(self._on_uninstalled)
@@ -354,17 +468,18 @@ class ManifestModsScreen(QWidget):
         self._usigs.done.emit(self._uresult[1] is not None)
 
     def _on_uninstalled(self, ok):
-        self._busy = False; self.bar.setValue(100)
+        self._busy = False; self.bar.setRange(0, 100); self.bar.setValue(100); self.bar.setTextVisible(True)
         m, left, msg = self._uresult
         name = html.escape(m["name"])
         if ok:
             text = f'<span style="color:{C_IW}">&#10003; {name} removed</span>'
             if left:
-                text += f'<br><span style="color:#AAA">{len(left)} file(s) kept, see the log.</span>'
+                text += f'<br><span style="color:#E5E5EC">{len(left)} changed file(s) kept. See the log for details.</span>'
         else:
             text = f'<span style="color:{C_TREY}">&#10007; {name}: {html.escape(msg)}</span>'
-        self.summary.setText(text); self.summary.setVisible(True)
-        self.cur.setText("Mod removed." if ok else "Could not remove the mod.")
+            text += '<br>Review the log, then return to mods to try again.'
+        self.summary.setText(text); self._summary_scroll.setVisible(True)
+        self.cur.setText("Mod removed" if ok else "Could not remove the mod")
         self.cur.setStyleSheet(f"color:{C_IW if ok else C_TREY};background:transparent;")
         self.mods_btn.setVisible(True); self.cont.setVisible(True)
         self._set_enabled(True); self._refresh_rows()
@@ -388,8 +503,10 @@ class ManifestModsScreen(QWidget):
                              f'Install again to retry only those.</span>')
             else:
                 lines.append(f'<span style="color:{C_TREY}">&#10007; {name}: {html.escape(msg)}</span>')
-        self.summary.setText("<br>".join(lines)); self.summary.setVisible(True)
-        self.cur.setText("Mods installed!" if all_ok else "Finished with errors.")
+        if not all_ok:
+            lines.append('<br>Review the log, then return to mods to retry failed files.')
+        self.summary.setText("<br>".join(lines)); self._summary_scroll.setVisible(True)
+        self.cur.setText("Mods installed" if all_ok else "Finished with errors")
         self.cur.setStyleSheet(f"color:{C_IW if all_ok else C_TREY};background:transparent;")
         self.mods_btn.setVisible(True); self.cont.setVisible(True)
         self._set_enabled(True); self._refresh_rows()
