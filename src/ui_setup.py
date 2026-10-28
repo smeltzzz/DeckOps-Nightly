@@ -16,7 +16,7 @@ import config as cfg
 from detect_hw import detect_os, detect_device
 
 from ui_constants import (
-    C_CARD, C_IW, C_TREY, C_DIM, C_DARK_BTN,
+    C_CARD, C_LINE, C_TEXT, C_IW, C_TREY, C_DIM, C_DARK_BTN,
     font, _btn, _lbl, _title_block, _back_row,
     go_to,
 )
@@ -130,7 +130,7 @@ class SetupFlowScreen(QWidget):
         os_label = {"steamos": "SteamOS", "bazzite": "Bazzite", "cachyos": "CachyOS", "armada": "Armada"}.get(
             self._detected_os, self._detected_os or "Unknown")
         dev_label = DEVICES.get(self._detected_device, {}).get("label", self._detected_device or "Unknown")
-        self._confirm_lbl = _lbl(f"Detected {os_label} on {dev_label}. Is this correct?", 15, "#CCC")
+        self._confirm_lbl = _lbl(f"Detected {os_label} on {dev_label}. Is this correct?", 15, C_TEXT)
         cl.addWidget(self._confirm_lbl)
         cl.addWidget(_lbl("Online Plutonium play needs an account; setup needs a stable connection.",
                           12, C_TREY))
@@ -145,7 +145,7 @@ class SetupFlowScreen(QWidget):
         crow.addWidget(yes_btn); crow.addWidget(change_btn)
         cl.addLayout(crow)
         cl.addSpacing(12)
-        cl.addWidget(_lbl(_INTRO, 13, "#CCCCCC"))
+        cl.addWidget(_lbl(_INTRO, 13, C_DIM))
         for warn in _NOTES:
             cl.addWidget(_lbl(warn, 12, C_TREY, align=Qt.AlignmentFlag.AlignLeft))
         self._register_step("_confirm_section")
@@ -155,7 +155,7 @@ class SetupFlowScreen(QWidget):
         lay = QVBoxLayout(self._os_section)
         lay.setContentsMargins(28, 18, 28, 18); lay.setSpacing(10)
         _title_block(lay, main_size=32)
-        lay.addWidget(_lbl("What operating system are you running?", 15, "#CCC"))
+        lay.addWidget(_lbl("What operating system are you running?", 15, C_TEXT))
         lay.addWidget(_lbl("Online Plutonium play needs an account; setup needs a stable connection.",
                            12, C_TREY))
         lay.addSpacing(12)
@@ -176,7 +176,7 @@ class SetupFlowScreen(QWidget):
             os_row.addWidget(b)
         lay.addLayout(os_row)
         lay.addSpacing(12)
-        lay.addWidget(_lbl(_INTRO, 13, "#CCCCCC"))
+        lay.addWidget(_lbl(_INTRO, 13, C_DIM))
         for warn in _NOTES:
             lay.addWidget(_lbl(warn, 12, C_TREY, align=Qt.AlignmentFlag.AlignLeft))
         self._register_step("_os_section")
@@ -188,7 +188,7 @@ class SetupFlowScreen(QWidget):
         self._back_os_btn = _back_row(ml, self._back_to_os)
         ml.addSpacing(12)
         _title_block(ml, main_size=32)
-        ml.addWidget(_lbl("Which device do you have?", 15, "#CCC"))
+        ml.addWidget(_lbl("Which device do you have?", 15, C_TEXT))
         ml.addSpacing(12)
         mrow = QHBoxLayout(); mrow.setSpacing(20)
         lcd_btn  = _btn("Steam Deck LCD",  C_IW, h=56)
@@ -214,7 +214,7 @@ class SetupFlowScreen(QWidget):
         self._back_model_btn = _back_row(dvl, self._back_to_model)
         dvl.addSpacing(12)
         _title_block(dvl, main_size=32)
-        dvl.addWidget(_lbl("Select your device", 15, "#CCC"))
+        dvl.addWidget(_lbl("Select your device", 15, C_TEXT))
         dvl.addSpacing(4)
         dvl.addWidget(_lbl(
             "Choose your exact model when listed. Otherwise select Other handheld "
@@ -275,7 +275,7 @@ class SetupFlowScreen(QWidget):
         self._back_device_gyro_btn = _back_row(gl, self._back_to_device_from_gyro)
         gl.addSpacing(12)
         _title_block(gl, main_size=32)
-        gl.addWidget(_lbl("Do you want gyro aiming?", 15, "#CCC"))
+        gl.addWidget(_lbl("Do you want gyro aiming?", 15, C_TEXT))
         gl.addSpacing(12)
         grow = QHBoxLayout(); grow.setSpacing(20)
         gyro_yes = _btn("Enable gyro aiming", C_IW, h=52)
@@ -294,7 +294,7 @@ class SetupFlowScreen(QWidget):
         self._back_gyro_mode_btn = _back_row(gml, self._back_to_gyro_from_mode)
         gml.addSpacing(12)
         _title_block(gml, main_size=32)
-        gml.addWidget(_lbl("How should gyro activate?", 15, "#CCC"))
+        gml.addWidget(_lbl("How should gyro activate?", 15, C_TEXT))
         gml.addSpacing(4)
         self._gyro_mode_desc_lbl = _lbl("", 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         gml.addWidget(self._gyro_mode_desc_lbl)
@@ -323,7 +323,7 @@ class SetupFlowScreen(QWidget):
         self._back_gyro_name_btn = _back_row(nl, self._back_to_gyro_from_name)
         nl.addSpacing(12)
         _title_block(nl, main_size=32)
-        nl.addWidget(_lbl("What's your player name?", 15, "#CCC"))
+        nl.addWidget(_lbl("What's your player name?", 15, C_TEXT))
         nl.addSpacing(4)
         nl.addWidget(_lbl(
             "Your name in CoD4x, IW4x and Plutonium offline. "
@@ -337,7 +337,7 @@ class SetupFlowScreen(QWidget):
         self._name_input.setFixedHeight(48)
         self._name_input.setFont(font(14))
         self._name_input.setStyleSheet(
-            f"QLineEdit{{background:{C_CARD};color:#FFF;border:2px solid #33333F;"
+            f"QLineEdit{{background:{C_CARD};color:{C_TEXT};border:2px solid {C_LINE};"
             f"border-radius:8px;padding:0 16px;}}"
             f"QLineEdit:focus{{border-color:{C_IW};}}"
         )
@@ -362,7 +362,7 @@ class SetupFlowScreen(QWidget):
         self._back_name_ctrl_btn = _back_row(pcl, self._back_to_name_from_ctrl)
         pcl.addSpacing(12)
         _title_block(pcl, main_size=32)
-        self._ctrl_title_lbl = _lbl("What controller do you use?", 15, "#CCC")
+        self._ctrl_title_lbl = _lbl("What controller do you use?", 15, C_TEXT)
         pcl.addWidget(self._ctrl_title_lbl)
         pcl.addSpacing(4)
         self._ctrl_desc_lbl = _lbl(_CONTROLLER_TYPES, 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
@@ -389,7 +389,7 @@ class SetupFlowScreen(QWidget):
         self._back_res_btn = _back_row(rl, self._back_to_prev_from_res)
         rl.addSpacing(12)
         _title_block(rl, main_size=32)
-        self._res_title_lbl = _lbl("What resolution is your display?", 15, "#CCC")
+        self._res_title_lbl = _lbl("What resolution is your display?", 15, C_TEXT)
         rl.addWidget(self._res_title_lbl)
         rl.addSpacing(4)
         rl.addWidget(_lbl(
@@ -433,7 +433,7 @@ class SetupFlowScreen(QWidget):
         self._back_play_btn = _back_row(pl, self._back_to_prev_from_play)
         pl.addSpacing(12)
         _title_block(pl, main_size=32)
-        pl.addWidget(_lbl("How do you play?", 15, "#CCC"))
+        pl.addWidget(_lbl("How do you play?", 15, C_TEXT))
         pl.addSpacing(4)
         pl.addWidget(_lbl(
             "Handheld Only:  you only play on the device's own screen.\n"
@@ -460,7 +460,7 @@ class SetupFlowScreen(QWidget):
         self._back_docked_ctrl_btn = _back_row(dcl, self._back_to_resolution_from_docked_ctrl)
         dcl.addSpacing(12)
         _title_block(dcl, main_size=32)
-        dcl.addWidget(_lbl("What external controller do you use?", 15, "#CCC"))
+        dcl.addWidget(_lbl("What external controller do you use?", 15, C_TEXT))
         dcl.addSpacing(4)
         dcl.addWidget(_lbl(_CONTROLLER_TYPES, 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         dcl.addSpacing(12)

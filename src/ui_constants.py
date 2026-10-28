@@ -75,10 +75,10 @@ def _copy_log_to_clipboard(status_widget=None):
 
 
 # ── Colors ────────────────────────────────────────────────────────────────────
-# Branch accent — green for stable, amber for nightly. Game-family color is
+# Branch accent — green for stable, orange for nightly. Game-family color is
 # never used as the sole indication of success or failure.
 C_ACCENT    = C_IW if BRANCH == "stable" else C_TREY
-C_ACCENT_BG = "#243623" if BRANCH == "stable" else "#3B2C21"
+C_ACCENT_BG = "#203321" if BRANCH == "stable" else "#3A2619"
 
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────
@@ -526,7 +526,7 @@ QCheckBox::indicator {{ width:20px; height:20px; border:2px solid {C_LINE}; bord
 QCheckBox::indicator:checked {{ background:{C_IW}; border-color:{C_IW}; image:url("{check}"); }}
 QCheckBox::indicator:disabled {{ background:{C_CARD}; border-color:{C_LINE}; }}
 QRadioButton::indicator {{ width:20px; height:20px; }}
-QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{ background:{C_CARD}; color:{C_TEXT}; border:1px solid {C_LINE}; border-radius:7px; padding:6px 10px; selection-background-color:{C_BLUE_BTN}; }}
+QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{ background:{C_CARD}; color:{C_TEXT}; border:1px solid {C_LINE}; border-radius:7px; padding:6px 10px; selection-background-color:{C_IW}; selection-color:{C_BG}; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border:2px solid {C_FOCUS}; }}
 QPushButton:focus, QCheckBox:focus, QRadioButton:focus {{ border:2px solid {C_FOCUS}; }}
 QToolTip {{ background:{C_SURFACE}; color:{C_TEXT}; border:1px solid {C_LINE}; padding:6px; }}

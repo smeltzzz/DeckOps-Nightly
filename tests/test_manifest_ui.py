@@ -10,8 +10,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
-    from qt import QApplication, QStackedWidget, QWidget
+    from qt import QApplication, QStackedWidget, QWidget, QScrollArea
     import ui_manifest
+    import ui_theme
 except ImportError:
     QApplication = None
 
@@ -61,6 +62,40 @@ class ManifestNavigationTests(unittest.TestCase):
         self.assertFalse(mods.inst.isEnabled())
         mods.skip.click()
         self.assertEqual(stack.currentWidget().screen_name, "ManagementScreen")
+
+    def test_mod_choices_use_warm_palette_and_stay_reachable_at_800x500(self):
+        stack, mods = self._open(True)
+        mod = {"id": "sample", "name": "Sample Mod", "version": "1", "description": "Details",
+               "mode": "options", "options": [{"id": "base", "name": "Base", "description": "Choice",
+                                               "files": [{"size": 1024}]}]}
+        mods._found = [{"manifest": {**mod, "id": f"sample-{i}"}, "path": f"/games/sample-{i}.json"}
+                       for i in range(4)]
+        mods._build_roots()
+        mods._build_rows()
+        _APP.processEvents()
+        self.assertEqual(len(mods._rows), 4)
+        scroll = mods.findChild(QScrollArea, "")
+        self.assertGreater(mods._lw.sizeHint().height(), scroll.viewport().height())
+        self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
+        for item in mods._rows:
+            self.assertGreaterEqual(item["card"].height(), item["card"].minimumSizeHint().height())
+        row = mods._rows[0]
+        self.assertIn(f"background:{ui_theme.C_CARD}", row["card"].styleSheet())
+        option = row["card"].findChild(QWidget, "mmoption")
+        self.assertIn(f"background:{ui_theme.C_SURFACE}", option.styleSheet())
+        self.assertIn(f"background:{ui_theme.C_CARD}", mods.cdn.styleSheet())
+        self.assertIn(f"selection-color:{ui_theme.C_BG}", mods.root_choice.styleSheet())
+        row["cb"].setChecked(True)
+        self.assertTrue(mods.inst.isEnabled())
+        self.assertEqual(mods._selected()[0][1], "base")
+        mods._set_state(row, "INSTALLED", ui_theme.C_IW)
+        self.assertIn(f"background:{ui_theme.C_IW};color:{ui_theme.C_BG}",
+                      row["state"].styleSheet())
+        for button in (mods.back, mods.skip, mods.inst):
+            corner = button.mapTo(mods, button.rect().bottomRight())
+            self.assertLess(corner.x(), mods.width())
+            self.assertLess(corner.y(), mods.height())
+        self.assertGreater(mods._lw.height(), 0)
 
     def test_first_run_no_manifests_skips_to_game_scan(self):
         stack, mods = self._open(True)

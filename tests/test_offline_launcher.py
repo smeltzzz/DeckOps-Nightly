@@ -63,6 +63,12 @@ class OfflineLauncherTests(unittest.TestCase):
             row.set_focused_button(0)
             self.assertIn(f"color:{ui_theme.C_BG};", button.styleSheet())
 
+    def test_card_shadows_use_warm_palette_at_existing_opacities(self):
+        for alpha in (195, 235, 65):
+            shade = launcher._card_shade(alpha)
+            self.assertEqual(shade.name(), ui_theme.C_BG.lower())
+            self.assertEqual(shade.alpha(), alpha)
+
     def test_intent_commit_keeps_payload_and_cleans_pending_file(self):
         calls = []
         with patch.object(launcher, "_fadeout_audio"), \

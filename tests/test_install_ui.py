@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 try:
     from qt import QApplication, QStackedWidget, QWidget, QPushButton, QLabel, QCheckBox
     import ui_install
+    import ui_theme
     import ui_constants
     import ui_qt
 except ImportError:
@@ -93,6 +94,21 @@ class InstallUITests(unittest.TestCase):
         self.assertEqual(self.setup._checks["t4sp"][0].text(), "Solo / Zombies")
         self.assertFalse(self.setup._checks["t6mp"][0].isEnabled())
         self.assertIn("Black Ops II · Multiplayer", self.setup._checks["t6mp"][0].accessibleName())
+
+    def test_warm_selection_and_install_status_styles(self):
+        self.setup.steam_installed = {"cod4mp": self.game("CoD4 - Multiplayer")}
+        self.setup._build()
+        self.assertIn(f"background:{ui_theme.C_CARD}",
+                      self.setup._lw.findChildren(QWidget, "gameRow")[0].styleSheet())
+        buttons = {b.text(): b for b in self.setup.findChildren(QPushButton)}
+        client = buttons["CoD4R (recommended)"]
+        self.assertIn(f"background:{ui_theme.C_IW};color:{ui_theme.C_BG}", client.styleSheet())
+        self.assertIn(f"border-color:{ui_theme.C_TEXT}", client.styleSheet())
+        self.assertIn(f"color:{ui_theme.C_DIM}", self.install.log.styleSheet())
+        self.assertIn(f"background:{ui_theme.C_SURFACE}", self.install.summary.styleSheet())
+        self.assertIn(f"color:{ui_theme.C_TEXT}", self.install.summary.styleSheet())
+        self.assertIn(f"background:{ui_theme.C_SURFACE}", self.install.plut_warn.styleSheet())
+        self.assertIn(f"color:{ui_theme.C_BG}", self.install.plut_btn.styleSheet())
 
     def test_choices_survive_rescan_and_rebuild(self):
         self.setup.steam_installed = {"t4mp": self.game("World at War - Multiplayer")}

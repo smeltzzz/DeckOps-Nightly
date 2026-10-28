@@ -29,6 +29,15 @@ class ThemeUITests(unittest.TestCase):
         _APP = QApplication.instance() or QApplication([])
         _load_font()
 
+    def test_warm_palette_and_white_primary_text(self):
+        from ui_theme import C_BG, C_CARD, C_SURFACE, C_TEXT, C_IW, C_TREY
+        self.assertEqual((C_BG, C_CARD, C_SURFACE, C_TEXT, C_IW, C_TREY),
+                         ("#1B1A19", "#252523", "#2C2B28", "#FFFFFF",
+                          "#01AD10", "#F96800"))
+        self.assertIn('stroke="#1B1A19"',
+                      (Path(__file__).resolve().parents[1] /
+                       "assets/images/check.svg").read_text(encoding="utf-8"))
+
     def test_body_font_is_not_the_display_face(self):
         self.assertEqual(QFontInfo(font(11)).family(), "Atkinson Hyperlegible")
         self.assertEqual(QFontInfo(font(22, display=True)).family(), "Russo One")
@@ -51,7 +60,8 @@ class ThemeUITests(unittest.TestCase):
             self.assertEqual(settings._music_toggle.text(), "Music: OFF")
             settings._music_toggle.click()
             self.assertEqual(win._mute_btn.text(), "Music: On")
-            self.assertIn("color:#10151C", settings._music_toggle.styleSheet())
+            from ui_theme import C_BG
+            self.assertIn(f"color:{C_BG}", settings._music_toggle.styleSheet())
 
     def test_music_control_occupies_its_own_strip(self):
         previous_style, previous_font = _APP.styleSheet(), _APP.font()

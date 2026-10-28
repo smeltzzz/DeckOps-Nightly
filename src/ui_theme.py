@@ -4,15 +4,16 @@ The Linux app and the PyQt5 offline launcher both import this module so the
 shipped launcher has the same visual identity as the main window.
 """
 
-C_BG = "#10151C"
-C_CARD = "#1B242E"
-C_SURFACE = "#26313E"
-C_LINE = "#435263"
-C_TEXT = "#F3F6FA"
-C_DIM = "#ACB8C5"
-C_IW = "#A1D76B"
-C_TREY = "#FFAD66"
-C_DARK_BTN = "#344353"
-C_RED_BTN = "#A7353C"
-C_BLUE_BTN = "#386AA5"
+# Warm charcoal foundations; faction colors are accents, never body surfaces.
+C_BG = "#1B1A19"
+C_CARD = "#252523"
+C_SURFACE = "#2C2B28"
+C_LINE = "#59574F"
+C_TEXT = "#FFFFFF"
+C_DIM = "#C4C0B8"
+C_IW = "#01AD10"       # Modern Warfare
+C_TREY = "#F96800"     # Black Ops / Nightly
+C_DARK_BTN = "#3B3934"
+C_RED_BTN = "#963535"  # Destructive actions remain distinct from faction orange.
+C_BLUE_BTN = C_DARK_BTN  # Compatibility alias; no blue in the palette.
 C_FOCUS = "#FFFFFF"

@@ -503,6 +503,13 @@ def _get_setup_plut_keys() -> dict:
 
 # ── widgets ──────────────────────────────────────────────────────────────────
 
+def _card_shade(alpha: int) -> QColor:
+    """Warm, translucent ink over hero art without replacing the artwork."""
+    shade = QColor(C_BG)
+    shade.setAlpha(alpha)
+    return shade
+
+
 class GameRow(QWidget):
     """A local-art card with a readable fallback and full-name mode actions."""
 
@@ -647,11 +654,11 @@ class GameRow(QWidget):
             painter.fillRect(rect, fallback)
 
         shade = QLinearGradient(0, 0, 0, rect.height())
-        shade.setColorAt(0, QColor(10, 11, 15, 195))
-        shade.setColorAt(1, QColor(10, 11, 15, 235))
+        shade.setColorAt(0, _card_shade(195))
+        shade.setColorAt(1, _card_shade(235))
         painter.fillRect(rect, shade)
         if not self._has_modes:
-            painter.fillRect(rect, QColor(10, 11, 15, 65))
+            painter.fillRect(rect, _card_shade(65))
 
         painter.fillRect(QRect(0, 0, 4, rect.height()), QColor(self._color))
         if self._row_focused:
@@ -701,7 +708,7 @@ class LauncherWindow(QWidget):
         self._music_btn.setFixedHeight(36)
         self._music_btn.setFocusPolicy(Qt.NoFocus)
         self._music_btn.setStyleSheet(
-            f"QPushButton{{background:{C_DARK_BTN};color:#FFF;border:none;"
+            f"QPushButton{{background:{C_DARK_BTN};color:{C_TEXT};border:none;"
             f"border-radius:8px;padding:0 12px;}}"
             f"QPushButton:hover{{background:{C_DIM};color:{C_BG};}}"
         )
@@ -718,7 +725,7 @@ class LauncherWindow(QWidget):
         quit_btn.setStyleSheet(
             f"QPushButton{{background:transparent;color:{C_DIM};border:none;"
             f"border-radius:8px;}}"
-            f"QPushButton:hover{{background:{C_DARK_BTN};color:#FFF;}}"
+            f"QPushButton:hover{{background:{C_DARK_BTN};color:{C_TEXT};}}"
         )
         quit_btn.clicked.connect(self._quit_with_fade)
         hl.addWidget(quit_btn)

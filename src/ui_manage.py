@@ -22,7 +22,8 @@ import config as cfg
 import inhibit
 
 from ui_constants import (
-    C_BG, C_CARD, C_IW, C_TREY, C_DIM, C_DARK_BTN, C_RED_BTN, C_BLUE_BTN,
+    C_BG, C_CARD, C_SURFACE, C_LINE, C_TEXT, C_DIM, C_IW, C_TREY,
+    C_DARK_BTN, C_RED_BTN, C_FOCUS,
     font, _btn, _button_style, _lbl, _hdiv, _log_to_file, _log_html, _copy_log_to_clipboard,
     _Sigs, _detached_open, _header_bar, _header_path, _ask_iw4x_dlc,
     _show_preflight,
@@ -208,7 +209,7 @@ class ManagementCard(QFrame):
                 if missing:
                     detail += " · " + ", ".join(KEY_MODE_LABEL.get(k, k) for k in missing) + " to set up"
 
-        border_color = color if state == "Ready" else (C_TREY if ik or self._is_lan else "#444455")
+        border_color = color if state == "Ready" else (C_TREY if ik or self._is_lan else C_LINE)
         self.setStyleSheet(
             f"QFrame#MC{{background:{C_CARD};border-top:3px solid {border_color};border-radius:8px;}}"
         )
@@ -222,14 +223,14 @@ class ManagementCard(QFrame):
         # placing the badge directly over the title and status.
         img_container = QWidget()
         img_container.setFixedSize(_LIBRARY_CARD_W, _LIBRARY_COVER_H)
-        img_container.setStyleSheet("background:#111A22;border:none;")
+        img_container.setStyleSheet(f"background:{C_SURFACE};border:none;")
 
         self._img = QLabel(img_container)
         self._img.setFixedSize(_LIBRARY_CARD_W, _LIBRARY_COVER_H)
         self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._img.setFont(font(9, True))
         self._img.setText("NO ARTWORK\nAVAILABLE")
-        self._img.setStyleSheet("color:#8492A0;background:transparent;border:none;")
+        self._img.setStyleSheet(f"color:{C_DIM};background:transparent;border:none;")
         self._dim_art = state != "Ready"
 
         # Keep the client label outside the artwork: even its corner should
@@ -257,7 +258,7 @@ class ManagementCard(QFrame):
         name = gd["base"].replace("Call of Duty 4: Modern Warfare", "Modern Warfare 1")
         name = name.replace("Call of Duty: ", "")
         if self._is_lan: name = "Offline Mode"
-        title = _lbl(name, 10, "#F1F1F5", bold=True, align=Qt.AlignmentFlag.AlignLeft)
+        title = _lbl(name, 10, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft)
         title.setFixedHeight(38)
         self._title_label = title
         il.addWidget(title)
@@ -266,7 +267,7 @@ class ManagementCard(QFrame):
                                   bold=True, align=Qt.AlignmentFlag.AlignLeft, wrap=False)
         self._state_label.setAccessibleName(f"{name}: {state}")
         il.addWidget(self._state_label)
-        summary = _lbl(detail, 9, "#B5B5C2", align=Qt.AlignmentFlag.AlignLeft)
+        summary = _lbl(detail, 9, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         summary.setFixedHeight(42)
         self._summary_label = summary
         il.addWidget(summary)
@@ -398,9 +399,6 @@ class ManagementScreen(QWidget):
         actions.setContentsMargins(12, 4, 12, 8); actions.setSpacing(6)
         add_btn = _btn("Add Games", C_IW, size=9, h=38)
         add_btn.clicked.connect(self._add_games)
-        mods_btn = _btn("Mods", C_DARK_BTN, size=9, h=38)
-        mods_btn.setToolTip("Install optional manifest mods")
-        mods_btn.clicked.connect(lambda: go_to(self.stack, "ManifestModsScreen"))
         self._game_update_btn = _btn("Update Games", C_DARK_BTN, size=9, h=38)
         self._game_update_btn.clicked.connect(self._update_all_games)
         self._deckops_update_btn = _btn("DeckOps Update", C_DARK_BTN, size=9, h=38)
@@ -409,7 +407,7 @@ class ManagementScreen(QWidget):
         guide_btn.clicked.connect(self._open_guide)
         cfg_btn = _btn("Settings", C_DARK_BTN, size=9, h=38)
         cfg_btn.clicked.connect(lambda: go_to(self.stack, "ConfigureScreen"))
-        for button in (add_btn, mods_btn, self._game_update_btn,
+        for button in (add_btn, self._game_update_btn,
                        self._deckops_update_btn, guide_btn, cfg_btn):
             button.setStyleSheet(button.styleSheet().replace("padding:0 18px;", "padding:0 4px;"))
             button.setMinimumWidth(0)
@@ -840,7 +838,7 @@ class ManagementScreen(QWidget):
         dlg.setWindowTitle(f"{gd['base']} · Game Options")
         dlg.resize(460, 420)
         outer = QVBoxLayout(dlg); outer.setContentsMargins(18, 16, 18, 14); outer.setSpacing(8)
-        outer.addWidget(_lbl("GAME OPTIONS", 15, "#FFF", bold=True,
+        outer.addWidget(_lbl("GAME OPTIONS", 15, C_TEXT, bold=True,
                              align=Qt.AlignmentFlag.AlignLeft, wrap=False))
         outer.addWidget(_lbl(gd["base"], 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         options = QScrollArea(); options.setWidgetResizable(True)
@@ -854,7 +852,7 @@ class ManagementScreen(QWidget):
             b = _btn(title, C_RED_BTN if destructive else C_DARK_BTN, size=11, h=40)
             b.clicked.connect(lambda _checked=False: (choice.append(token), dlg.accept()))
             actions.addWidget(b)
-            actions.addWidget(_lbl(description, 10, "#B5B5C2",
+            actions.addWidget(_lbl(description, 10, C_DIM,
                                    align=Qt.AlignmentFlag.AlignLeft))
 
         if has_mods_support:
@@ -1231,14 +1229,14 @@ class SetupCompleteScreen(QWidget):
 
         banner = QWidget(); heading = QVBoxLayout(banner)
         heading.setContentsMargins(24,10,24,10); heading.setSpacing(4)
-        self._heading = _lbl("SETUP COMPLETE", 20, "#FFF", bold=True,
+        self._heading = _lbl("SETUP COMPLETE", 20, C_TEXT, bold=True,
                              align=Qt.AlignmentFlag.AlignLeft, wrap=False)
         self._heading.setFont(font(20, True, display=True))
         heading.addWidget(self._heading)
         self._intro = _lbl(
             "DeckOps set up controller layouts, GE-Proton and display settings. "
             "Open Steam or return to Game Mode to play.",
-            11, "#B9C5D1", align=Qt.AlignmentFlag.AlignLeft)
+            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         heading.addWidget(self._intro)
         lay.addWidget(banner)
 
@@ -1251,7 +1249,7 @@ class SetupCompleteScreen(QWidget):
         sl = QVBoxLayout(inner); sl.setContentsMargins(24,8,24,12); sl.setSpacing(8)
 
         def _note(label, accent, background=C_CARD):
-            label.setStyleSheet(f"QLabel{{color:#D6E0E9;background:{background};border-left:3px solid {accent};"
+            label.setStyleSheet(f"QLabel{{color:{C_TEXT};background:{background};border-left:3px solid {accent};"
                                 "border-radius:5px;padding:8px 12px;}")
 
         # ── Cloud saves ───────────────────────────────────────────────────────
@@ -1261,7 +1259,7 @@ class SetupCompleteScreen(QWidget):
             "If Steam asks about cloud saves, choose Keep Local. "
             "If a game asks about Safe Mode or hardware changes, choose No.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        _note(cloud_note, C_TREY, "#2B211B")
+        _note(cloud_note, C_TREY, C_SURFACE)
         sl.addWidget(cloud_note)
         restore_position = sl.count()  # save recovery stays before the long play guide
 
@@ -1276,13 +1274,13 @@ class SetupCompleteScreen(QWidget):
 
         # ── First launch ─────────────────────────────────────────────────────
         sl.addWidget(_hdiv())
-        sl.addWidget(_lbl("FIRST LAUNCH", 12, "#5B9BD5", bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        sl.addWidget(_lbl("FIRST LAUNCH", 12, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft))
         first_launch = _lbl(
             "Every game takes longer to launch the first time while Proton sets things up. "
             "It's faster after that.\n\n"
             "Plutonium games must be launched once before Offline Mode can use them.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        _note(first_launch, C_BLUE_BTN)
+        _note(first_launch, C_IW)
         sl.addWidget(first_launch)
 
         # ── MW2 MP own-game first launch ──────────────────────────────────────
@@ -1307,7 +1305,7 @@ class SetupCompleteScreen(QWidget):
             "Plutonium games don't use them.\n\n"
             "Quit from the game's own menu, not the Steam overlay, for a faster exit.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        _note(self._lcd_body, C_TREY, "#2B211B")
+        _note(self._lcd_body, C_TREY, C_SURFACE)
         sl.addWidget(self._lcd_div)
         sl.addWidget(self._lcd_hdr)
         sl.addWidget(self._lcd_body)
@@ -1443,7 +1441,7 @@ class ConfigureScreen(QWidget):
         super().__init__(); self.stack=stack; self.screen_name = "ConfigureScreen"
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         hdr, hl = _header_bar()
-        t = _lbl("SETTINGS", 16, "#CCC", bold=True, wrap=False)
+        t = _lbl("SETTINGS", 16, C_TEXT, bold=True, wrap=False)
         hl.insertSpacing(2, 20); hl.insertWidget(3, t)
         back = _btn("<< Back", C_DARK_BTN, size=12, h=40); back.setFixedWidth(140)
         back.clicked.connect(lambda: go_to(self.stack, "ManagementScreen"))
@@ -1466,7 +1464,7 @@ class ConfigureScreen(QWidget):
         self._settings_narrow = None
         self._layout_settings()
 
-        def _head(col, text, color="#CCC", first=False):
+        def _head(col, text, color=C_TEXT, first=False):
             if not first: col.addSpacing(12)
             col.addWidget(_lbl(text, 13, color, bold=True, align=Qt.AlignmentFlag.AlignLeft))
 
@@ -1501,7 +1499,7 @@ class ConfigureScreen(QWidget):
         _desc(left, "Pick how gyro aiming works, then press Re-apply Templates to write the "
                     "controller layout for all your games. Closes Steam.")
         gr = QHBoxLayout(); gr.setSpacing(8)
-        gr.addWidget(_lbl("Gyro:", 12, "#AAA", wrap=False))
+        gr.addWidget(_lbl("Gyro:", 12, C_DIM, wrap=False))
         self._gyro_btns = {}
         # SD LCD/OLED and Steam Machine get 4 modes; others get 2.
         # Hold/toggle hidden dynamically in showEvent.
@@ -1552,9 +1550,10 @@ class ConfigureScreen(QWidget):
         self._name_input.setFixedHeight(40)
         self._name_input.setMaxLength(32)
         self._name_input.setStyleSheet(
-            "QLineEdit{background:#2A2A3A;color:#FFF;border:1px solid #444;"
+            f"QLineEdit{{background:{C_SURFACE};color:{C_TEXT};border:1px solid {C_LINE};"
             "border-radius:6px;padding:0 10px;font-size:13px;}"
-            "QLineEdit:focus{border:1px solid #888;}"
+            f"QLineEdit:focus{{border:2px solid {C_FOCUS};}}"
+            f"QLineEdit:disabled{{background:{C_CARD};color:{C_DIM};border-color:{C_LINE};}}"
         )
         save_btn = _btn("Save", C_IW, size=12, h=40)
         save_btn.setFixedWidth(90)
@@ -1571,7 +1570,7 @@ class ConfigureScreen(QWidget):
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
         left.addWidget(fps_btn)
         left.addSpacing(6)
-        left.addWidget(_lbl("MW2 and MW3 campaign", 12, "#AAA", bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        left.addWidget(_lbl("MW2 and MW3 campaign", 12, C_DIM, bold=True, align=Qt.AlignmentFlag.AlignLeft))
         _desc(left, "These two campaigns ignore their config files, so the button above does nothing "
                     "for them.\n"
                     "FOV: DeckOps sets it to 90 by itself every time you start the game.\n"
@@ -1586,7 +1585,7 @@ class ConfigureScreen(QWidget):
         self._shader_row = QWidget()
         sr_lay = QVBoxLayout(self._shader_row); sr_lay.setContentsMargins(0,0,0,0); sr_lay.setSpacing(10)
         sr_lay.addSpacing(12)
-        sr_lay.addWidget(_lbl("Shader Cache", 13, "#CCC", bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        sr_lay.addWidget(_lbl("Shader Cache", 13, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft))
         _desc(sr_lay, "Clears the shader cache of every game you have set up. LCD only.")
         sc_btn = _btn("Clear Shader Cache", C_DARK_BTN, size=12, h=40)
         sc_btn.setFixedWidth(220)
@@ -1602,7 +1601,7 @@ class ConfigureScreen(QWidget):
         _head(right, "Links", first=True)
         _desc(right, "Support on Discord, and the Stable and Nightly project pages.")
         lr = QHBoxLayout(); lr.setSpacing(12)
-        discord_btn = _btn("Discord", "#5865F2", size=12, h=40)
+        discord_btn = _btn("Discord", C_DARK_BTN, size=12, h=40)
         discord_btn.setFixedWidth(120)
         discord_btn.clicked.connect(lambda: self._open_url("https://discord.gg/bkSQeq5Azk"))
         stable_btn = _btn("Stable", C_DARK_BTN, size=12, h=40)
@@ -1618,7 +1617,7 @@ class ConfigureScreen(QWidget):
         _head(right, "Updates & Logs")
         _desc(right, "Checks for a new DeckOps version. The log shows what DeckOps has done; "
                      "copy it when you report a problem.")
-        self._update_btn = _btn("Check for Updates", C_BLUE_BTN, size=12, h=40)
+        self._update_btn = _btn("Check for Updates", C_DARK_BTN, size=12, h=40)
         self._update_btn.setFixedWidth(220)
         self._update_btn.clicked.connect(self._check_for_updates)
         right.addWidget(self._update_btn)
@@ -2055,14 +2054,14 @@ class ConfigureScreen(QWidget):
         vl.addWidget(_lbl("No games are set up yet." if not results else
                           "Everything looks fine." if not bad else
                           f"{len(bad)} of {len(results)} game(s) need attention.",
-                          13, "#CCC", bold=True, align=Qt.AlignmentFlag.AlignLeft))
+                          13, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft))
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         inner = QWidget(); rows = QVBoxLayout(inner); rows.setSpacing(8)
         for r in results:
             row = QHBoxLayout()
             text = f"✓  {r['name']}" if not r["problems"] else \
                 f"⚠  {r['name']}\n" + "\n".join("     • " + p for p in r["problems"])
-            row.addWidget(_lbl(text, 11, C_DIM if not r["problems"] else "#E0B050",
+            row.addWidget(_lbl(text, 11, C_DIM if not r["problems"] else C_TREY,
                                align=Qt.AlignmentFlag.AlignLeft), stretch=1)
             if r["fixable"]:
                 fix = _btn("Fix", C_IW, size=11, h=36); fix.setFixedWidth(90)
@@ -2106,7 +2105,11 @@ class ConfigureScreen(QWidget):
         dlg.resize(700, 480)
         vl = QVBoxLayout(dlg); vl.setContentsMargins(12,12,12,12); vl.setSpacing(8)
         txt = QPlainTextEdit(); txt.setReadOnly(True); txt.setFont(font(10))
-        txt.setStyleSheet("QPlainTextEdit{color:#AAB;background:#1A1A24;border:1px solid #333;border-radius:4px;padding:6px;}")
+        txt.setStyleSheet(
+            f"QPlainTextEdit{{color:{C_TEXT};background:{C_SURFACE};border:1px solid {C_LINE};"
+            "border-radius:4px;padding:6px;}"
+            f"QPlainTextEdit:focus{{border:2px solid {C_FOCUS};}}"
+            f"QPlainTextEdit:disabled{{background:{C_CARD};color:{C_DIM};border-color:{C_LINE};}}")
         txt.setPlainText(tail)
         vl.addWidget(txt, stretch=1)
         br = QHBoxLayout()
@@ -2397,10 +2400,10 @@ class UpdateScreen(QWidget):
 
         content = QWidget(); body = QVBoxLayout(content)
         body.setContentsMargins(20,12,20,12); body.setSpacing(8)
-        self.title = _lbl("GAME UPDATES", 18, "#FFF", bold=True,
+        self.title = _lbl("GAME UPDATES", 18, C_TEXT, bold=True,
                           align=Qt.AlignmentFlag.AlignLeft)
         body.addWidget(self.title)
-        self.cur = _lbl("Preparing...", 12, "#D9E0E7", align=Qt.AlignmentFlag.AlignLeft)
+        self.cur = _lbl("Preparing...", 12, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
         self.cur.setAccessibleName("Current update status")
         body.addWidget(self.cur)
         self.bar = QProgressBar(); self.bar.setRange(0, 100)
@@ -2424,8 +2427,10 @@ class UpdateScreen(QWidget):
         self.log.setMinimumHeight(100)
         self.log.setAccessibleName("Game update and repair log")
         self.log.setStyleSheet(
-            f"QPlainTextEdit{{color:#CAD2DB;background:{C_CARD};border:1px solid #445061;"
-            "border-radius:7px;padding:8px;}")
+            f"QPlainTextEdit{{color:{C_TEXT};background:{C_CARD};border:1px solid {C_LINE};"
+            "border-radius:7px;padding:8px;}"
+            f"QPlainTextEdit:focus{{border:2px solid {C_FOCUS};}}"
+            f"QPlainTextEdit:disabled{{background:{C_SURFACE};color:{C_DIM};border-color:{C_LINE};}}")
         body.addWidget(self.log, stretch=1)
 
         # Keep a footer slot reserved while work runs. Waiting, retry and Back
@@ -2473,7 +2478,7 @@ class UpdateScreen(QWidget):
     def _plutonium_closed(self):
         self.steam_btn.setVisible(False)
         self.cur.setText("Checking Plutonium and finishing game updates...")
-        self.cur.setStyleSheet("color:#D9E0E7;background:transparent;")
+        self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
 
     def _ask_continue(self, text):
         """UI thread: answer a worker's Yes/No question (see _confirm)."""
@@ -2535,7 +2540,7 @@ class UpdateScreen(QWidget):
     def _start_update(self):
         self.bar.setValue(0); self.log.clear()
         self.cur.setText("Preparing...")
-        self.cur.setStyleSheet("color:#D9E0E7;background:transparent;")
+        self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
         self._log_status.setText("")
         self.title.setText(self.task[0] if self.task else "GAME UPDATES")
         self.steam_btn.setVisible(False); self.back_btn.setVisible(False)

@@ -10,7 +10,7 @@ the library entry stays open with guidance.
 import html, os, threading
 
 from qt import (
-    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QScrollArea, QCheckBox, QRadioButton,
+    QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLayout, QScrollArea, QCheckBox, QRadioButton,
     QButtonGroup, QProgressBar, QLineEdit, QPlainTextEdit, QMessageBox, QComboBox, QSizePolicy,
 )
 from qt import Qt
@@ -21,12 +21,13 @@ import manifest_mods as mm
 from net import _fmt_size
 
 from ui_constants import (
-    C_CARD, C_IW, C_TREY, C_DIM, C_DARK_BTN,
+    C_BG, C_CARD, C_SURFACE, C_LINE, C_TEXT, C_IW, C_TREY, C_DIM, C_DARK_BTN,
     font, _btn, _lbl, _badge, _header_bar, _log_to_file, _log_html, _copy_log_to_clipboard, _Sigs, go_to,
 )
 
 _NEXT_TO_JSON = "@json"
-_BOX_CSS = f"color:#E5E5EC;background:#1A1A2A;border:1px solid {C_DIM};border-radius:8px;padding:10px 14px;"
+_BOX_CSS = (f"color:{C_TEXT};background:{C_SURFACE};border:1px solid {C_LINE};"
+            "border-radius:8px;padding:10px 14px;")
 
 
 class ManifestModsScreen(QWidget):
@@ -41,7 +42,7 @@ class ManifestModsScreen(QWidget):
         # Keep the choices and actions visible at handheld sizes; only the mod list scrolls.
         self._pick = QWidget(); clay = QVBoxLayout(self._pick)
         clay.setContentsMargins(24, 14, 24, 16); clay.setSpacing(10)
-        clay.addWidget(_lbl("OPTIONAL MODS", 17, "#FFF", bold=True,
+        clay.addWidget(_lbl("OPTIONAL MODS", 17, C_TEXT, bold=True,
                             align=Qt.AlignmentFlag.AlignLeft, wrap=False))
         self.status = _lbl("Looking for mod manifests...", 11, C_DIM,
                            align=Qt.AlignmentFlag.AlignLeft)
@@ -54,7 +55,7 @@ class ManifestModsScreen(QWidget):
         self.cdn = QLineEdit(); self.cdn.setPlaceholderText("cdn.example.com/mods")
         self.cdn.setAccessibleName("Mod CDN address"); self.cdn.setFixedHeight(38)
         self.cdn.setFont(font(11))
-        self.cdn.setStyleSheet(f"QLineEdit{{background:{C_CARD};color:#FFF;border:1px solid #555568;"
+        self.cdn.setStyleSheet(f"QLineEdit{{background:{C_CARD};color:{C_TEXT};border:1px solid {C_LINE};"
                                f"border-radius:7px;padding:0 10px;}}QLineEdit:focus{{border-color:{C_IW};}}")
         cdn_col.addWidget(self.cdn); settings.addLayout(cdn_col, 1)
 
@@ -65,10 +66,11 @@ class ManifestModsScreen(QWidget):
         self.root_choice.setAccessibleName("Install location for selected mods")
         self.root_choice.setToolTip("Choose where the selected mods will be installed")
         self.root_choice.setStyleSheet(
-            f"QComboBox{{background:{C_CARD};color:#FFF;border:1px solid #555568;"
+            f"QComboBox{{background:{C_CARD};color:{C_TEXT};border:1px solid {C_LINE};"
             "border-radius:7px;padding:0 10px;}"
             f"QComboBox:focus{{border-color:{C_IW};}}"
-            f"QComboBox QAbstractItemView{{background:{C_CARD};color:#FFF;selection-background-color:{C_DARK_BTN};}}")
+            f"QComboBox QAbstractItemView{{background:{C_CARD};color:{C_TEXT};"
+            f"selection-background-color:{C_IW};selection-color:{C_BG};}}")
         self.root_choice.currentIndexChanged.connect(lambda _i: self._refresh_rows())
         root_col.addWidget(self.root_choice); settings.addLayout(root_col, 1)
         clay.addLayout(settings)
@@ -79,6 +81,8 @@ class ManifestModsScreen(QWidget):
         scroll.setAccessibleName("Available mods and their install options")
         self._lw = QWidget(); self._list = QVBoxLayout(self._lw)
         self._list.setContentsMargins(0, 0, 4, 0); self._list.setSpacing(8); self._list.addStretch()
+        # Preserve each mod row's minimum height when the list exceeds the viewport.
+        self._list.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         scroll.setWidget(self._lw); clay.addWidget(scroll, stretch=1)
 
         self.warning = _lbl("", 11, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
@@ -101,7 +105,7 @@ class ManifestModsScreen(QWidget):
         # Progress, log and results share the space without forcing the actions off screen.
         self._run = QWidget(); rlay = QVBoxLayout(self._run)
         rlay.setContentsMargins(24, 16, 24, 16); rlay.setSpacing(10)
-        self.cur = _lbl("Preparing...", 14, "#E5E5EC", bold=True,
+        self.cur = _lbl("Preparing...", 14, C_TEXT, bold=True,
                         align=Qt.AlignmentFlag.AlignLeft)
         self.cur.setAccessibleDescription("Mod operation status"); rlay.addWidget(self.cur)
         self.bar = QProgressBar(); self.bar.setRange(0, 100)
@@ -113,8 +117,8 @@ class ManifestModsScreen(QWidget):
         self.log.setAccessibleName("Mod operation log")
         self.log.setMinimumHeight(80)
         self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
-        self.log.setStyleSheet(f"QPlainTextEdit{{color:#BDBDCD;background:{C_CARD};"
-                               "border:1px solid #444455;border-radius:8px;padding:8px;}")
+        self.log.setStyleSheet(f"QPlainTextEdit{{color:{C_DIM};background:{C_CARD};"
+                               f"border:1px solid {C_LINE};border-radius:8px;padding:8px;}}")
         rlay.addWidget(self.log, stretch=1)
         self._log_status = _lbl("", 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         log_btn = _btn("Copy log", C_DARK_BTN, size=10, h=36)
@@ -123,7 +127,7 @@ class ManifestModsScreen(QWidget):
         lr.addWidget(log_btn); lr.addWidget(self._log_status, 1)
         rlay.addLayout(lr)
 
-        self.summary = _lbl("", 11, "#E5E5EC", align=Qt.AlignmentFlag.AlignLeft)
+        self.summary = _lbl("", 11, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
         self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.summary.setStyleSheet(_BOX_CSS)
@@ -190,7 +194,7 @@ class ManifestModsScreen(QWidget):
                       if self._scan_error else
                       "Place a supported manifest .json file in a Games folder (internal storage or SD card), "
                       "then close and reopen Mods to scan again. Your installed games are unchanged.")
-            empty = _lbl(detail, 12, "#E5E5EC", align=Qt.AlignmentFlag.AlignLeft)
+            empty = _lbl(detail, 12, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
             empty.setStyleSheet(_BOX_CSS)
             self._list.insertWidget(0, empty)
             self.cdn.setEnabled(False); self.root_choice.setEnabled(False)
@@ -231,18 +235,18 @@ class ManifestModsScreen(QWidget):
     def _choice_line(button, title, detail=""):
         """A full-width choice with a wrapping label, instead of clipped option pills."""
         w = QWidget(); w.setObjectName("mmoption")
-        w.setStyleSheet("QWidget#mmoption{background:#292932;border-radius:6px;}")
+        w.setStyleSheet(f"QWidget#mmoption{{background:{C_SURFACE};border-radius:6px;}}")
         row = QHBoxLayout(w); row.setContentsMargins(10, 6, 10, 6); row.setSpacing(8)
         button.setAccessibleName(title)
         button.setMinimumHeight(30); row.addWidget(button, alignment=Qt.AlignmentFlag.AlignTop)
         text = QVBoxLayout(); text.setSpacing(2)
-        label = _lbl(title, 11, "#F0F0F4", align=Qt.AlignmentFlag.AlignLeft)
+        label = _lbl(title, 11, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setCursor(Qt.CursorShape.PointingHandCursor)
         label.mousePressEvent = lambda _e: button.isEnabled() and button.click()
         text.addWidget(label)
         if detail:
-            note = _lbl(detail, 10, "#B6B6C5", align=Qt.AlignmentFlag.AlignLeft)
+            note = _lbl(detail, 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
             note.setTextFormat(Qt.TextFormat.PlainText)
             text.addWidget(note)
         row.addLayout(text, 1)
@@ -255,7 +259,7 @@ class ManifestModsScreen(QWidget):
         self._rows = []
         for f in self._found:
             card = QFrame(); card.setObjectName("mmcard")
-            card.setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid #444455;border-radius:8px;}}")
+            card.setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid {C_LINE};border-radius:8px;}}")
             v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 10); v.setSpacing(7)
             if "error" in f:
                 error = _lbl(f"Could not read {f['file']}: {f['error']}", 11, C_TREY,
@@ -267,7 +271,7 @@ class ManifestModsScreen(QWidget):
             cb = QCheckBox(); cb.setAccessibleName(f"Select {m['name']} for installation")
             cb.setMinimumHeight(32); head.addWidget(cb, alignment=Qt.AlignmentFlag.AlignTop)
             title = m["name"] + (f"  ·  v{m['version']}" if m["version"] else "")
-            name = _lbl(title, 12, "#FFF", bold=True, align=Qt.AlignmentFlag.AlignLeft)
+            name = _lbl(title, 12, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft)
             name.setTextFormat(Qt.TextFormat.PlainText)
             name.setCursor(Qt.CursorShape.PointingHandCursor)
             name.mousePressEvent = lambda _e, b=cb: b.isEnabled() and b.setChecked(not b.isChecked())
@@ -279,7 +283,7 @@ class ManifestModsScreen(QWidget):
             unin.setVisible(False); head.addWidget(unin, alignment=Qt.AlignmentFlag.AlignTop)
             v.addLayout(head)
             if m["description"]:
-                desc = _lbl(m["description"], 10, "#B6B6C5", align=Qt.AlignmentFlag.AlignLeft)
+                desc = _lbl(m["description"], 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
                 desc.setTextFormat(Qt.TextFormat.PlainText); v.addWidget(desc)
             choices = QVBoxLayout(); choices.setContentsMargins(30, 0, 0, 0); choices.setSpacing(5)
             if m["mode"] == "components":
@@ -315,11 +319,11 @@ class ManifestModsScreen(QWidget):
         self._refresh_rows()
 
     def _set_state(self, r, text, color):
-        r["card"].setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid {color or '#444455'};border-radius:8px;}}")
+        r["card"].setStyleSheet(f"QFrame#mmcard{{background:{C_CARD};border-top:3px solid {color or C_LINE};border-radius:8px;}}")
         b = r["state"]; b.setVisible(bool(text)); b.setText(text)
         b.setAccessibleName(f"{r['m']['name']}: {text.lower()}" if text else "")
-        b.setStyleSheet(f"QPushButton{{background:{color};color:#151518;border:none;border-radius:4px;}}"
-                        f"QPushButton:disabled{{background:{color};color:#151518;}}")
+        b.setStyleSheet(f"QPushButton{{background:{color};color:{C_BG};border:none;border-radius:4px;}}"
+                        f"QPushButton:disabled{{background:{color};color:{C_BG};}}")
 
     def _refresh_rows(self):
         for r in self._rows:
@@ -385,7 +389,7 @@ class ManifestModsScreen(QWidget):
         self._busy = True; self._set_enabled(False)
         self._pick.setVisible(False); self._run.setVisible(True)
         self.cur.setText(f"Installing {len(sel)} mod{'s' if len(sel) != 1 else ''}...")
-        self.cur.setStyleSheet("color:#E5E5EC;background:transparent;")
+        self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
         self.bar.setRange(0, 100); self.bar.setValue(0); self.bar.setTextVisible(True)
         self.log.clear(); self._log_status.setText(""); self._log_status.setVisible(False)
         self._summary_scroll.setVisible(False); self.mods_btn.setVisible(False); self.cont.setVisible(False)
@@ -440,7 +444,7 @@ class ManifestModsScreen(QWidget):
         self._busy = True; self._set_enabled(False)
         self._pick.setVisible(False); self._run.setVisible(True)
         self.cur.setText(f"Removing {r['m']['name']}...")
-        self.cur.setStyleSheet("color:#E5E5EC;background:transparent;")
+        self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
         self.bar.setRange(0, 0); self.bar.setTextVisible(False)  # No uninstall percentages.
         self.log.clear(); self._log_status.setText(""); self._log_status.setVisible(False)
         self._summary_scroll.setVisible(False); self.mods_btn.setVisible(False); self.cont.setVisible(False)
@@ -474,7 +478,7 @@ class ManifestModsScreen(QWidget):
         if ok:
             text = f'<span style="color:{C_IW}">&#10003; {name} removed</span>'
             if left:
-                text += f'<br><span style="color:#E5E5EC">{len(left)} changed file(s) kept. See the log for details.</span>'
+                text += f'<br><span style="color:{C_TEXT}">{len(left)} changed file(s) kept. See the log for details.</span>'
         else:
             text = f'<span style="color:{C_TREY}">&#10007; {name}: {html.escape(msg)}</span>'
             text += '<br>Review the log, then return to mods to try again.'

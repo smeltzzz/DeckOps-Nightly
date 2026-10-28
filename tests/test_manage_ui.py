@@ -220,6 +220,40 @@ class ManagementUITests(unittest.TestCase):
         self.assertLessEqual(self.screen._scroll.widget().width(),
                              self.screen._scroll.viewport().width())
 
+    def test_library_toolbar_has_no_mods_but_game_options_keep_them(self):
+        self.ready.add("cod4mp")
+        gd = ui_manage.ALL_GAMES[0]
+        self.screen.set_installed({"cod4mp": {"source": "steam", "install_dir": "/game"}})
+        _APP.processEvents()
+
+        toolbar = self.screen.layout().itemAt(1).widget()
+        buttons = toolbar.findChildren(QPushButton)
+        self.assertEqual([b.text() for b in buttons],
+                         ["Add Games", "Update Games", "DeckOps Update", "Guide", "Settings"])
+        self.assertEqual((self.stack.width(), self.stack.height()), (800, 500))
+        for button in buttons:
+            with self.subTest(button=button.text()):
+                left = button.mapTo(self.screen, button.rect().topLeft()).x()
+                right = button.mapTo(self.screen, button.rect().bottomRight()).x()
+                self.assertGreaterEqual(left, 0)
+                self.assertLess(right, self.screen.width())
+                self.assertGreaterEqual(button.width(), button.minimumSizeHint().width())
+        for previous, following in zip(buttons, buttons[1:]):
+            self.assertLess(previous.geometry().right(), following.geometry().left())
+
+        card = self.screen._cards[0]
+        game_options = next(b for b in self.buttons(card) if b.text() == "Game Options")
+
+        def select_mod_folders(dialog):
+            mod_action = next(b for b in dialog.findChildren(QPushButton)
+                              if b.text() == "Open Mod Folders")
+            mod_action.click()
+
+        with patch.object(ui_manage.QDialog, "exec", select_mod_folders), \
+             patch.object(self.screen, "_mods") as open_mods:
+            game_options.click()
+        open_mods.assert_called_once_with(gd, ["cod4mp"])
+
     def test_partial_card_sets_up_only_missing_detected_mode(self):
         gd = ui_manage.ALL_GAMES[0]
         self.ready.add("cod4mp")

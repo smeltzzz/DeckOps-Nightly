@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 try:
     from qt import QApplication, QStackedWidget, QWidget, QPushButton, QScrollArea
     import ui_setup
+    import ui_theme
 except ImportError:
     QApplication = None
 
@@ -127,6 +128,18 @@ class SetupUITests(unittest.TestCase):
                     with self.subTest(step=name, button=button.text()):
                         self.assertLess(button.mapTo(area.viewport(), button.rect().bottomRight()).x(),
                                         area.viewport().width())
+
+    def test_warm_input_and_first_run_mod_step(self):
+        style = self.wizard._name_input.styleSheet()
+        self.assertIn(f"background:{ui_theme.C_CARD}", style)
+        self.assertIn(f"color:{ui_theme.C_TEXT}", style)
+        self.assertIn(f"border:2px solid {ui_theme.C_LINE}", style)
+        self.assertIn(f"border-color:{ui_theme.C_IW}", style)
+        manifest = QWidget()
+        manifest.screen_name = "ManifestModsScreen"
+        self.stack.addWidget(manifest)
+        self.wizard._finish()
+        self.assertIs(self.stack.currentWidget(), manifest)
 
     def test_unknown_hardware_is_not_assumed_to_be_a_pc(self):
         self.assertEqual(self.wizard._current_section, "_os_section")

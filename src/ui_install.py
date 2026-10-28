@@ -20,7 +20,7 @@ import inhibit
 from net import DownloadError
 
 from ui_constants import (
-    C_BG, C_IW, C_TREY, C_DIM, C_DARK_BTN, C_BLUE_BTN, C_CARD,
+    C_BG, C_CARD, C_SURFACE, C_LINE, C_TEXT, C_IW, C_TREY, C_DIM, C_DARK_BTN,
     font, _btn, _lbl, _title_block, _header_bar, _log_to_file, _log_html, _copy_log_to_clipboard, _Sigs,
     ALL_GAMES, KEY_CLIENT, KEY_MODE_LABEL,
     _active_keys, _active_client,
@@ -53,7 +53,7 @@ class WelcomeScreen(QWidget):
             "•  Keep the device somewhere it can cool down, not on a blanket.",
             12, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
         self.notice.setStyleSheet(
-            f"color:{C_TREY};background:#2A1A08;border:1px solid {C_TREY};"
+            f"color:{C_TREY};background:{C_SURFACE};border:1px solid {C_TREY};"
             "border-radius:8px;padding:10px 16px;")
         self.notice.setVisible(False)
         # Results and safety advice can scroll independently of the navigation.
@@ -255,7 +255,7 @@ class SetupScreen(QWidget):
         back.clicked.connect(self._go_back)
         self._folder_btn = _btn("Choose Folder", C_DARK_BTN, size=10, h=40)
         self._folder_btn.clicked.connect(self._pick_folder)
-        self.inst_btn = _btn("Review and install →", C_IW, size=10, h=40)
+        self.inst_btn = _btn("Review and install", C_IW, size=10, h=40)
         self.inst_btn.clicked.connect(self._go_install)
         brow.addWidget(back); brow.addWidget(self._folder_btn)
         brow.addWidget(self.inst_btn, stretch=1); clay.addLayout(brow)
@@ -373,7 +373,8 @@ class SetupScreen(QWidget):
                 cb.setChecked(self._extra_choices.get(title, bool(checked)) and not missing)
                 if not missing:
                     cb.toggled.connect(lambda on, name=title: self._extra_choices.__setitem__(name, on))
-                cb.setStyleSheet("QCheckBox{color:#FFF;background:transparent;} QCheckBox:disabled{color:#666677;}")
+                cb.setStyleSheet(f"QCheckBox{{color:{C_TEXT};background:transparent;}} "
+                                 f"QCheckBox:disabled{{color:{C_DIM};}}")
                 v.addWidget(cb)
             n = _lbl(f"{note} \u00b7 {missing}" if missing else note, 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft); v.addWidget(n)
             if missing:
@@ -437,13 +438,15 @@ class SetupScreen(QWidget):
             w, v = _opt_box()
             h = QHBoxLayout(); h.setSpacing(6)
             h.addWidget(_lbl("MP client:", 11, C_DIM, wrap=False))
-            note = _lbl(notes[self._cod4_choice], 10, "#777788", align=Qt.AlignmentFlag.AlignLeft)
+            note = _lbl(notes[self._cod4_choice], 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
             grp = QButtonGroup(w)
             for val, text in (("cod4r", "CoD4R (recommended)"), ("cod4x", "CoD4x")):
                 b = QPushButton(text); b.setCheckable(True); b.setFont(font(10, True)); b.setFixedHeight(34)
                 b.setStyleSheet(
-                    f"QPushButton{{background:{C_DARK_BTN};color:#AAA;border:none;border-radius:6px;padding:0 12px;}}"
-                    f"QPushButton:checked{{background:{C_IW};color:{C_BG};}}")
+                    f"QPushButton{{background:{C_DARK_BTN};color:{C_TEXT};border:2px solid transparent;"
+                    "border-radius:6px;padding:0 12px;}"
+                    f"QPushButton:checked{{background:{C_IW};color:{C_BG};}}"
+                    f"QPushButton:focus{{border-color:{C_TEXT};}}")
                 grp.addButton(b); b.setChecked(self._cod4_choice == val)
                 b.toggled.connect(lambda on, v_=val: on and (setattr(self, "_cod4_choice", v_), note.setText(notes[v_])))
                 h.addWidget(b)
@@ -455,7 +458,7 @@ class SetupScreen(QWidget):
         row.setContentsMargins(10, 6, 10, 6)
         row.addWidget(_lbl(f"{gd['base']} · Not found", 11, C_DIM,
                            align=Qt.AlignmentFlag.AlignLeft), 1)
-        btn = _btn("Get Free MW3 Server", C_BLUE_BTN, size=10, h=36)
+        btn = _btn("Get Free MW3 Server", C_DARK_BTN, size=10, h=36)
         btn.clicked.connect(self._add_mw3_ds)
         row.addWidget(btn)
         self._add_row(gd, cw)
@@ -668,7 +671,7 @@ class _BaseInstallScreen(QWidget):
 
         content = QWidget()
         clay = QVBoxLayout(content); clay.setContentsMargins(20,10,20,12); clay.setSpacing(6)
-        self.cur = _lbl("Preparing...", 16, "#CCC"); clay.addWidget(self.cur)
+        self.cur = _lbl("Preparing...", 16, C_TEXT); clay.addWidget(self.cur)
         self.bar = QProgressBar(); self.bar.setMaximum(100); self.bar.setTextVisible(False)
         self.bar.setFixedHeight(22)
         bw = QHBoxLayout(); bw.addWidget(self.bar)
@@ -682,8 +685,8 @@ class _BaseInstallScreen(QWidget):
         self.iw5_qr_lbl = QLabel("")
         self.iw5_qr_lbl.setStyleSheet(
             "font-family: monospace; font-size: 8px; line-height: 8px;"
-            "color: #000; background: #FFF; padding: 8px;"
-            f"border: 2px solid {C_DIM}; border-radius: 8px;"
+            f"color:{C_BG};background:{C_TEXT};padding:8px;"
+            f"border:2px solid {C_LINE};border-radius:8px;"
         )
         self.iw5_qr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         qr_row = QHBoxLayout()
@@ -692,13 +695,14 @@ class _BaseInstallScreen(QWidget):
         self.iw5_qr_info = _lbl(
             "Open the Steam app on your phone, tap the shield icon (Steam Guard),\n"
             "then tap \"Approve a sign-in\". Point your camera at the QR code above.",
-            11, "#AAA", align=Qt.AlignmentFlag.AlignCenter,
+            11, C_DIM, align=Qt.AlignmentFlag.AlignCenter,
         )
         qb.addWidget(self.iw5_qr_info)
         clay.addWidget(self.iw5_qr_box)
 
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFont(font(10))
-        self.log.setStyleSheet("QPlainTextEdit{color:#666677;background:transparent;border:none;padding:10px;}")
+        self.log.setStyleSheet(f"QPlainTextEdit{{color:{C_DIM};background:transparent;"
+                               "border:none;padding:10px;}")
         clay.addWidget(self.log, stretch=1)
 
         self._log_status = _lbl("", 11, C_DIM, wrap=False)
@@ -713,7 +717,7 @@ class _BaseInstallScreen(QWidget):
             11, C_TREY, align=Qt.AlignmentFlag.AlignCenter,
         )
         self.plut_warn.setStyleSheet(
-            f"color:{C_TREY};background:#2A1A08;border:1px solid {C_TREY};"
+            f"color:{C_TREY};background:{C_SURFACE};border:1px solid {C_TREY};"
             "border-radius:8px;padding:10px 16px;"
         )
         self.plut_warn.setVisible(False)
@@ -737,10 +741,10 @@ class _BaseInstallScreen(QWidget):
         self.zd_info = _lbl(
             "Zombies Declassified adds 10 classic Zombies maps to BO2 through Plutonium.\n"
             "It's an optional ~9 GB download. You can install it later from Manage.",
-            12, "#CCC", align=Qt.AlignmentFlag.AlignCenter,
+            12, C_TEXT, align=Qt.AlignmentFlag.AlignCenter,
         )
         self.zd_info.setStyleSheet(
-            f"color:#CCC;background:#1A1A2A;border:1px solid {C_DIM};"
+            f"color:{C_TEXT};background:{C_SURFACE};border:1px solid {C_LINE};"
             "border-radius:8px;padding:10px 16px;"
         )
         self.zd_info.setVisible(False)
@@ -754,10 +758,10 @@ class _BaseInstallScreen(QWidget):
         zw = QHBoxLayout(); zw.addStretch(); zw.addWidget(self.zd_yes); zw.addSpacing(12); zw.addWidget(self.zd_skip); zw.addStretch()
         clay.addLayout(zw)
 
-        self.summary = _lbl("", 12, "#CCC", align=Qt.AlignmentFlag.AlignLeft)
+        self.summary = _lbl("", 12, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
         self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setStyleSheet(
-            f"color:#CCC;background:#1A1A2A;border:1px solid {C_DIM};"
+            f"color:{C_TEXT};background:{C_SURFACE};border:1px solid {C_LINE};"
             "border-radius:8px;padding:8px 12px;")
         self.summary_scroll = QScrollArea(); self.summary_scroll.setWidgetResizable(True)
         self.summary_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -1187,7 +1191,7 @@ class _BaseInstallScreen(QWidget):
 
     def _render_summary(self):
         icons = {"ok": ("✓", C_IW), "failed": ("✗", C_TREY),
-                 "skipped": ("–", "#777788"), "pending": ("–", "#777788")}
+                 "skipped": ("–", C_DIM), "pending": ("–", C_DIM)}
         counts = {status: sum(r["status"] == status for r in self._results)
                   for status in ("ok", "failed", "skipped", "pending")}
         rows = [f'<b>{counts["ok"]} ready · {counts["failed"]} failed · '
@@ -1371,7 +1375,7 @@ class _BaseInstallScreen(QWidget):
     def _reset_and_run(self):
         self.bar.setValue(0); self.log.clear()
         self.log.setMaximumHeight(16777215)
-        self.cur.setText("Preparing..."); self.cur.setStyleSheet("color:#CCC;background:transparent;")
+        self.cur.setText("Preparing..."); self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
         self.stat.setText("")
         self.plut_btn.setVisible(False)
         self.plut_warn.setVisible(False)
