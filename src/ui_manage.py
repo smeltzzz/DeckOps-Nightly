@@ -1466,21 +1466,21 @@ class ConfigureScreen(QWidget):
 
         # ── Left: FPS and FOV ─────────────────────────────────────────────
         _head(left, "FPS and FOV")
-        _desc(left, "Writes 90 FOV and a 90 FPS limit into the configs of MW1, MW2, MW3, WaW, BO1 and "
-                    "BO2 (every mode). Nothing else in those files changes. Steam can stay open.")
+        _desc(left, "Writes 90 FOV and a 90 FPS limit into the game configs of MW1 (campaign and "
+                    "multiplayer), MW2 and MW3 multiplayer, WaW, BO1 and BO2 (every mode). "
+                    "Nothing else in those files changes. Steam can stay open.")
         fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
         left.addWidget(fps_btn)
-        left.addWidget(_lbl("This does not set FPS in the MW2 and MW3 campaigns. Those games ignore the "
-                            "FPS and FOV values in their config; see below.",
-                            11, C_TREY, align=Qt.AlignmentFlag.AlignLeft))
         left.addSpacing(6)
         left.addWidget(_lbl("MW2 and MW3 campaign", 12, "#AAA", bold=True, align=Qt.AlignmentFlag.AlignLeft))
-        _desc(left, "FOV: DeckOps holds it at 90 while the game runs, with nothing for you to do. "
-                    "FPS: only the button below sets it, by limiting the frame rate to 90 with DXVK. "
-                    "Changing it closes Steam.")
+        _desc(left, "These two campaigns ignore their config files, so the button above does nothing "
+                    "for them.\n"
+                    "FOV: DeckOps sets it to 90 by itself every time you start the game.\n"
+                    "FPS: use the button below. It limits the frame rate to 90 with DXVK, and "
+                    "changing it closes Steam.")
         self._cap_btn = _btn("", C_DARK_BTN, size=12, h=40)
-        self._cap_btn.setFixedWidth(220); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
+        self._cap_btn.setFixedWidth(300); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
         self._refresh_cap_btn()
         left.addWidget(self._cap_btn)
         _desc(left, "MW2 also has an F10 key that sets FOV 90 if you want a button: map a back "
@@ -1805,7 +1805,7 @@ class ConfigureScreen(QWidget):
                 count = set_fps_fov(steam_root, installed,
                                     on_progress=lambda msg: _log.info("fps/fov: %s", msg.strip()))
                 s.log.emit(f"✓  Wrote 90 FOV and 90 FPS to {count} config file(s). "
-                           "Close the games first if they are running. MW2 and MW3 campaign FPS is set by the FPS Limit button, not this one.")
+                           "Close the games first if they are running. The MW2 and MW3 campaigns are not affected by this button.")
             except Exception as ex:
                 _log.error("fps/fov failed", exc_info=True)
                 s.log.emit(f"✗  Failed: {ex}")
