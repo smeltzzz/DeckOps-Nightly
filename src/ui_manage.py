@@ -1477,6 +1477,13 @@ class ConfigureScreen(QWidget):
         fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
         left.addWidget(fps_btn)
+        left.addWidget(_lbl("MW2 and MW3 campaign: DXVK frame cap at 90 FPS in the Steam launch option, "
+                            "on top of the in-game cap. Closes Steam to apply.",
+                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        self._cap_btn = _btn("", C_DARK_BTN, size=12, h=40)
+        self._cap_btn.setFixedWidth(220); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
+        self._refresh_cap_btn()
+        left.addWidget(self._cap_btn)
 
         # ── Left: Shader Cache (LCD only) ─────────────────────────────────
         self._shader_row = QWidget()
@@ -1764,6 +1771,18 @@ class ConfigureScreen(QWidget):
             finally:
                 s.done.emit(True)
         threading.Thread(target=_run, daemon=True).start()
+
+    def _refresh_cap_btn(self):
+        self._cap_btn.setText("DXVK Frame Cap: " + ("On" if cfg.get_dxvk_frame_cap() else "Off"))
+
+    def _toggle_dxvk_cap(self):
+        """Flip the setting, then run Repair Shortcuts, which closes Steam and rewrites
+        the MW2 / MW3 SP launch options to match."""
+        c = cfg.load()
+        c["dxvk_frame_cap"] = not cfg.get_dxvk_frame_cap()
+        cfg.save(c)
+        self._refresh_cap_btn()
+        self._repair_shortcuts()
 
     def _apply_fps_fov(self):
         s = _Sigs()
