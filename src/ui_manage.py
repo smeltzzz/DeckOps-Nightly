@@ -297,7 +297,7 @@ class ManagementCard(QFrame):
         badge_strip.setStyleSheet(f"background:{C_CARD};border:none;")
         # CoD 4 and BO2 set an explicit "badge" so the tag also shows that the
         # campaign runs on a modded client; other cards show the primary client.
-        badge_text = gd.get("badge") or client.split(" + ")[0].upper()
+        badge_text = (gd.get("badge") or client.split(" + ")[0]).lower()
         self._client_badge = QPushButton(badge_text, badge_strip)
         self._client_badge.setToolTip(client)
         self._client_badge.setFont(font(9, True)); self._client_badge.setEnabled(False)
