@@ -140,6 +140,7 @@ def font(size=13, bold=False, weight=None, display=False):
 ALL_GAMES = [
     # ── Row 1: Infinity Ward / Sledgehammer ──────────────────────────────
     {"base":"Call of Duty 4: Modern Warfare","keys":["cod4mp","cod4sp"],"appid":7940,"dev":"iw","client":"cod4r + iw3sp",
+     "badge":"COD4R+SP MOD",
      "launch_note":"DeckOps creates Proton prefixes automatically."},
     {"base":"Call of Duty: Modern Warfare 2","keys":["iw4mp","iw4sp"],"appid":10190,"dev":"iw","client":"iw4x",
      "launch_note":"DeckOps creates Proton prefixes automatically."},
@@ -154,6 +155,7 @@ ALL_GAMES = [
      "lcd_keys":["t5mp","t5sp"],"lcd_client":"plutonium",
      "launch_note":"DeckOps creates Proton prefixes automatically."},
     {"base":"Call of Duty: Black Ops II","keys":["t6mp","t6sp","t6zm"],"appid":202990,"dev":"trey","client":"plutonium + t6sp-mod",
+     "badge":"PLUTONIUM+SP MOD",
      "lcd_keys":["t6mp","t6sp","t6zm"],"lcd_client":"plutonium + t6sp-mod","lcd_appid":202970,
      "launch_note":"DeckOps creates Proton prefixes automatically."},
     {"base":"DeckOps: Plutonium Offline","keys":[],"appid":None,"dev":"trey","client":"lan",
