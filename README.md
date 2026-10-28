@@ -21,12 +21,9 @@
 | Modern Warfare | SP/MP | [IW3SP-MOD](https://gitea.com/JerryALT/iw3sp_mod) + [CoD4R](https://iw3x.com/) | ✅ | ✅ | ✅ |
 | Modern Warfare 2 | SP/MP | [IW-Pad](https://github.com/GalvarinoDev/IW-Pad) + [iw4x](https://iw4x.io) | ✅ | ✅ | ✅ |
 | Modern Warfare 3 | SP/MP | [IW-Pad](https://github.com/GalvarinoDev/IW-Pad) + [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
-| Ghosts | SP/MP | [IW6-Mod](https://github.com/alterware/client-files) | ✅ | ✅ | ✅ |
-| Advanced Warfare | SP/MP | [S1-Mod](https://github.com/alterware/client-files) | ✅ | ✅ | ✅ |
 | World at War | SP/ZM/MP | [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
 | Black Ops | SP/ZM/MP | [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
 | Black Ops II | SP/ZM/MP | [T6SP-Mod](https://github.com/Rattpak/T6SP-Mod-Release) + [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
-| Black Ops III | SP/MP/ZM | [CleanOps](https://github.com/notnightwolf/cleanopsT7) | ✅ | ✅ | ✅ |
 
 All titles use controller and gyro through Steam Input. You choose your gyro mode during setup (ADS, Hold, or Toggle). IW-Pad adds controller support and aim assist to MW2 SP and MW3 SP. CoD4x is available as an alternative MW1 MP client during setup.
 
@@ -36,7 +33,7 @@ Supports Steam Deck (LCD and OLED), Steam Machine, Legion Go / Go S / Go 2, ROG 
 
 DeckOps can also install [Zombies Declassified](https://github.com/Logo-2K/zombies-declassified). This mod adds 10 Zombies maps to BO2 Zombies. You must have all the BO2 Zombies DLC.
 
-The AlterWare developer discontinued Ghosts and Advanced Warfare in September 2026. DeckOps will officially discontinue support for these games in January 2027.
+Call of Duty: Ghosts, Advanced Warfare, and Black Ops III are no longer supported. If you set them up with an earlier version, Full Uninstall still removes their DeckOps files.
 
 ---
 
@@ -59,7 +56,7 @@ Plutonium Offline uses a separate instance of Plutonium. It does not interact wi
 1. Install your games on Steam first. You do not need to launch them.
 2. Have a stable internet connection ready.
 3. Plutonium requires a [free account](https://forum.plutonium.pw/register). You must log in one time during the install. After the install, you can play offline on all devices.
-4. MW3, Ghosts, and AW require a depot downgrade. DeckOps downloads [DepotDownloader](https://github.com/SteamRE/DepotDownloader) and uses your Steam account to get the correct game files. You log in through a QR code during the install.
+4. MW3 requires a depot downgrade. DeckOps downloads [DepotDownloader](https://github.com/SteamRE/DepotDownloader) and uses your Steam account to get the correct game files. You log in through a QR code during the install.
 
 ---
 
@@ -116,7 +113,7 @@ DeckOps installs a controller profile for every game. Choose your gyro mode duri
 | Shortcuts | **Repair Shortcuts** re-adds any missing DeckOps shortcuts and repairs the launch menus and launch options of your games. Closes Steam. |
 | Save Backup | Copies your saves, stats and Plutonium mods to a folder that survives an uninstall. Steam can stay open. |
 | Check My Setup | Checks each game's folder, mod files, GE-Proton and Steam launch option. It changes nothing; **Fix** runs that game's Update. |
-| Player Name | Your name in CoD4x, IW4x, AlterWare, T7X, and Plutonium offline. Not used by CleanOps. |
+| Player Name | Your name in CoD4x, IW4x, and Plutonium offline. |
 | FPS and FOV | **Apply 90 FPS / 90 FOV** writes both into the game configs of MW1 (campaign and multiplayer), MW2 and MW3 multiplayer, WaW, BO1, and BO2 (every mode); nothing else in those files changes. The MW2 and MW3 campaigns (64-bit Steam builds) ignore their config files, so that button does nothing for them. Their FOV is set to 90 automatically every time you start the game (`fovwatch.py`). Their FPS is set by the **MW2/MW3 FPS Limit** button, which limits the frame rate to 90 with DXVK in the launch option (it closes Steam when you change it). |
 | Shader Cache (LCD only) | Clears the shader cache of every game you have set up. |
 | Updates & Logs | **Check for Updates** looks for a new DeckOps version. **Copy Log** and **View Log** show what DeckOps has done, for bug reports. |
@@ -144,9 +141,7 @@ DeckOps is an installer. This project would not exist without years of foundatio
 
 **[iw4x](https://iw4x.io)** - MW2 MP client. [GitHub](https://github.com/iw4x)
 
-**[AlterWare](https://github.com/alterware)** - Ghosts (IW6-Mod) and Advanced Warfare (S1-Mod) clients. Both were discontinued by the developer in September 2026. DeckOps will officially discontinue support in January 2027.
-
-**[CleanOps](https://github.com/notnightwolf/cleanopsT7)** - Black Ops III mod by [notnightwolf](https://github.com/notnightwolf).
+**[AlterWare](https://github.com/alterware)** - Hosts the MW2 and MW3 campaign client files that DeckOps uses for non-Steam copies.
 
 **[T6SP-Mod](https://github.com/Rattpak/T6SP-Mod-Release)** - Black Ops II SP client by [Rattpak](https://github.com/Rattpak).
 
@@ -158,7 +153,7 @@ DeckOps is an installer. This project would not exist without years of foundatio
 
 **[Zombies Declassified](https://github.com/Logo-2K/zombies-declassified)** - DLC5 map pack for BO2 Zombies (10 classic maps) by [Logo2K](https://github.com/Logo-2K). Files packaged and hosted by **[Littlegods](https://github.com/andr3xcl/littlegods-dlc-installer)**.
 
-**[DepotDownloader](https://github.com/SteamRE/DepotDownloader)** - Steam depot downloader by [SteamRE](https://github.com/SteamRE). Used to download the correct game files for MW3, Ghosts, and AW.
+**[DepotDownloader](https://github.com/SteamRE/DepotDownloader)** - Steam depot downloader by [SteamRE](https://github.com/SteamRE). Used to download the correct game files for MW3.
 
 Official Test Team: [LeFinnaBust](https://github.com/LeFinnaBust) & Special Agent Dale Cooper
 

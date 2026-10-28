@@ -653,21 +653,18 @@ class ManagementScreen(QWidget):
 
     def _configure(self, gd, installed_keys):
         """Show configure dialog with Mods, Update, and Reinstall options."""
-        _MOD_CLIENTS = ("cod4r", "cod4x", "iw4x", "plutonium", "alterware", "t7x")
+        _MOD_CLIENTS = ("cod4r", "cod4x", "iw4x", "plutonium")
         has_mods_support = any(KEY_CLIENT.get(k, "") in _MOD_CLIENTS for k in installed_keys)
         has_mod_client = any(KEY_CLIENT.get(k, "") not in ("steam", "") for k in installed_keys) \
             or any(cfg.get_setup_games().get(k, {}).get("client") == "iw-pad" for k in installed_keys)
 
         # Depot downgrade option: shown for any Steam-sourced game that
-        # can be downgraded (MW3, Ghosts, AW). Whether the downgrade
+        # can be downgraded (MW3). Whether the downgrade
         # is actually needed is checked on click.
         _DG_KEY_MAP = {
             "iw5": ("iw5mp", "iw5mp_ds", "iw5sp"),
-            "iw6": ("iw6mp", "iw6sp"),
-            "s1":  ("s1mp", "s1sp"),
         }
-        _DG_LABELS = {"iw5": "Downgrade MW3",
-                       "iw6": "Downgrade Ghosts", "s1": "Downgrade AW"}
+        _DG_LABELS = {"iw5": "Downgrade MW3"}
         has_depot_dg = None
         for _dg_id, _dg_keys in _DG_KEY_MAP.items():
             _matched = [k for k in installed_keys if k in _dg_keys]
@@ -886,8 +883,6 @@ class ManagementScreen(QWidget):
         """
         _DG_KEY_MAP = {
             "iw5": ("iw5mp", "iw5mp_ds", "iw5sp"),
-            "iw6": ("iw6mp", "iw6sp"),
-            "s1":  ("s1mp", "s1sp"),
         }
         _dg_keys = [k for k in installed_keys if k in _DG_KEY_MAP.get(game_id, ())]
         if not _dg_keys:
@@ -914,11 +909,9 @@ class ManagementScreen(QWidget):
             if msg.clickedButton() != force_btn:
                 return
 
-        # Force a fresh downgrade: drop both the receipt and the legacy flag
+        # Force a fresh downgrade: drop the receipt
         from depot_downgrade import clear_receipt
         if idir: clear_receipt(game_id, idir)
-        if gcfg.get("always_64bit"):
-            cfg.clear_depot_patched(game_id)
         cfg.unmark_game_setup(_dg_keys)
         self._status.setText(
             f"{game_name} downgrade selected. Running depot download and reinstall..."
@@ -927,8 +920,7 @@ class ManagementScreen(QWidget):
 
     def _mods(self, gd, installed_keys):
         """Open the mod folder for a game. Shows a chooser for games with
-        both mods/ and usermaps/ directories (CoD4x, IW4x, T7X), for
-        AlterWare games with data/scripts/mp and data/scripts/sp, or for
+        both mods/ and usermaps/ directories (CoD4x, IW4x), or for
         OLED Plutonium games whose SP/MP modes live in separate prefixes."""
 
         # ── Plutonium storage name mapping ────────────────────────────────
@@ -998,18 +990,11 @@ class ManagementScreen(QWidget):
         # Determine which client we're dealing with from the installed keys
         client = None
         plut_keys = []
-        alterware_keys = []
         for k in installed_keys:
             c = KEY_CLIENT.get(k, "")
             if c in ("cod4r", "cod4x", "iw4x"):
                 client = c
                 break
-            elif c == "t7x":
-                client = "t7x"
-                break
-            elif c == "alterware":
-                client = "alterware"
-                alterware_keys.append(k)
             elif c == "plutonium" and k in _PLUT_STORAGE:
                 client = "plutonium"
                 plut_keys.append(k)
@@ -1038,68 +1023,6 @@ class ManagementScreen(QWidget):
                 _open_folder(os.path.join(install_dir, "mods"))
             elif clicked == usermaps_btn:
                 _open_folder(os.path.join(install_dir, "usermaps"))
-
-        elif client == "t7x":
-            from t7x import _get_sibling_dir
-            mod_key = [k for k in installed_keys if KEY_CLIENT.get(k) == "t7x"]
-            mod_key = mod_key[0] if mod_key else installed_keys[0]
-            game = self.installed.get(mod_key, {})
-            stock_dir = game.get("install_dir", "")
-            if not stock_dir:
-                self._status.setText("Game install directory not found.")
-                return
-            # T7X writes mods/usermaps into the DeckOps-T7X sibling dir,
-            # not the stock BO3 install directory that detect_games returns.
-            install_dir = _get_sibling_dir(stock_dir)
-            if not os.path.isdir(install_dir):
-                self._status.setText("T7X directory not found. Has T7X been installed?")
-                return
-            # Two folders — ask user which one
-            msg = QMessageBox(self)
-            msg.setWindowTitle("Open Mod Folder")
-            msg.setText(f"Which folder would you like to open for {gd['base']} (T7x)?")
-            mods_btn = msg.addButton("Mods", QMessageBox.ButtonRole.AcceptRole)
-            usermaps_btn = msg.addButton("User Maps", QMessageBox.ButtonRole.AcceptRole)
-            msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-            msg.exec()
-            clicked = msg.clickedButton()
-            if clicked == mods_btn:
-                _open_folder(os.path.join(install_dir, "mods"))
-            elif clicked == usermaps_btn:
-                _open_folder(os.path.join(install_dir, "usermaps"))
-
-        elif client == "alterware":
-            if not alterware_keys:
-                self._status.setText("No AlterWare mod keys found.")
-                return
-            mod_key = alterware_keys[0]
-            game = self.installed.get(mod_key, {})
-            install_dir = game.get("install_dir", "")
-            if not install_dir:
-                self._status.setText("Game install directory not found.")
-                return
-
-            # Determine which mode buttons to show based on installed keys
-            has_mp = any(k.endswith("mp") for k in alterware_keys)
-            has_sp = any(k.endswith("sp") for k in alterware_keys)
-
-            if has_mp and has_sp:
-                msg = QMessageBox(self)
-                msg.setWindowTitle("Open Scripts Folder")
-                msg.setText(f"Which scripts folder for {gd['base']}?")
-                mp_btn = msg.addButton("MP Scripts", QMessageBox.ButtonRole.AcceptRole)
-                sp_btn = msg.addButton("SP Scripts", QMessageBox.ButtonRole.AcceptRole)
-                msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-                msg.exec()
-                clicked = msg.clickedButton()
-                if clicked == mp_btn:
-                    _open_folder(os.path.join(install_dir, "data", "scripts", "mp"))
-                elif clicked == sp_btn:
-                    _open_folder(os.path.join(install_dir, "data", "scripts", "sp"))
-            elif has_mp:
-                _open_folder(os.path.join(install_dir, "data", "scripts", "mp"))
-            elif has_sp:
-                _open_folder(os.path.join(install_dir, "data", "scripts", "sp"))
 
         elif client == "plutonium":
             if not plut_keys:
@@ -1197,21 +1120,6 @@ class SetupCompleteScreen(QWidget):
         sl.addWidget(self._mw2own_hdr)
         sl.addWidget(self._mw2own_body)
 
-        # ── BO3 first launch ─────────────────────────────────────────────────
-        self._bo3_div = _hdiv()
-        self._bo3_hdr = _lbl("🎮  Black Ops III: First Launch", 12, C_TREY, bold=True, align=Qt.AlignmentFlag.AlignLeft)
-        self._bo3_body = _lbl(
-            "CleanOps finishes installing the first time you launch it. Do that first "
-            "launch in Desktop Mode:\n\n"
-            "1. Launch Black Ops III (CleanOps). It patches the game and may slow the "
-            "device for a while.\n"
-            "2. If it doesn't start, press the blue Stop button in Steam, then launch it "
-            "again to check it works.",
-            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        sl.addWidget(self._bo3_div)
-        sl.addWidget(self._bo3_hdr)
-        sl.addWidget(self._bo3_body)
-
         # ── LCD notes (LCD users only) ────────────────────────────────────────
         self._lcd_div = _hdiv()
         self._lcd_hdr = _lbl("⚠  LCD Steam Deck Notes", 12, C_TREY, bold=True, align=Qt.AlignmentFlag.AlignLeft)
@@ -1282,9 +1190,6 @@ class SetupCompleteScreen(QWidget):
         self._mw1waw_body.setText(guide)
         for w in (self._mw1waw_div, self._mw1waw_hdr, self._mw1waw_body):
             w.setVisible(bool(guide))
-        show_bo3 = cfg.is_game_setup("t7")
-        for w in (self._bo3_div, self._bo3_hdr, self._bo3_body):
-            w.setVisible(show_bo3)
         show_mw2own = cfg.is_game_setup_for_source("iw4mp", "own")
         self._mw2own_div.setVisible(show_mw2own)
         self._mw2own_hdr.setVisible(show_mw2own)
@@ -1446,8 +1351,7 @@ class ConfigureScreen(QWidget):
 
         # ── Left: Player Name ─────────────────────────────────────────────
         _head(left, "Player Name")
-        self._name_note = _desc(left, "Your name in CoD4x, IW4x, AlterWare, T7X and Plutonium offline. "
-                                      "It is not used by CleanOps.")
+        self._name_note = _desc(left, "Your name in CoD4x, IW4x and Plutonium offline.")
         nr = QHBoxLayout(); nr.setSpacing(12)
         self._name_input = QLineEdit()
         self._name_input.setPlaceholderText("Enter player name...")
@@ -2445,8 +2349,6 @@ class UpdateScreen(QWidget):
         from cod4r import install_cod4r
         from iw3sp import install_iw3sp
         from t6sp_mod import install_t6sp_mod
-        from cleanops import install_cleanops
-        from t7x import install_t7x
         from net import DownloadError
 
         is_lcd = cfg.is_lcd()
@@ -2647,11 +2549,8 @@ class UpdateScreen(QWidget):
                 c = entry["client"]
             try:
                 from plutonium import GAME_META as _PLUT_META
-                from detect_games import GAMES as _GAMES_MAP
                 if c == "plutonium" and key in _PLUT_META:
                     _appid = _PLUT_META[key][0]
-                elif c == "alterware" and key in _GAMES_MAP:
-                    _appid = _GAMES_MAP[key]["appid"]
                 else:
                     _appid = gd["appid"]
 
@@ -2710,16 +2609,6 @@ class UpdateScreen(QWidget):
                                          on_progress=op,
                                          installed_games=installed_for_plut,
                                          source=source)
-                elif c == "cleanops":
-                    install_cleanops(game, self.steam_root, proton, compat, op,
-                                    source=source)
-                elif c == "t7x":
-                    t7x_dir = install_t7x(game, on_progress=op)
-                    game["install_dir"] = t7x_dir
-                elif c == "alterware":
-                    from alterware import install_alterware
-                    install_alterware(game, key, self.steam_root, proton, compat, op,
-                                     source=source)
                 elif c == "t6sp_mod":
                     install_t6sp_mod(game, self.steam_root, proton, compat, op,
                                     source=source)

@@ -67,26 +67,6 @@ SAVE_GROUPS = {
         "type": "install_dir",
         "subdir": "players2",
     },
-    "ghosts": {
-        "keys": ["iw6sp", "iw6mp"],
-        "type": "install_dir",
-        "subdir": "players2",
-    },
-    "aw": {
-        "keys": ["s1sp", "s1mp"],
-        "type": "install_dir",
-        "subdir": "players2",
-    },
-    "bo3": {
-        "keys": ["t7"],
-        "type": "install_dir",
-        "subdir": "players",
-    },
-    "t7x": {
-        "keys": ["t7x"],
-        "type": "t7x_sibling",
-        "subdir": "players",
-    },
     "t4": {
         "keys": ["t4sp", "t4mp"],
         "type": "plutonium_prefix",
@@ -279,21 +259,6 @@ def _find_install_dir(keys: list, setup_games: dict, installed_games: dict = Non
         if d and os.path.isdir(d):
             return d
 
-    return None
-
-
-def _find_t7x_players(keys: list, setup_games: dict, installed_games: dict = None) -> str | None:
-    """Find the T7X sibling players directory."""
-    # T7X lives in DeckOps-T7X/ next to the BO3 install dir.
-    # We need to find BO3's install dir first.
-    bo3_keys = ["t7", "t7x"]
-    install_dir = _find_install_dir(bo3_keys, setup_games, installed_games)
-    if not install_dir:
-        return None
-
-    sibling = os.path.join(os.path.dirname(install_dir), "DeckOps-T7X", "players")
-    if os.path.isdir(sibling):
-        return sibling
     return None
 
 
@@ -532,9 +497,6 @@ def backup_saves(steam_root: str = None, on_progress=None,
             if install_dir:
                 src = os.path.join(install_dir, group["subdir"])
 
-        elif group["type"] == "t7x_sibling":
-            src = _find_t7x_players(keys, setup_games, installed_games)
-
         if not src or not os.path.isdir(src):
             _log.debug("save backup: %s — source not found", group_name)
             continue
@@ -674,12 +636,6 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
             install_dir = _find_install_dir(keys, setup_games, installed_games)
             if install_dir:
                 dst = os.path.join(install_dir, group["subdir"])
-
-        elif group["type"] == "t7x_sibling":
-            # For T7X, we need the BO3 install dir to find the sibling
-            bo3_dir = _find_install_dir(["t7", "t7x"], setup_games, installed_games)
-            if bo3_dir:
-                dst = os.path.join(os.path.dirname(bo3_dir), "DeckOps-T7X", "players")
 
         if dst:
             _keep_pre_restore(dst)

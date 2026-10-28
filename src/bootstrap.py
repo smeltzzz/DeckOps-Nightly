@@ -59,9 +59,6 @@ HEADER_APPIDS = [
     42700,
     202970,
     202990,
-    311210,
-    209160,   # Ghosts SP
-    209650,   # Advanced Warfare SP
 ]
 
 

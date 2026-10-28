@@ -15,8 +15,8 @@ Overwrites whatever is currently there, except with "My Own" resolution
 After copying, replaces the default player name ("Player") with the user's
 chosen name from deckops.json in any config that has `seta name "Player"`.
 
-LCD users receive MW1, MW2, MW3 SP, Ghosts, and AW configs.
-OLED and Other users receive MW1, MW2, WaW, BO1, MW3, BO2, Ghosts, and AW configs.
+LCD users receive MW1, MW2, MW3 SP, WaW, BO1, MW3, and BO2 configs.
+OLED and Other users receive MW1, MW2, WaW, BO1, MW3, and BO2 configs.
 
 LCD Plutonium games are additionally mirrored into the Heroic shared default
 prefix (~/Games/Heroic/Prefixes/default), because LCD online play routes
@@ -195,8 +195,8 @@ def _offline_mirror_paths(compatdata_dest, key):
 # The config map is built inside apply_game_configs so steam_root is available.
 # Keys that are absent for a given model are simply not included.
 
-_LCD_KEYS  = {"cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp", "iw5mp_ds", "t4sp", "t4mp", "t5sp", "t5mp", "t6zm", "t6mp", "t6sp", "t7", "t7x", "iw6sp", "iw6mp", "s1sp", "s1mp"}
-_OLED_KEYS = {"cod4sp", "cod4mp", "iw4sp", "iw4mp", "t4sp", "t4mp", "t5sp", "t5mp", "iw5sp", "iw5mp", "iw5mp_ds", "t6zm", "t6mp", "t6sp", "t7", "t7x", "iw6sp", "iw6mp", "s1sp", "s1mp"}
+_LCD_KEYS  = {"cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp", "iw5mp_ds", "t4sp", "t4mp", "t5sp", "t5mp", "t6zm", "t6mp", "t6sp"}
+_OLED_KEYS = {"cod4sp", "cod4mp", "iw4sp", "iw4mp", "t4sp", "t4mp", "t5sp", "t5mp", "iw5sp", "iw5mp", "iw5mp_ds", "t6zm", "t6mp", "t6sp"}
 
 
 def _build_config_map(steam_root, installed_games=None):
@@ -354,40 +354,6 @@ def _build_config_map(steam_root, installed_games=None):
             ("BO2/user_sp.cgp", None),
             ("BO2/hardware.chp", None),
         ],
-
-        # ── Ghosts SP (AlterWare iw6, appid 209160) ──────────────────────────
-        "iw6sp": [
-            ("Ghosts/config.cfg", None),
-        ],
-
-        # ── Ghosts MP (AlterWare iw6, appid 209170) ──────────────────────────
-        "iw6mp": [
-            ("Ghosts/config_mp.cfg", None),
-        ],
-
-        # ── AW SP (AlterWare s1, appid 209650) ───────────────────────────────
-        "s1sp": [
-            ("AW/config.cfg", None),
-        ],
-
-        # ── AW MP (AlterWare s1, appid 209660) ───────────────────────────────
-        "s1mp": [
-            ("AW/config_mp.cfg", None),
-        ],
-
-        # ── BO3 (CleanOps t7) ────────────────────────────────────────────────
-        # CleanOps is a DLL overlay — config.ini lives in the stock BO3
-        # players/ directory, same as vanilla.
-        "t7": [
-            ("T7X/config.ini", None),
-        ],
-
-        # ── BO3 (T7X / AlterWare) ────────────────────────────────────────────
-        # T7X stores its config.ini inside the t7x/players/ subdirectory
-        # of the DeckOps-T7X sibling dir.
-        "t7x": [
-            ("T7X/config.ini", None),
-        ],
     }
 
 
@@ -416,12 +382,6 @@ def _dest_from_install(game_key, install_dir, player_name=None):
         return os.path.join(install_dir, "players")
     if game_key == "iw5sp":
         return os.path.join(install_dir, "players2")
-    if game_key in ("iw6sp", "iw6mp", "s1sp", "s1mp"):
-        return os.path.join(install_dir, "players2")
-    if game_key == "t7":
-        return os.path.join(install_dir, "players")
-    if game_key == "t7x":
-        return os.path.join(install_dir, "t7x", "players")
     if game_key == "t6sp":
         return os.path.join(install_dir, "players")
     return None
@@ -629,8 +589,6 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
         "iw4mp": "iw4sp",      # MW2 MP  → MW2 SP
         "iw5mp": "iw5sp",      # MW3 MP  → MW3 SP
         "iw5mp_ds": "iw5sp",   # MW3 DS  → MW3 SP
-        "iw6mp": "iw6sp",      # Ghosts MP → Ghosts SP
-        "s1mp":  "s1sp",       # AW MP    → AW SP
     }
     expanded_keys = list(selected_keys)
     for mp_key, sp_key in _SIBLING_MAP.items():
@@ -888,28 +846,6 @@ def rename_player(player_name, steam_root, installed_games=None,
                         _replace_player_name(offline_dest, player_name)
                         updated += 1
                         prog(f"  + {key}: renamed in the offline copy")
-
-    # ── T7X special case ─────────────────────────────────────────────────
-    # T7X stores its player name in t7x/players/properties.json as JSON,
-    # not as a seta cvar. Handled separately from the config map.
-    if "t7x" in setup_keys:
-        try:
-            from t7x import set_player_name as _t7x_set_name, _get_sibling_dir
-            game = (installed_games or {}).get("t7x", {})
-            # t7x install_dir IS the sibling dir (set during install)
-            sibling = game.get("install_dir", "")
-            if not sibling:
-                # Fall back: look up from the t7 (BO3) install dir
-                t7_game = (installed_games or {}).get("t7", {})
-                t7_dir = t7_game.get("install_dir", "")
-                if t7_dir:
-                    sibling = _get_sibling_dir(t7_dir)
-            if sibling and os.path.isdir(sibling):
-                _t7x_set_name(sibling, player_name)
-                updated += 1
-                prog("  + t7x: renamed in properties.json")
-        except Exception as ex:
-            prog(f"  ⚠ t7x: rename failed: {ex}")
 
     updated += _rename_in_lan_scripts(player_name, installed_games, prog)
 

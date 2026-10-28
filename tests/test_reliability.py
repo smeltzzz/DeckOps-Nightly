@@ -1108,7 +1108,7 @@ class MergedMpTileTests(unittest.TestCase):
              patch("config.is_lcd", return_value=False):
             self.assertTrue(shortcut.mp_on_main_tile("cod4mp"))
             self.assertTrue(shortcut.mp_on_main_tile("t4mp"))
-            self.assertFalse(shortcut.mp_on_main_tile("t7x"))
+            self.assertFalse(shortcut.mp_on_main_tile("iw4mp"))
         with patch("config.get_setup_games", return_value=self._setup("cod4x")), \
              patch("config.is_lcd", return_value=True):
             self.assertFalse(shortcut.mp_on_main_tile("cod4mp"))   # CoD4x keeps its shortcut
@@ -1714,7 +1714,7 @@ class FpsFovTests(unittest.TestCase):
             cfg = self._file(mw2 / "players", "iw4x_config.cfg", 'seta com_maxfps "85"\r\n')
             bo2.mkdir()
             games = {"iw4mp": {"install_dir": str(mw2)}, "t6sp": {"install_dir": str(bo2)}}
-            setup = {"iw4mp": {"client": "iw4x"}, "t6sp": {"client": "t6sp_mod"}, "t7": {"client": "cleanops"}}
+            setup = {"iw4mp": {"client": "iw4x"}, "t6sp": {"client": "t6sp_mod"}}
             with patch("config.get_setup_games", return_value=setup), \
                  patch("config.get_player_name", return_value="Me"), \
                  patch("config.is_lcd", return_value=False):

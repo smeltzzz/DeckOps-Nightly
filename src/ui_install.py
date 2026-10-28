@@ -24,7 +24,7 @@ from ui_constants import (
     font, _btn, _lbl, _title_block, _header_bar, _badge, _log_to_file, _log_html, _copy_log_to_clipboard, _Sigs,
     ALL_GAMES, KEY_CLIENT, KEY_MODE_LABEL,
     _active_keys, _active_client,
-    _ask_bo3_client, _show_preflight,
+    _show_preflight,
     go_to, get_screen,
 )
 
@@ -49,7 +49,7 @@ class WelcomeScreen(QWidget):
         self.results.setTextFormat(Qt.TextFormat.RichText)
         self.notice = _lbl(
             "Before you continue:\n"
-            "•  Downgrading a game (MW3, Ghosts, AW) can take a long time and needs at least "
+            "•  Downgrading a game (MW3) can take a long time and needs at least "
             "that game's full size free on the drive.\n"
             "•  On a handheld, plug it in. DeckOps keeps the device awake during the install.\n"
             "•  Use a stable internet connection.\n"
@@ -611,7 +611,6 @@ class SetupScreen(QWidget):
         s.cod4_client = self._cod4_choice if "cod4mp" in sel else "cod4r"
         s.zd_choice = bool(self._zd_cb and self._zd_cb.isChecked())
         s.offline_mode = self._lan_cb.isChecked() if self._lan_cb else None
-        s.bo3_client = _ask_bo3_client(self, all_tuples)
         go_to(self.stack, "InstallScreen")
 
 class _SteamStillRunning(RuntimeError):
@@ -642,7 +641,6 @@ class _BaseInstallScreen(QWidget):
         self._from_manage = False
         self.zd_choice = None
         self.offline_mode = None
-        self.bo3_client = "cleanops"
         self._results = []
         self._plan = []; self._bands = {}
         self._phase_i = -1; self._phase_id = None
@@ -1182,8 +1180,6 @@ class _BaseInstallScreen(QWidget):
     def _retry_failed(self):
         keys = {r["key"] for r in self._retryable()}
         if not keys: return
-        # t7x is injected from the t7 row, so it needs its parent key kept
-        if "t7x" in keys: keys.add("t7")
         self.steam_selected = [(k, gd, g) for k, gd, g in (self.steam_selected or [])
                                if k in keys]
         self.own_selected = {k: g for k, g in self.own_selected.items() if k in keys}
@@ -1388,8 +1384,6 @@ class _BaseInstallScreen(QWidget):
         from iw4x import install_iw4x
         from iw3sp import install_iw3sp
         from t6sp_mod import install_t6sp_mod
-        from cleanops import install_cleanops
-        from t7x import install_t7x
         from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
 
         # --- Source awareness setup
@@ -1417,16 +1411,10 @@ class _BaseInstallScreen(QWidget):
         _cod4_client = getattr(self, "cod4_client", "cod4r")
         _steam_killed = False
 
-        # --- BO3 client selection: cleanops, t7x, or both
-        _bo3_choice = getattr(self, "bo3_client", "cleanops")
-        _has_bo3 = any(KEY_CLIENT.get(k) == "cleanops" for k in selected_keys)
-        has_cleanops = _has_bo3 and _bo3_choice in ("cleanops", "both")
-        has_t7x      = _has_bo3 and _bo3_choice in ("t7x", "both")
-
         # --- Progress plan, built from the phases this selection will run
         def _nk(*clients):
             return len([k for k in selected_keys if KEY_CLIENT.get(k) in clients])
-        _DG_CANDIDATES = {"iw5mp", "iw5mp_ds", "iw5sp", "iw6mp", "iw6sp", "s1mp", "s1sp"}
+        _DG_CANDIDATES = {"iw5mp", "iw5mp_ds", "iw5sp"}
         _may_downgrade = any(k in _DG_CANDIDATES and k not in own_selected
                              for k in selected_keys)
         self._plan_set([
@@ -1439,9 +1427,6 @@ class _BaseInstallScreen(QWidget):
             ("plut",      "Installing Plutonium games",   7 * _nk("plutonium")),
             ("t6sp",      "Installing T6SP-MOD",          4 if has_t6sp_mod else 0),
             ("iw4x",      "Installing IW4x",              12 * _nk("iw4x")),
-            ("t7x",       "Installing T7x",               6 if has_t7x else 0),
-            ("cleanops",  "Installing CleanOps",          3 if has_cleanops else 0),
-            ("alterware", "Installing AlterWare",         8 * _nk("alterware")),
             ("spmod",     "Installing IW-Pad",            4 * len(_sp_keys)),
             ("zd",        "Zombies Declassified",         8 if has_plut and "t6zm" in selected_keys else 0),
             ("finalize",  "Finishing up",                 8),
@@ -1489,19 +1474,6 @@ class _BaseInstallScreen(QWidget):
                                  "Steam's compatibility settings were left unchanged.")
 
         proton = get_proton_path(self.steam_root)
-
-        # --- BO3 client injection
-        # Must happen early so t7x is included in prefix init, shortcuts,
-        # and selected_keys. Actual install runs later (after CleanOps)
-        # to match the original phase order.
-        if has_t7x:
-            for k, gd, g in list(self.selected):
-                if k == "t7":
-                    t7x_tuple = ("t7x", gd, dict(g))
-                    self.selected.append(t7x_tuple)
-                    steam_sel.append(t7x_tuple)
-                    selected_keys.append("t7x")
-                    break
 
         self._seed_results()
 
@@ -1662,20 +1634,17 @@ class _BaseInstallScreen(QWidget):
             check_free_space_gb as _dg_free,
             required_space_gb as _dg_need,
             cleanup_depotdownloader,
-            detect_installed_dlc as _dg_installed_dlc,
             migrate_legacy_iw5 as _dg_migrate_iw5,
         )
 
         _DG_KEY_MAP = {
             "iw5": ("iw5mp", "iw5mp_ds", "iw5sp"),
-            "iw6": ("iw6mp", "iw6sp"),
-            "s1":  ("s1mp", "s1sp"),
         }
         # Each job: (game_id, game_name, install_dir, depots_list, cmds_list)
         _dg_jobs = []
         # Keys whose client needs the downgraded files, per game_id, and the
         # keys whose downgrade didn't happen -> reason. Those are marked failed
-        # and their client is skipped: AlterWare / Plutonium on the newer files
+        # and their client is skipped: Plutonium on the newer files
         # used to be installed anyway and reported as done.
         _dg_job_keys = {}
         _dg_failed = {}
@@ -1685,7 +1654,7 @@ class _BaseInstallScreen(QWidget):
                 _dg_failed[k] = reason
 
         # Free space: sized from the depots each game will download (a fixed
-        # 15 GB was far too little for Ghosts / AW), added up per drive so two
+        # 15 GB was far too little for the older games), added up per drive so two
         # games on one drive both have to fit.
         _dg_reserved = {}
 
@@ -1776,29 +1745,6 @@ class _BaseInstallScreen(QWidget):
                     continue
                 _dg_jobs.append(("iw5", _gcfg["name"], _dir, _depots, _cmds))
                 _dg_job_keys["iw5"] = set(_has_mp)
-            else:
-                # Ghosts, AW: PE/config check + appmanifest DLC detection
-                if not _forced and not _dg_needed(_dg_id, _dir):
-                    self._s.log.emit(f"  {_gcfg['name']} depot files are up to date, skipped.")
-                    continue
-                if _gcfg.get("always_64bit"):
-                    self._s.log.emit(f"Checking {_gcfg['name']}... needs older depot files for community clients.")
-                else:
-                    self._s.log.emit(f"Checking {_gcfg['name']}... 64-bit detected, downgrade needed.")
-                _depots = list(_gcfg["depots"])
-                _cmds = list(_gcfg["depot_cmds"])
-                _owned_dlc = _dg_installed_dlc(_dg_id, self.steam_root)
-                for dk in _owned_dlc:
-                    dlc = _gcfg["dlc"][dk]
-                    _depots.append({"depot": dlc["depot"], "manifest": dlc["manifest"], "app": dlc["app"]})
-                    _cmds.append(f"download_depot {dlc['app']} {dlc['depot']} {dlc['manifest']}")
-                if _owned_dlc:
-                    _dlc_names = ", ".join(_gcfg["dlc"][k]["name"] for k in _owned_dlc)
-                    self._s.log.emit(f"  DLC to downgrade: {_dlc_names}")
-                if not _dg_room(_dg_id, _dir, _depots, _sel):
-                    continue
-                _dg_jobs.append((_dg_id, _gcfg["name"], _dir, _depots, _cmds))
-                _dg_job_keys[_dg_id] = set(_sel)
 
         self.force_downgrade_ids = set()
 
@@ -1856,8 +1802,8 @@ class _BaseInstallScreen(QWidget):
 
             # A Plutonium login/download problem only fails the Plutonium games:
             # it used to end the whole batch (done + return), so Steam was never
-            # closed and every other game -- CoD4 launch option, IW4x, AlterWare,
-            # CleanOps, shortcuts, controller profiles -- was left half set up.
+            # closed and every other game -- CoD4 launch option, IW4x,
+            # shortcuts, controller profiles -- was left half set up.
             def _plut_bootstrap():
                 """Log in to / update Plutonium. None when ready, else the reason."""
                 if not plut_ready:
@@ -2010,7 +1956,7 @@ class _BaseInstallScreen(QWidget):
         # with the current install. Wipe them first, then re-apply what's
         # needed below. Launch options are only cleared for the Steam games
         # in this run: a per-game Set Up must not wipe the options of games
-        # it doesn't reinstall (CleanOps, IW-Pad, AlterWare, IW3SP).
+        # it doesn't reinstall (IW-Pad, IW3SP).
         try:
             from wrapper import clear_launch_options, clear_compat_tool
             from detect_games import GAMES
@@ -2157,95 +2103,8 @@ class _BaseInstallScreen(QWidget):
                     self._s.log.emit(f"✗  {base_name} ({key}) failed: {ex}")
                     self._mark(key, "failed", str(ex))
 
-        # --- T7X (BO3 AlterWare client)
-        # Must run BEFORE CleanOps: CleanOps drops d3d11.dll into the
-        # stock BO3 dir, and the symlink farm would pick it up if it
-        # already exists. Running T7x first builds symlinks from a clean
-        # stock dir, then CleanOps only touches the stock dir afterward.
-        _log_to_file("[BREADCRUMB] starting t7x install phase")
-        if has_t7x:
-            self._phase("t7x")
-            for key, gd, game in [(k, gd, g) for k, gd, g in self.selected if KEY_CLIENT.get(k) == "t7x"]:
-                base_name = gd["base"]
-                self._s.progress.emit(self._ppct(0), "Setting up T7x...")
-                def op_t7x(pct, msg): self._s.progress.emit(self._ppct(pct), msg)
-                try:
-                    source = "own" if key in own_selected else "steam"
-                    t7x_dir = install_t7x(game, on_progress=op_t7x)
-                    game["install_dir"] = t7x_dir
-                    cfg.mark_game_setup(key, "t7x", source=source)
-                    self._mark(key, "ok")
-                    self._s.log.emit(f"✓  {base_name} (T7x) done")
-                    logged_bases.add(base_name)
-                except Exception as ex:
-                    self._s.log.emit(f"✗  {base_name} (T7x) failed: {ex}")
-                    self._mark(key, "failed", str(ex))
-
-        # --- CleanOps (BO3)
-        _log_to_file("[BREADCRUMB] starting cleanops install phase")
-        if has_cleanops:
-            self._phase("cleanops")
-            for key, gd, game in [(k, gd, g) for k, gd, g in self.selected if KEY_CLIENT.get(k) == "cleanops"]:
-                base_name = gd["base"]
-                self._s.progress.emit(self._ppct(0), f"Setting up {base_name}...")
-                def op_cleanops(pct, msg): self._s.progress.emit(self._ppct(pct), msg)
-                try:
-                    source = "own" if key in own_selected else "steam"
-                    if source == "own":
-                        compat = game.get("compatdata_path", "")
-                    else:
-                        compat = find_compatdata(self.steam_root, gd["appid"],
-                                                  game_install_dir=game.get("install_dir"))
-                    install_cleanops(game, self.steam_root, proton, compat, op_cleanops, source=source)
-                    cfg.mark_game_setup(key, "cleanops", source=source)
-                    self._mark(key, "ok")
-                    self._s.log.emit(f"✓  {base_name} done")
-                    logged_bases.add(base_name)
-                except Exception as ex:
-                    self._s.log.emit(f"✗  {base_name} ({key}) failed: {ex}")
-                    self._mark(key, "failed", str(ex))
-
-        # --- AlterWare (Ghosts / Advanced Warfare)
-        _log_to_file("[BREADCRUMB] starting alterware install phase")
-        has_alterware = any(KEY_CLIENT.get(k) == "alterware" for k in selected_keys)
-        if has_alterware:
-            from alterware import install_alterware
-            _aw_sel = [(k, gd, g) for k, gd, g in self.selected
-                       if KEY_CLIENT.get(k) == "alterware" and k not in _dg_failed]
-            self._phase("alterware")
-            _n_aw = len(_aw_sel)
-            for _i_aw, (key, gd, game) in enumerate(_aw_sel):
-                base_name = gd["base"]
-                self._s.progress.emit(self._ppct(0, _i_aw, _n_aw), f"Setting up {base_name}...")
-                def op_alterware(pct, msg, _i=_i_aw):
-                    self._s.progress.emit(self._ppct(pct, _i, _n_aw), msg)
-                try:
-                    source = "own" if key in own_selected else "steam"
-                    _appid = _GAMES_MAP[key]["appid"] if key in _GAMES_MAP else gd["appid"]
-                    _install_dir = game.get("install_dir")
-                    if source == "own":
-                        compat = game.get("compatdata_path", "")
-                        if not compat:
-                            compat = find_compatdata(self.steam_root, _appid,
-                                                      game_install_dir=_install_dir)
-                    else:
-                        compat = find_compatdata(self.steam_root, _appid,
-                                                  game_install_dir=_install_dir)
-                    if not compat and _install_dir:
-                        steamapps = os.path.dirname(os.path.dirname(_install_dir))
-                        compat = os.path.join(steamapps, "compatdata", str(_appid))
-                    install_alterware(game, key, self.steam_root, proton, compat, op_alterware,
-                                     source=source)
-                    cfg.mark_game_setup(key, "alterware", source=source)
-                    self._mark(key, "ok")
-                    self._s.log.emit(f"✓  {base_name} done")
-                    logged_bases.add(base_name)
-                except Exception as ex:
-                    self._s.log.emit(f"✗  {base_name} ({key}) failed: {ex}")
-                    self._mark(key, "failed", str(ex))
-
         # --- MW2/MW3 SP: IW-Pad. Steam (x64) gets IW-Pad + launch option; own (32-bit)
-        # also gets the AlterWare SP client. On failure the game stays vanilla.
+        # also gets the AlterWare SP client (MW2/MW3 only). On failure the game stays vanilla.
         if _sp_keys:
             from sp_mod import install_sp_mod
             self._phase("spmod")

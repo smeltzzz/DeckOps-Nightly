@@ -48,11 +48,6 @@ MANAGED_APPIDS = [
     "202970",  # BO2 Campaign
     "202990",  # BO2 Multiplayer
     "212910",  # BO2 Zombies
-    "311210",  # BO3
-    "209160",  # Ghosts SP
-    "209170",  # Ghosts MP
-    "209650",  # AW SP
-    "209660",  # AW MP
 ]
 
 

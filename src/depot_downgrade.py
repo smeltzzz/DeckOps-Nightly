@@ -1,9 +1,8 @@
 """
 depot_downgrade.py - Unified 32-bit depot downgrade helper
 
-Activision pushed 64-bit updates for MW3, Ghosts, and Advanced
-Warfare that break community client compatibility (Plutonium,
-AlterWare). This module detects 64-bit installs, assists the user
+Activision pushed a 64-bit update for MW3 that breaks community
+client compatibility (Plutonium). This module detects 64-bit installs, assists the user
 through either an automated QR-code login flow (via DepotDownloader)
 or a manual Steam console paste flow, and merges the 32-bit depot
 files over the game directory.
@@ -87,113 +86,6 @@ GAME_CONFIGS = {
                 "manifest": "5997898371746217629",
                 "marker": os.path.join("zone", "dlc", "mp_shipbreaker.ff"),
                 "marker_size": 80756757,
-            },
-        },
-    },
-    "iw6": {
-        "name": "Call of Duty: Ghosts",
-        "app_id": 209160,
-        "always_64bit": True,
-        "depots": (
-            {"depot": 209161, "manifest": "2184173331509504109"},
-            {"depot": 209163, "manifest": "4970028369212033415"},
-            {"depot": 209162, "manifest": "7362622108341025052", "app": 209170},
-            {"depot": 209164, "manifest": "8983067619469855177", "app": 209170},
-            {"depot": 209171, "manifest": "5223938320976514402", "app": 209170},
-            {"depot": 209172, "manifest": "1215466573079763620", "app": 209170},
-        ),
-        "depot_ids": (209161, 209163, 209162, 209164, 209171, 209172),
-        "depot_cmds": (
-            "download_depot 209160 209161 2184173331509504109",
-            "download_depot 209160 209163 4970028369212033415",
-            "download_depot 209170 209162 7362622108341025052",
-            "download_depot 209170 209164 8983067619469855177",
-            "download_depot 209170 209171 5223938320976514402",
-            "download_depot 209170 209172 1215466573079763620",
-        ),
-        "detection_exe": "iw6sp64_ship.exe",
-        "detection_exe_alt": "iw6mp64_ship.exe",
-        "marker_file": None,
-        "marker_threshold": None,
-        "dlc": {
-            "onslaught": {
-                "name": "Onslaught",
-                "app": 209170, "depot": 259250,
-                "manifest": "858753029120825623",
-            },
-            "devastation": {
-                "name": "Devastation",
-                "app": 209170, "depot": 259251,
-                "manifest": "1150481678624215672",
-            },
-            "invasion": {
-                "name": "Invasion",
-                "app": 209170, "depot": 259252,
-                "manifest": "3583786073939989181",
-            },
-            "nemesis": {
-                "name": "Nemesis",
-                "app": 209170, "depot": 259253,
-                "manifest": "6264908471824415901",
-            },
-        },
-    },
-    "s1": {
-        "name": "Call of Duty: Advanced Warfare",
-        "app_id": 209650,
-        "always_64bit": True,
-        "depots": (
-            {"depot": 209651, "manifest": "8904987612539955698"},
-            {"depot": 209652, "manifest": "7997216963741037244"},
-            {"depot": 310340, "manifest": "3027530553092813409", "app": 209660},
-            {"depot": 310341, "manifest": "7286983045129950292", "app": 209660},
-            {"depot": 310342, "manifest": "1115818459498978172", "app": 209660},
-            {"depot": 310351, "manifest": "1373781635064905469", "app": 209660},
-            {"depot": 310352, "manifest": "3190197747840803077", "app": 209660},
-            {"depot": 310353, "manifest": "1786374612997832970", "app": 209660},
-            {"depot": 310343, "manifest": "4656459945361775496", "app": 209660},
-        ),
-        "depot_ids": (209651, 209652, 310340, 310341, 310342,
-                      310351, 310352, 310353, 310343),
-        "depot_cmds": (
-            "download_depot 209650 209651 8904987612539955698",
-            "download_depot 209650 209652 7997216963741037244",
-            "download_depot 209660 310340 3027530553092813409",
-            "download_depot 209660 310341 7286983045129950292",
-            "download_depot 209660 310342 1115818459498978172",
-            "download_depot 209660 310351 1373781635064905469",
-            "download_depot 209660 310352 3190197747840803077",
-            "download_depot 209660 310353 1786374612997832970",
-            "download_depot 209660 310343 4656459945361775496",
-        ),
-        "detection_exe": "s1_sp64_ship.exe",
-        "marker_file": None,
-        "marker_threshold": None,
-        "dlc": {
-            "atlas_gorge": {
-                "name": "Atlas Gorge",
-                "app": 209660, "depot": 318790,
-                "manifest": "1858867507944457961",
-            },
-            "havoc": {
-                "name": "Havoc",
-                "app": 209660, "depot": 318791,
-                "manifest": "1768298366781761218",
-            },
-            "ascendance": {
-                "name": "Ascendance",
-                "app": 209660, "depot": 318792,
-                "manifest": "5542785062311499763",
-            },
-            "supremacy": {
-                "name": "Supremacy",
-                "app": 209660, "depot": 318793,
-                "manifest": "2176153660918059816",
-            },
-            "reckoning": {
-                "name": "Reckoning",
-                "app": 209660, "depot": 318794,
-                "manifest": "901586032961765427",
             },
         },
     },
@@ -348,17 +240,10 @@ def is_downgrade_needed(game_id: str, install_dir: str) -> bool:
 
 
 def _legacy_downgrade_needed(game_id: str, install_dir: str) -> bool:
-    """Pre-receipt detection: config flag (Ghosts/AW), marker size (MW3), PE header (MW2)."""
+    """Pre-receipt detection: marker size (MW3), PE header (MW2)."""
     cfg = GAME_CONFIGS.get(game_id)
     if not cfg:
         return False
-
-    if cfg.get("always_64bit"):
-        from config import is_depot_patched
-        needed = not is_depot_patched(game_id)
-        _log.debug("%s always-64bit, depot_patched=%s -> needed=%s",
-                   cfg["name"], not needed, needed)
-        return needed
 
     # MW3: depot files live in downgrade/ subfolder. If the folder
     # doesn't exist yet, the downgrade hasn't been done.
@@ -529,9 +414,8 @@ def has_enough_space(path: str, need_gb: float = None) -> bool:
     return check_free_space_gb(path) >= (REQUIRED_FREE_SPACE_GB if need_gb is None else need_gb)
 
 
-# A fixed 15 GB was fine for MW3's MP depots but far too little for Ghosts and
-# Advanced Warfare, whose old depots are most of the game: the download ran
-# out of space hours in. Steam's appmanifest lists the size of every installed
+# A fixed 15 GB can be too little for games whose old depots are most of the
+# game: the download ran out of space hours in. Steam's appmanifest lists the size of every installed
 # depot (InstalledDepots); the old manifests of the same depot ids are about
 # the same size, so their sum is the room the download needs.
 SPACE_MARGIN_GB = 2
@@ -622,7 +506,7 @@ def find_depot_stagings(steam_root: str, app_ids) -> list:
     Every staging directory for the given apps. Steam saves
     `download_depot <app> <depot> ...` under content/app_<app>, and a job
     requests depots under several apps (MW3: 42680 SP, 42690 MP + DLC,
-    42750 DS; Ghosts/AW: their MP apps). Looking only in the base app's
+    42750 DS). Looking only in the base app's
     folder left the MP, server and DLC depots unmerged.
     """
     found = []

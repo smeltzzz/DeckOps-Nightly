@@ -1117,8 +1117,8 @@ def cleanup_plut_from_non_plut_prefixes(steam_root: str, on_progress=None):
     Remove leaked Plutonium directories from prefixes that aren't Plutonium games.
 
     Old versions ran _copy_plut_to_prefix() with a blanket storage/ copy into
-    every managed prefix. Non-Plutonium appids (CoD4, MW2, MW3 SP, BO2 Campaign,
-    BO3, Ghosts, AW) should never have Plutonium data.
+    every managed prefix. Non-Plutonium appids (CoD4, MW2, MW3 SP, BO2 Campaign)
+    should never have Plutonium data.
 
     Returns the number of prefixes cleaned.
     """

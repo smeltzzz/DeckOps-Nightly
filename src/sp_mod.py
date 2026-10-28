@@ -15,14 +15,30 @@ Its launcher prefers iw4x-sp.exe / iw5-mod.exe when present and passes
 -singleplayer itself, so the shortcut only swaps in iw-pad.exe.
 """
 
+import json
 import os
 import zipfile
 
 from log import get_logger
 from net import download, github_asset
-from alterware import _CDN_BASE, cdn_digests
 
 _log = get_logger(__name__)
+
+_CDN_BASE = "https://cdn.alterware.ovh"
+
+
+def cdn_digests() -> dict:
+    """{cdn_path: "sha1:<hex>"} from the CDN's files.json. Empty on failure
+    so a CDN hiccup skips verification instead of blocking the install."""
+    try:
+        import urllib.request
+        from net import BROWSER_UA
+        req = urllib.request.Request(f"{_CDN_BASE}/files.json", headers=BROWSER_UA)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return {f["name"]: f"sha1:{f['hash']}" for f in json.loads(r.read()) if f.get("hash")}
+    except Exception as ex:
+        _log.warning("AlterWare files.json lookup failed, downloading unverified: %s", ex)
+        return {}
 
 _IW_PAD_URL = "https://github.com/GalvarinoDev/IW-Pad/releases/latest/download/iw-pad-{}.zip"
 

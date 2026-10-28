@@ -75,50 +75,6 @@ GAMES = {
         "exe": "t6sp.exe",
         "protocol": "t6sp_mod",
     },
-    "t7": {
-        "name": "Call of Duty: Black Ops III",
-        "order": 7,
-        "appid": "311210",
-        "exe": "BlackOps3.exe",
-        "protocol": "cleanops",
-    },
-    # ── DISABLED 2026-09: AlterWare discontinuing Dec 2026 ──
-    # "t7x": {
-    #     "name": "Call of Duty: Black Ops III - T7x",
-    #     "order": 7,
-    #     "appid": "311210",
-    #     "exe": "BlackOps3.exe",
-    #     "protocol": "t7x",
-    # },
-    "iw6mp": {
-        "name": "Call of Duty: Ghosts - Multiplayer",
-        "order": 8,
-        "appid": "209170",
-        "exe": "iw6mp64_ship.exe",
-        "protocol": "alterware",
-    },
-    "iw6sp": {
-        "name": "Call of Duty: Ghosts - Singleplayer",
-        "order": 8,
-        "appid": "209160",
-        "exe": "iw6sp64_ship.exe",
-        "exe_alt": "iw6mp64_ship.exe",
-        "protocol": "alterware",
-    },
-    "s1mp": {
-        "name": "Call of Duty: Advanced Warfare - Multiplayer",
-        "order": 9,
-        "appid": "209660",
-        "exe": "s1_mp64_ship.exe",
-        "protocol": "alterware",
-    },
-    "s1sp": {
-        "name": "Call of Duty: Advanced Warfare - Singleplayer",
-        "order": 9,
-        "appid": "209650",
-        "exe": "s1_sp64_ship.exe",
-        "protocol": "alterware",
-    },
     "iw5mp": {
         "name": "Call of Duty: Modern Warfare 3 (2011) - Multiplayer",
         "order": 5,
@@ -353,14 +309,11 @@ FOLDER_TO_KEYS = {
     "call of duty modern warfare 3":    ["iw5sp",  "iw5mp"],
     "call of duty black ops":           ["t5sp",   "t5mp"],
     "call of duty black ops ii":        ["t6sp",   "t6mp",  "t6zm"],
-    "call of duty black ops iii":       ["t7"],
-    "call of duty ghosts":              ["iw6sp",  "iw6mp"],
-    "call of duty advanced warfare":    ["s1sp",   "s1mp"],
 }
 
 # Keyword rules checked in order when exact match fails.
 # Each entry is (compiled_regex, keys_list).
-# Order matters - more specific rules go first (e.g. "black ops iii" before "black ops ii").
+# Order matters - more specific rules go first (e.g. "black ops ii" before "black ops").
 #
 # Word boundaries use lookaround instead of \b so underscores are treated as
 # separators.  \b considers _ a word character, so "pluto_t4_full_game" would
@@ -370,16 +323,10 @@ _WB = r'(?<![a-zA-Z0-9])'   # word-boundary start (not preceded by alnum)
 _WE = r'(?![a-zA-Z0-9])'    # word-boundary end   (not followed by alnum)
 
 _KEYWORD_RULES = [
-    # BO3 - check before BO2 and BO1 so "black ops iii/3" doesn't fall through
-    (re.compile(rf'{_WB}(black\s*ops\s*(iii|3)|bo3|t7){_WE}', re.IGNORECASE), ["t7"]),
     # BO2 - check before BO1 so "black ops ii" doesn't fall through to BO1
     (re.compile(rf'{_WB}(black\s*ops\s*(ii|2)|bo2|t6){_WE}', re.IGNORECASE), ["t6sp", "t6mp", "t6zm"]),
     # BO1
     (re.compile(rf'{_WB}(black\s*ops|bo1|t5){_WE}', re.IGNORECASE),          ["t5sp", "t5mp"]),
-    # AW - check before MW3/MW2 since "advanced warfare" is unambiguous
-    (re.compile(rf'{_WB}(advanced\s*warfare|aw|s1){_WE}', re.IGNORECASE),     ["s1sp", "s1mp"]),
-    # Ghosts
-    (re.compile(rf'{_WB}(ghosts|iw6){_WE}', re.IGNORECASE),                   ["iw6sp", "iw6mp"]),
     # MW3 - check before MW2 so "modern warfare 3" doesn't fall through to MW2
     (re.compile(rf'{_WB}(modern\s*warfare\s*(3|iii)|mw3|iw5){_WE}', re.IGNORECASE), ["iw5sp", "iw5mp"]),
     # MW2
@@ -415,7 +362,7 @@ _SENTINEL_SCAN_DEPTH = 3
 # Each sentinel group maps to a multiplayer map fastfile that only exists in
 # that specific CoD title. Using MP maps (not SP missions) ensures the game
 # install actually has the multiplayer data needed by mod clients (Plutonium,
-# iw4x, CoD4x, CleanOps, T7x, AlterWare). These never get modified by mod
+# iw4x, CoD4x). These never get modified by mod
 # clients or launchers, making them reliable for identifying game installs
 # even when exes are missing, renamed, or replaced.
 #
@@ -433,9 +380,6 @@ GAME_SENTINELS = {
     "mw3":    "zone/english/mp_dome.ff",         # Dome
     "bo1":    "mp_nuked.ff",                     # Nuketown — case-insensitive search under zone/*/
     "bo2":    "zone/all/mp_hijacked.ff",         # Hijacked
-    "bo3":    "zone/mp_infection.ff",            # Infection
-    "ghosts": "mp_strikezone.ff",                # Strikezone — root-level MP map fastfile
-    "aw":     "mp_comeback.ff",                  # Comeback — root-level MP map fastfile
 }
 
 # Maps each game key to its sentinel group. Multiple keys share a group
@@ -447,11 +391,6 @@ KEY_TO_SENTINEL = {
     "iw5sp":  "mw3",  "iw5mp":  "mw3",
     "t5sp":   "bo1",  "t5mp":   "bo1",
     "t6sp":   "bo2",  "t6mp":   "bo2",  "t6zm": "bo2",
-    "t7":     "bo3",
-    # ── DISABLED 2026-09: AlterWare discontinuing Dec 2026 ──
-    # "t7x":    "bo3",
-    "iw6sp":  "ghosts", "iw6mp": "ghosts",
-    "s1sp":   "aw",     "s1mp":  "aw",
 }
 
 

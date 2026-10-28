@@ -278,8 +278,8 @@ class SetupFlowScreen(QWidget):
         nl.addWidget(_lbl("What's your player name?", 15, "#CCC"))
         nl.addSpacing(4)
         nl.addWidget(_lbl(
-            "Your name in CoD4x, IW4x, AlterWare, T7X and Plutonium offline. It is not used by "
-            "CleanOps. Your Steam name is filled in; change it to anything you like.",
+            "Your name in CoD4x, IW4x and Plutonium offline. "
+            "Your Steam name is filled in; change it to anything you like.",
             13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         nl.addSpacing(12)
         self._name_input = QLineEdit()

@@ -2,7 +2,7 @@
 net.py — DeckOps shared network utilities
 
 Provides a reusable download-with-retry helper used by mod client
-installers (cod4x, iw3sp, iw4x, cleanops). Centralises the browser
+installers (cod4x, iw3sp, iw4x). Centralises the browser
 UA string and retry/backoff logic so changes propagate everywhere.
 """
 
@@ -255,7 +255,7 @@ def github_asset(repo: str, suffix: str, fallback: str = None, timeout: int = 30
     or rate limit doesn't block the install, just skips verification.
     """
     try:
-        # One lookup per repo per session: T6SP, AlterWare (4 games), IW-Pad
+        # One lookup per repo per session: T6SP, IW-Pad
         # and IW4x asked for the same release several times, using up GitHub's
         # 60 requests an hour. Only answers that worked are kept.
         data = _LATEST_RELEASES.get(repo)

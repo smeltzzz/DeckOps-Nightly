@@ -2,7 +2,7 @@
 shortcut.py — DeckOps non-Steam shortcut creator
 
 Creates non-Steam game shortcuts in Steam for CoD4 Multiplayer (CoD4x only),
-World at War Multiplayer (LCD only) and T7x. These shortcuts point to the
+World at War Multiplayer (LCD only). These shortcuts point to the
 original game exes in the Steam library and use the original compatdata
 prefixes. CoD4R MP and WaW MP on OLED / Other run from the game's own Steam
 tile instead (see mp_on_main_tile).
@@ -85,22 +85,6 @@ SHORTCUTS = {
         "grid_ext":        "png",
         "wide_ext":        "jpg",
         "hero_ext":        "jpg",
-        "logo_ext":        "png",
-    },
-    "t7x": {
-        "name":            "Call of Duty: Black Ops 3 T7x",
-        "exe_name":        "t7x.exe",
-        "game_appid":      "311210",
-        "template_type":   "standard",
-        "icon_url":        "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/311210/bd3e3a9516b480164df25d16e49ae4ce4a063cb4.jpg",
-        "grid_url":        "https://cdn2.steamgriddb.com/grid/18ad806798df1fdc114ced9115330fac.jpg",
-        "wide_url":        "https://cdn2.steamgriddb.com/grid/445cef1a5008beb63c078f314d820e1f.jpg",
-        "hero_url":        "https://cdn2.steamgriddb.com/hero/c938d97fb333d4b1fbf906b760afa29b.png",
-        "logo_url":        "https://cdn2.steamgriddb.com/logo/d2b9d7150a1f6693817d82d4ca9b701d.png",
-        "icon_ext":        "jpg",
-        "grid_ext":        "jpg",
-        "wide_ext":        "jpg",
-        "hero_ext":        "png",
         "logo_ext":        "png",
     },
 }
@@ -245,66 +229,6 @@ OWN_SHORTCUTS = {
         "logo_url":       "https://cdn2.steamgriddb.com/logo_thumb/6271faadeedd7626d661856b7a004e27.png",
         "icon_ext": "png", "grid_ext": "jpg", "wide_ext": "jpg", "hero_ext": "png", "logo_ext": "png",
     },
-    "t7": {
-        "name":           "Call of Duty: Black Ops III",
-        "template_type":  "standard",
-        "icon_url":       "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/311210/bd3e3a9516b480164df25d16e49ae4ce4a063cb4.jpg",
-        "grid_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/311210/library_600x900_2x.jpg",
-        "wide_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/311210/header.jpg",
-        "hero_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/311210/library_hero.jpg",
-        "logo_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/311210/logo.png",
-        "icon_ext": "jpg", "grid_ext": "jpg", "wide_ext": "jpg", "hero_ext": "jpg", "logo_ext": "png",
-    },
-    "t7x": {
-        "name":           "Call of Duty: Black Ops 3 T7x",
-        "template_type":  "standard",
-        "icon_url":       "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/311210/bd3e3a9516b480164df25d16e49ae4ce4a063cb4.jpg",
-        "grid_url":       "https://cdn2.steamgriddb.com/grid/18ad806798df1fdc114ced9115330fac.jpg",
-        "wide_url":       "https://cdn2.steamgriddb.com/grid/445cef1a5008beb63c078f314d820e1f.jpg",
-        "hero_url":       "https://cdn2.steamgriddb.com/hero/c938d97fb333d4b1fbf906b760afa29b.png",
-        "logo_url":       "https://cdn2.steamgriddb.com/logo/d2b9d7150a1f6693817d82d4ca9b701d.png",
-        "icon_ext": "jpg", "grid_ext": "jpg", "wide_ext": "jpg", "hero_ext": "png", "logo_ext": "png",
-    },
-    "iw6sp": {
-        "name":           "Call of Duty: Ghosts - Singleplayer",
-        "template_type":  "standard",
-        "icon_url":       "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/209160/634577eb0ac94ce620c328885961ed6756823474.jpg",
-        "grid_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209160/library_600x900_2x.jpg",
-        "wide_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209160/header.jpg",
-        "hero_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209160/library_hero.jpg",
-        "logo_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209160/logo.png",
-        "icon_ext": "jpg", "grid_ext": "jpg", "wide_ext": "jpg", "hero_ext": "jpg", "logo_ext": "png",
-    },
-    "iw6mp": {
-        "name":           "Call of Duty: Ghosts - Multiplayer",
-        "template_type":  "standard",
-        "icon_url":       "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/209170/634577eb0ac94ce620c328885961ed6756823474.jpg",
-        "grid_url":       "https://cdn2.steamgriddb.com/grid/66820f8c84215725cac52e00587988fd.png",
-        "wide_url":       "https://cdn2.steamgriddb.com/grid/4f3244fc8b8787fe45c90c2a41c28478.png",
-        "hero_url":       "https://cdn2.steamgriddb.com/hero/8c59fd6fbe0e9793ec2b27971221cace.jpg",
-        "logo_url":       "https://cdn2.steamgriddb.com/logo/287e03db1d99e0ec2edb90d079e142f3.png",
-        "icon_ext": "jpg", "grid_ext": "png", "wide_ext": "png", "hero_ext": "jpg", "logo_ext": "png",
-    },
-    "s1sp": {
-        "name":           "Call of Duty: Advanced Warfare - Singleplayer",
-        "template_type":  "standard",
-        "icon_url":       "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/209650/aab8b39ef63c54af5497b55aa104d5c7ec860fd9.jpg",
-        "grid_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209650/library_600x900_2x.jpg",
-        "wide_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209650/header.jpg",
-        "hero_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209650/library_hero.jpg",
-        "logo_url":       "https://shared.steamstatic.com/store_item_assets/steam/apps/209650/logo.png",
-        "icon_ext": "jpg", "grid_ext": "jpg", "wide_ext": "jpg", "hero_ext": "jpg", "logo_ext": "png",
-    },
-    "s1mp": {
-        "name":           "Call of Duty: Advanced Warfare - Multiplayer",
-        "template_type":  "standard",
-        "icon_url":       "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/209660/aab8b39ef63c54af5497b55aa104d5c7ec860fd9.jpg",
-        "grid_url":       "https://cdn2.steamgriddb.com/grid/dfee5996d068e6bed170ff189ca2f193.png",
-        "wide_url":       "https://cdn2.steamgriddb.com/grid/d790c9e6c0b5e02c87b375e782ac01bc.png",
-        "hero_url":       "https://cdn2.steamgriddb.com/hero/7070f9088e456682f0f84f815ebda761.jpg",
-        "logo_url":       "https://cdn2.steamgriddb.com/logo/e243aa93e6b6e031797f86d0858f5e40.png",
-        "icon_ext": "jpg", "grid_ext": "png", "wide_ext": "png", "hero_ext": "jpg", "logo_ext": "png",
-    },
 }
 
 
@@ -365,22 +289,6 @@ STEAM_ARTWORK = {
         "hero_url":  "https://cdn2.steamgriddb.com/hero_thumb/e5e63da79fcd2bebbd7cb8bf1c1d0274.jpg",
         "logo_url":  "https://cdn2.steamgriddb.com/logo_thumb/79514e888b8f2acacc68738d0cbb803e.png",
         "icon_ext": "png", "grid_ext": "jpg", "wide_ext": "jpg", "hero_ext": "jpg", "logo_ext": "png",
-    },
-    "209170": {  # Ghosts MP
-        "icon_url":  "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/209170/634577eb0ac94ce620c328885961ed6756823474.jpg",
-        "grid_url":  "https://cdn2.steamgriddb.com/grid/66820f8c84215725cac52e00587988fd.png",
-        "wide_url":  "https://cdn2.steamgriddb.com/grid/4f3244fc8b8787fe45c90c2a41c28478.png",
-        "hero_url":  "https://cdn2.steamgriddb.com/hero/8c59fd6fbe0e9793ec2b27971221cace.jpg",
-        "logo_url":  "https://cdn2.steamgriddb.com/logo/287e03db1d99e0ec2edb90d079e142f3.png",
-        "icon_ext": "jpg", "grid_ext": "png", "wide_ext": "png", "hero_ext": "jpg", "logo_ext": "png",
-    },
-    "209660": {  # AW MP
-        "icon_url":  "https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/209660/aab8b39ef63c54af5497b55aa104d5c7ec860fd9.jpg",
-        "grid_url":  "https://cdn2.steamgriddb.com/grid/dfee5996d068e6bed170ff189ca2f193.png",
-        "wide_url":  "https://cdn2.steamgriddb.com/grid/d790c9e6c0b5e02c87b375e782ac01bc.png",
-        "hero_url":  "https://cdn2.steamgriddb.com/hero/7070f9088e456682f0f84f815ebda761.jpg",
-        "logo_url":  "https://cdn2.steamgriddb.com/logo/e243aa93e6b6e031797f86d0858f5e40.png",
-        "icon_ext": "jpg", "grid_ext": "png", "wide_ext": "png", "hero_ext": "jpg", "logo_ext": "png",
     },
 }
 
@@ -1337,8 +1245,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
 
         # Strip any existing entries whose AppName matches a shortcut we're
         # about to write. Without this, reinstalls leave stale Exe /
-        # LaunchOptions / StartDir fields in place (e.g. T7X moving from
-        # the stock BO3 dir to DeckOps-T7X sibling dir).
+        # LaunchOptions / StartDir fields in place.
         names_to_write = {sd["name"] for _, sd, _ in to_create}
         existing_raw, stripped = _strip_entries_by_name(
             existing_raw, names_to_write
@@ -1414,13 +1321,6 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
                     actual_exe     = _venv_python
                     start_dir      = os.path.dirname(_cleanup_script)
                     launch_options = f'"{_cleanup_script}" t4mp steam'
-            elif key == "t7x":
-                # T7X (AlterWare) -- standalone exe in the DeckOps-T7X
-                # sibling dir. GE-Proton compat tool handles everything;
-                # no launch options needed.
-                actual_exe     = exe_path
-                start_dir      = install_dir
-                launch_options = ""
             else:
                 actual_exe     = exe_path
                 start_dir      = install_dir
@@ -1520,8 +1420,6 @@ def apply_steam_artwork(selected_keys: list, on_progress=None):
         "t5mp":      "42710",
         "t6mp":      "202990",
         "t6zm":      "212910",
-        "iw6mp":     "209170",   # Ghosts MP
-        "s1mp":      "209660",   # AW MP
     }
 
     to_apply = []
@@ -1555,8 +1453,7 @@ def apply_steam_artwork(selected_keys: list, on_progress=None):
 
 
 # Mod clients whose exe replaces the game's in own shortcuts; the appid CRC hashes this exe.
-_OWN_MOD_EXES = {"iw4mp": "iw4x.exe", "cod4sp": "iw3sp_mod.exe", "t7x": "t7x.exe",
-                 "iw6mp": "iw6-mod.exe", "iw6sp": "iw6-mod.exe", "s1mp": "s1-mod.exe", "s1sp": "s1-mod.exe"}
+_OWN_MOD_EXES = {"iw4mp": "iw4x.exe", "cod4sp": "iw3sp_mod.exe"}
 
 
 def own_shortcut_exe(key: str, game: dict) -> str:
@@ -1570,7 +1467,7 @@ def own_shortcut_appid(key: str, game: dict) -> int:
     compatdata/<this appid>, not the Steam appid's.
 
     Hashes own_shortcut_exe -- the mod client exe the shortcut runs
-    (iw4x.exe, iw3sp_mod.exe, t7x.exe, iw6-mod.exe, s1-mod.exe), else the
+    (iw4x.exe, iw3sp_mod.exe), else the
     game exe -- like enrich_own_games and controller_profiles. It used to
     hash exe_path, so e.g. updating an own IW3SP-MOD from My Games put it
     into a different, empty prefix."""
@@ -1716,15 +1613,6 @@ def enrich_own_games(own_games: dict, selected_keys: list,
             # Same swap as the Steam copy: stock t6sp.exe keeps the appid stable
             from t6sp_mod import LAUNCH_OPTS
             launch_options = LAUNCH_OPTS
-
-        elif key == "t7":
-            launch_options = 'WINEDLLOVERRIDES="d3d11=n,b" %command%'
-
-        elif key in ("iw6mp", "s1mp"):
-            launch_options = "-multiplayer"
-
-        elif key in ("iw6sp", "s1sp"):
-            launch_options = "-singleplayer"
 
         else:
             launch_options = ""
@@ -2240,7 +2128,7 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
     expected = {}
     for key, entry in setup.items():
         src = entry.get("source", "steam")
-        if src == "steam" and key in SHORTCUTS and key != "t7x" and not mp_on_main_tile(key):
+        if src == "steam" and key in SHORTCUTS and not mp_on_main_tile(key):
             expected[key] = ("steam", SHORTCUTS[key]["name"])
         elif src == "own" and lcd and key in HEROIC_PLUT_GAMES:
             expected[key] = ("heroic", HEROIC_PLUT_GAMES[key]["title"])

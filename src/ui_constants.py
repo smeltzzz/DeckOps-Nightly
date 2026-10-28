@@ -142,10 +142,6 @@ ALL_GAMES = [
     {"base":"Call of Duty: Modern Warfare 3","keys":["iw5mp","iw5sp","iw5mp_ds"],"appid":42690,"dev":"iw","client":"plutonium",
      "lcd_keys":["iw5mp","iw5sp","iw5mp_ds"],"lcd_client":"plutonium","lcd_appid":42680,
      "launch_note":"DeckOps creates Proton prefixes automatically."},
-    {"base":"Call of Duty: Ghosts","keys":["iw6mp","iw6sp"],"appid":209160,"dev":"iw","client":"alterware",
-     "launch_note":"DeckOps creates Proton prefixes automatically."},
-    {"base":"Call of Duty: Advanced Warfare","keys":["s1mp","s1sp"],"appid":209650,"dev":"iw","client":"alterware",
-     "launch_note":"DeckOps creates Proton prefixes automatically."},
     # ── Row 2: Treyarch + LAN launcher ───────────────────────────────────
     {"base":"Call of Duty: World at War","keys":["t4mp","t4sp"],"appid":10090,"dev":"trey","client":"plutonium",
      "lcd_keys":["t4mp","t4sp"],"lcd_client":"plutonium",
@@ -155,8 +151,6 @@ ALL_GAMES = [
      "launch_note":"DeckOps creates Proton prefixes automatically."},
     {"base":"Call of Duty: Black Ops II","keys":["t6mp","t6sp","t6zm"],"appid":202990,"dev":"trey","client":"plutonium + t6sp-mod",
      "lcd_keys":["t6mp","t6sp","t6zm"],"lcd_client":"plutonium + t6sp-mod","lcd_appid":202970,
-     "launch_note":"DeckOps creates Proton prefixes automatically."},
-    {"base":"Call of Duty: Black Ops III","keys":["t7"],"appid":311210,"dev":"trey","client":"cleanops",
      "launch_note":"DeckOps creates Proton prefixes automatically."},
     {"base":"DeckOps: Plutonium Offline","keys":[],"appid":None,"dev":"trey","client":"lan",
      "launch_note":"Offline Mode: the offline launcher, an Offline entry in each Plutonium game's launch menu, and bot matches."},
@@ -195,12 +189,6 @@ KEY_CLIENT = {
     "t6zm":   "plutonium",
     "t6mp":   "plutonium",
     "t6sp":   "t6sp_mod",
-    "t7":     "cleanops",
-    # "t7x":    "t7x",  # DISABLED 2026-09: AlterWare discontinuing Dec 2026
-    "iw6mp": "alterware",
-    "iw6sp": "alterware",
-    "s1mp":  "alterware",
-    "s1sp":  "alterware",
 }
 
 KEY_EXES = {
@@ -210,10 +198,6 @@ KEY_EXES = {
     "t4sp":"CoDWaW.exe","t4mp":"CoDWaWmp.exe",
     "t5sp":"BlackOps.exe","t5mp":"BlackOpsMP.exe",
     "t6zm":"t6zm.exe","t6mp":"t6mp.exe","t6sp":"t6sp.exe",
-    "t7":"BlackOps3.exe",
-    # "t7x":"t7x.exe",  # DISABLED 2026-09: AlterWare discontinuing Dec 2026
-    "iw6mp":"iw6mp64_ship.exe","iw6sp":"iw6sp64_ship.exe",
-    "s1mp":"s1_mp64_ship.exe","s1sp":"s1_sp64_ship.exe",
 }
 
 # Label shown beneath each per-key checkbox in SetupScreen.
@@ -224,9 +208,6 @@ KEY_MODE_LABEL = {
     "t4sp":   "S/Z",   "t4mp":   "MP",
     "t5sp":   "S/Z",   "t5mp":   "MP",
     "t6sp":   "SP",    "t6zm":   "ZM",    "t6mp":   "MP",
-    "t7":     "All",
-    "iw6mp":  "MP",    "iw6sp":  "SP",
-    "s1mp":   "MP",    "s1sp":   "SP",
 }
 
 
@@ -240,9 +221,6 @@ SP_IMAGE_URLS = {
     42700:  "https://shared.steamstatic.com/store_item_assets/steam/apps/42700/library_600x900_2x.jpg",
     202970: "https://shared.steamstatic.com/store_item_assets/steam/apps/202970/library_600x900_2x.jpg",
     202990: "https://shared.steamstatic.com/store_item_assets/steam/apps/202970/library_600x900_2x.jpg",
-    311210: "https://shared.steamstatic.com/store_item_assets/steam/apps/311210/library_600x900_2x.jpg",
-    209160: "https://shared.steamstatic.com/store_item_assets/steam/apps/209160/library_600x900_2x.jpg",
-    209650: "https://shared.steamstatic.com/store_item_assets/steam/apps/209650/library_600x900_2x.jpg",
 }
 
 IMG_RATIO = 1.5
@@ -411,52 +389,6 @@ def _ask_iw4x_dlc(parent, selected) -> str:
         QMessageBox.StandardButton.Yes,
     )
     return "install" if reply == QMessageBox.StandardButton.Yes else ""
-
-def _ask_bo3_client(parent, selected) -> str:
-    """
-    Return the BO3 client to install.
-
-    T7X was disabled in September 2026 (AlterWare discontinuing Dec 2026).
-    The original three-way dialog (CleanOps / T7X / Both) is preserved
-    below in comments for easy re-enable.  For now, always return
-    "cleanops" so the install flow skips T7X without any UI prompt.
-    """
-    return "cleanops"
-    # ── DISABLED 2026-09: AlterWare discontinuing Dec 2026 ──────────────
-    # has_bo3 = any(KEY_CLIENT.get(k) == "cleanops" for k, _, _ in selected)
-    # if not has_bo3:
-    #     return "cleanops"
-    #
-    # msg = QMessageBox(parent)
-    # msg.setWindowTitle("Black Ops III - Client Selection")
-    # msg.setText(
-    #     "Choose which BO3 client to install.\n\n"
-    #     "CleanOps\n"
-    #     "Patches BO3 to protect against exploits. Adds dedicated servers "
-    #     "alongside Activision's official servers. Recommended for official "
-    #     "Steam copies. You can skip this for non-Steam installs.\n\n"
-    #     "T7X\n"
-    #     "Separate client with its own dedicated server list. "
-    #     "Download size: ~105 MB.\n\n"
-    #     "Both\n"
-    #     "Installs CleanOps and T7X side by side. Do the first launch in "
-    #     "Desktop Mode:\n"
-    #     "  1. Launch Black Ops III first (CleanOps patches).\n"
-    #     "  2. Launch T7X after CleanOps is working.\n"
-    #     "  3. After this, both work fine in Game Mode."
-    # )
-    # btn_cleanops = msg.addButton("CleanOps", QMessageBox.ButtonRole.AcceptRole)
-    # btn_t7x      = msg.addButton("T7X", QMessageBox.ButtonRole.AcceptRole)
-    # btn_both     = msg.addButton("Both", QMessageBox.ButtonRole.AcceptRole)
-    # msg.setDefaultButton(btn_cleanops)
-    # msg.exec()
-    #
-    # clicked = msg.clickedButton()
-    # if clicked == btn_t7x:
-    #     return "t7x"
-    # if clicked == btn_both:
-    #     return "both"
-    # return "cleanops"
 
 # ── Title block ───────────────────────────────────────────────────────────────
 

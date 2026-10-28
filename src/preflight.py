@@ -24,9 +24,8 @@ OK, WARN, BLOCK = "ok", "warn", "block"
 
 # Mirrors _DG_KEY_MAP in ui_install._run_inner. Kept here so preflight
 # stays a leaf module; update both if the depot game list changes.
-DOWNGRADE_KEYS = {"iw5mp", "iw5mp_ds", "iw5sp", "iw6mp", "iw6sp", "s1mp", "s1sp"}
-DOWNGRADE_GAME = {"iw5mp": "iw5", "iw5mp_ds": "iw5", "iw5sp": "iw5",
-                  "iw6mp": "iw6", "iw6sp": "iw6", "s1mp": "s1", "s1sp": "s1"}
+DOWNGRADE_KEYS = {"iw5mp", "iw5mp_ds", "iw5sp"}
+DOWNGRADE_GAME = {"iw5mp": "iw5", "iw5mp_ds": "iw5", "iw5sp": "iw5"}
 
 
 def free_gb(path: str) -> float:
@@ -108,7 +107,7 @@ def check(selected, iw4x_dlc=False, zd=False, downgrade_keys=()):
     dg_games = set()
     for key, client, install_dir in selected:
         # The downgrade stages a second copy beside the game it belongs to,
-        # sized from that game's depots (Ghosts / AW need far more than the
+        # sized from that game's depots (far more than the
         # old flat 15 GB), once per game and added up per drive.
         if key in dg and install_dir:
             game_id = DOWNGRADE_GAME.get(key)

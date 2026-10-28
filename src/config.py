@@ -44,7 +44,7 @@ DEFAULTS = {
     "steam_root": None,
     "setup_games": {},           # key: game key, value: { "client": ..., "source": "steam"|"own", "setup_at": timestamp,
                                  #   "lan_wrapper_path": path to -lan bash script for offline launcher (all sources) }
-    "depot_patched": {},         # legacy (read-only): pre-receipt Ghosts/AW downgrade flag; receipts now live in the game folder
+    "depot_patched": {},         # legacy (read-only): pre-receipt downgrade flag (Ghosts/AW, removed); receipts now live in the game folder
     "game_source": None,         # "steam" or "own"
     "music_enabled": True,       # background music on/off
     "music_volume":  0.4,        # 0.0 to 1.0
