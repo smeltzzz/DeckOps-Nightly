@@ -1471,10 +1471,13 @@ class ConfigureScreen(QWidget):
         fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
         left.addWidget(fps_btn)
+        left.addWidget(_lbl("This does not set FPS in the MW2 and MW3 campaigns. Those games ignore the "
+                            "FPS and FOV values in their config; see below.",
+                            11, C_TREY, align=Qt.AlignmentFlag.AlignLeft))
         left.addSpacing(6)
         left.addWidget(_lbl("MW2 and MW3 campaign", 12, "#AAA", bold=True, align=Qt.AlignmentFlag.AlignLeft))
-        _desc(left, "These builds ignore FOV and FPS in the config. DeckOps holds FOV at 90 while the "
-                    "game runs, and the button below limits the frame rate to 90 with DXVK. "
+        _desc(left, "FOV: DeckOps holds it at 90 while the game runs, with nothing for you to do. "
+                    "FPS: only the button below sets it, by limiting the frame rate to 90 with DXVK. "
                     "Changing it closes Steam.")
         self._cap_btn = _btn("", C_DARK_BTN, size=12, h=40)
         self._cap_btn.setFixedWidth(220); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
@@ -1802,7 +1805,7 @@ class ConfigureScreen(QWidget):
                 count = set_fps_fov(steam_root, installed,
                                     on_progress=lambda msg: _log.info("fps/fov: %s", msg.strip()))
                 s.log.emit(f"✓  Wrote 90 FOV and 90 FPS to {count} config file(s). "
-                           "Close the games first if they are running.")
+                           "Close the games first if they are running. MW2 and MW3 campaign FPS is set by the FPS Limit button, not this one.")
             except Exception as ex:
                 _log.error("fps/fov failed", exc_info=True)
                 s.log.emit(f"✗  Failed: {ex}")
