@@ -1380,8 +1380,15 @@ class ConfigureScreen(QWidget):
             if not first: col.addSpacing(12)
             col.addWidget(_lbl(text, 13, color, bold=True, align=Qt.AlignmentFlag.AlignLeft))
 
+        def _desc(col, text):
+            """The small grey line under a section heading."""
+            lbl = _lbl(text, 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+            col.addWidget(lbl)
+            return lbl
+
         # ── Left: Background Music ────────────────────────────────────────
         _head(left, "Background Music", first=True)
+        _desc(left, "Plays music inside DeckOps. The slider sets the volume.")
         mr = QHBoxLayout(); mr.setSpacing(12)
         self._music_on = _music_enabled
         self._music_toggle = _btn(
@@ -1401,6 +1408,8 @@ class ConfigureScreen(QWidget):
 
         # ── Left: Controller Profiles ─────────────────────────────────────
         _head(left, "Controller Profiles")
+        _desc(left, "Pick how gyro aiming works, then press Re-apply Templates to write the "
+                    "controller layout for all your games. Closes Steam.")
         gr = QHBoxLayout(); gr.setSpacing(8)
         gr.addWidget(_lbl("Gyro:", 12, "#AAA", wrap=False))
         self._gyro_btns = {}
@@ -1422,32 +1431,32 @@ class ConfigureScreen(QWidget):
 
         # ── Left: Shortcuts ───────────────────────────────────────────────
         _head(left, "Shortcuts")
-        left.addWidget(_lbl("Closes Steam, then re-adds any missing DeckOps shortcuts.",
-                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(left, "Re-adds any missing DeckOps shortcuts and repairs the launch menus and "
+                    "launch options of your games. Closes Steam.")
         sc_fix_btn = _btn("Repair Shortcuts", C_DARK_BTN, size=12, h=40)
         sc_fix_btn.setFixedWidth(220); sc_fix_btn.clicked.connect(self._repair_shortcuts)
         left.addWidget(sc_fix_btn)
 
         # ── Left: Save Backup ─────────────────────────────────────────────
         _head(left, "Save Backup")
-        left.addWidget(_lbl("Copies your saves, stats and Plutonium mods to a safe folder that "
-                            "survives uninstalling. Steam can stay open.",
-                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(left, "Copies your saves, stats and Plutonium mods to a folder that survives an "
+                    "uninstall. Steam can stay open.")
         backup_btn = _btn("Back Up My Saves Now", C_DARK_BTN, size=12, h=40)
         backup_btn.setFixedWidth(220); backup_btn.clicked.connect(self._backup_saves_now)
         left.addWidget(backup_btn)
 
         # ── Left: Check My Setup ──────────────────────────────────────────
         _head(left, "Check My Setup")
-        left.addWidget(_lbl("Checks each game's folder, mod files, GE-Proton and Steam launch option. "
-                            "Changes nothing; Fix runs that game's Update.",
-                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(left, "Checks each game's folder, mod files, GE-Proton and Steam launch option. It "
+                    "changes nothing; Fix runs that game's Update.")
         check_btn = _btn("Check My Setup", C_DARK_BTN, size=12, h=40)
         check_btn.setFixedWidth(220); check_btn.clicked.connect(self._check_setup)
         left.addWidget(check_btn)
 
         # ── Left: Player Name ─────────────────────────────────────────────
         _head(left, "Player Name")
+        self._name_note = _desc(left, "Your name in CoD4x, IW4x, AlterWare, T7X and Plutonium offline. "
+                                      "It is not used by CleanOps.")
         nr = QHBoxLayout(); nr.setSpacing(12)
         self._name_input = QLineEdit()
         self._name_input.setPlaceholderText("Enter player name...")
@@ -1463,23 +1472,18 @@ class ConfigureScreen(QWidget):
         save_btn.clicked.connect(self._save_name)
         nr.addWidget(self._name_input, stretch=1); nr.addWidget(save_btn)
         left.addLayout(nr)
-        self._name_note = _lbl("Sets your offline name for CoD4x, IW4x, AlterWare, T7X, and Plutonium. Does not affect CleanOps.", 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        left.addWidget(self._name_note)
 
         # ── Left: FPS and FOV ─────────────────────────────────────────────
         _head(left, "FPS and FOV")
-        left.addWidget(_lbl("Sets a 90 FPS cap and 90 FOV for MW1, MW2, MW3, WaW, BO1 and BO2 "
-                            "(campaign, multiplayer, zombies). Only those lines change in each "
-                            "config. In the MW2 and MW3 campaigns FOV is held at 90 automatically "
-                            "while the game runs. MW2 also keeps an F10 key that sets FOV 90 as a "
-                            "fallback (map a back paddle to F10 in Steam Input).",
-                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(left, "Sets 90 FOV and a 90 FPS cap in the configs of MW1, MW2, MW3, WaW, BO1 and BO2 "
+                    "(all modes). Only those lines change. Steam can stay open.")
         fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
         fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
         left.addWidget(fps_btn)
-        left.addWidget(_lbl("MW2 and MW3 campaign: caps the frame rate at 90 with DXVK in the Steam "
-                            "launch option (these builds have no in-game cap). Closes Steam to apply.",
-                            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(left, "MW2 and MW3 campaign: DeckOps holds FOV at 90 while the game runs, and DXVK caps "
+                    "the frame rate at 90 in the Steam launch option, because these builds have no "
+                    "in-game cap. The button below closes Steam. MW2 also keeps an F10 key for FOV 90: "
+                    "map a back paddle to F10 in Steam Input.")
         self._cap_btn = _btn("", C_DARK_BTN, size=12, h=40)
         self._cap_btn.setFixedWidth(220); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
         self._refresh_cap_btn()
@@ -1490,6 +1494,7 @@ class ConfigureScreen(QWidget):
         sr_lay = QVBoxLayout(self._shader_row); sr_lay.setContentsMargins(0,0,0,0); sr_lay.setSpacing(10)
         sr_lay.addSpacing(12)
         sr_lay.addWidget(_lbl("Shader Cache", 13, "#CCC", bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(sr_lay, "Clears the shader cache of every game you have set up. LCD only.")
         sc_btn = _btn("Clear Shader Cache", C_DARK_BTN, size=12, h=40)
         sc_btn.setFixedWidth(220)
         sc_btn.clicked.connect(self._clear_shader_cache)
@@ -1502,6 +1507,7 @@ class ConfigureScreen(QWidget):
 
         # ── Right: Links ──────────────────────────────────────────────────
         _head(right, "Links", first=True)
+        _desc(right, "Support on Discord, and the Stable and Nightly project pages.")
         lr = QHBoxLayout(); lr.setSpacing(12)
         discord_btn = _btn("Discord", "#5865F2", size=12, h=40)
         discord_btn.setFixedWidth(120)
@@ -1517,6 +1523,8 @@ class ConfigureScreen(QWidget):
 
         # ── Right: Updates & Logs ─────────────────────────────────────────
         _head(right, "Updates & Logs")
+        _desc(right, "Checks for a new DeckOps version. The log shows what DeckOps has done; "
+                     "copy it when you report a problem.")
         self._update_btn = _btn("Check for Updates", C_BLUE_BTN, size=12, h=40)
         self._update_btn.setFixedWidth(220)
         self._update_btn.clicked.connect(self._check_for_updates)
@@ -1537,8 +1545,9 @@ class ConfigureScreen(QWidget):
 
         # ── Right: Danger Zone ────────────────────────────────────────────
         _head(right, "Danger Zone", "#E05050")
-        right.addWidget(_lbl("These remove DeckOps changes. Each asks for confirmation first.",
-                             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        _desc(right, "Full Uninstall removes DeckOps from your games and Steam; save backups stay. "
+                     "Reset DeckOps Config clears your setup and runs setup again. "
+                     "Each asks for confirmation first.")
         dzr = QHBoxLayout(); dzr.setSpacing(12)
         uninstall_btn = _btn("Full Uninstall", C_RED_BTN, size=12, h=40)
         reset_cfg_btn = _btn("Reset DeckOps Config", C_RED_BTN, size=12, h=40)
@@ -1659,7 +1668,7 @@ class ConfigureScreen(QWidget):
                 btn.setStyleSheet(btn.styleSheet().replace(C_DARK_BTN, C_IW))
             else:
                 btn.setStyleSheet(btn.styleSheet().replace(C_IW, C_DARK_BTN))
-        self.status.setText(f"Gyro mode set to {mode.upper()}. Hit Re-apply Templates to update controller profiles.")
+        self.status.setText(f"Gyro mode set to {mode.upper()}. Press Re-apply Templates to use it.")
 
     def _settings_task(self, s):
         """

@@ -111,15 +111,18 @@ DeckOps installs a controller profile for every game. Choose your gyro mode duri
 
 | Option | What it does |
 |---|---|
-| Background Music | Turn on/off and adjust volume |
-| Controller Profiles | Switch gyro mode and re-apply controller templates |
-| Player Name | Change your in-game name for CoD4R, CoD4x, IW4x, and Plutonium offline |
-| FPS and FOV | Set a 90 FPS cap and 90 FOV in the configs of MW1, MW2, MW3, WaW, BO1, and BO2 (all modes). Only those lines change. The MW2 and MW3 campaigns (64-bit Steam builds) ignore FOV in the config, so DeckOps runs the game under `fovwatch.py`, which holds `cg_fov` at 90 in the running game. Those builds also have no in-game FPS cap, so their Steam launch options cap it at 90 with DXVK (the **DXVK Frame Cap** button turns that off or on). MW2 campaign also still gets `thereisacow` and an F10 bind as a fallback (map a back paddle to F10 in Steam Input). |
-| Shader Cache (LCD only) | Clear shader cache data for all set-up games |
-| Check for Updates | Check for and apply DeckOps updates |
-| Full Uninstall | Remove DeckOps-managed files while preserving save backups and unrelated Plutonium data. If Stable is also installed, shared game files and Steam settings stay in place. |
-| Reset DeckOps Config | Wipe config and run setup again |
-| Links | Discord, Stable repo, and Nightly repo |
+| Background Music | Plays music inside DeckOps. Turn it on or off and set the volume. |
+| Controller Profiles | Pick the gyro mode, then **Re-apply Templates** writes the controller layout for all your games. Closes Steam. |
+| Shortcuts | **Repair Shortcuts** re-adds any missing DeckOps shortcuts and repairs the launch menus and launch options of your games. Closes Steam. |
+| Save Backup | Copies your saves, stats and Plutonium mods to a folder that survives an uninstall. Steam can stay open. |
+| Check My Setup | Checks each game's folder, mod files, GE-Proton and Steam launch option. It changes nothing; **Fix** runs that game's Update. |
+| Player Name | Your name in CoD4x, IW4x, AlterWare, T7X, and Plutonium offline. Not used by CleanOps. |
+| FPS and FOV | **Apply 90 FPS / 90 FOV** sets both in the configs of MW1, MW2, MW3, WaW, BO1, and BO2 (all modes); only those lines change. The MW2 and MW3 campaigns (64-bit Steam builds) ignore FOV in the config, so DeckOps holds cg_fov at 90 in the running game with ovwatch.py. They also have no in-game FPS cap, so their launch options cap it at 90 with DXVK (**DXVK Frame Cap** turns that on or off; it closes Steam). MW2 also keeps an F10 key for FOV 90: map a back paddle to F10 in Steam Input. |
+| Shader Cache (LCD only) | Clears the shader cache of every game you have set up. |
+| Updates & Logs | **Check for Updates** looks for a new DeckOps version. **Copy Log** and **View Log** show what DeckOps has done, for bug reports. |
+| Full Uninstall | Removes DeckOps from your games and Steam while keeping save backups and unrelated Plutonium data. If Stable is also installed, shared game files and Steam settings stay in place. |
+| Reset DeckOps Config | Clears your setup and runs setup again. |
+| Links | Support on Discord, and the Stable and Nightly project pages. |
 
 ---
 
