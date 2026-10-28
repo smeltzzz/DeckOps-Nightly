@@ -1483,8 +1483,6 @@ class ConfigureScreen(QWidget):
         self._cap_btn.setFixedWidth(300); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
         self._refresh_cap_btn()
         left.addWidget(self._cap_btn)
-        _desc(left, "MW2 also has an F10 key that sets FOV 90 if you want a button: map a back "
-                    "paddle to F10 in Steam Input.")
 
         # ── Left: Shader Cache (LCD only) ─────────────────────────────────
         self._shader_row = QWidget()

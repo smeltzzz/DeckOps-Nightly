@@ -1414,50 +1414,49 @@ class SpLaunchOptionRepairTests(unittest.TestCase):
         clear.assert_not_called()
 
 
-class PrelaunchFovLinesTests(unittest.TestCase):
-    """MW2 SP: the lines the game strips on exit are put back before launch."""
+class PrelaunchCampaignCleanupTests(unittest.TestCase):
+    """MW2 / MW3 campaign: old DeckOps lines are taken out of config.cfg before launch."""
 
-    def _run(self, key, cfg_text):
+    def _run(self, key, folder, cfg_text):
         import prelaunch
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "players").mkdir()
-            cfg = Path(d, "players", "config.cfg")
+            (Path(d) / folder).mkdir()
+            cfg = Path(d, folder, "config.cfg")
             cfg.write_bytes(cfg_text.encode())
-            exe = os.path.join(d, f"{key}.exe")
             with patch("sp_mod.update_iw_pad") as upd:
-                prelaunch._iwpad(key, ["proton", "run", exe])
+                prelaunch._iwpad(key, ["proton", "run", os.path.join(d, f"{key}.exe")])
             return cfg.read_bytes().decode(), upd
 
-    def test_mw2_lines_are_restored_before_the_iw_pad_update(self):
-        text, upd = self._run("iw4sp", 'seta thereisacow "1337"\r\n')
-        self.assertIn('seta cg_fov "90"', text)
-        self.assertNotIn("com_maxfps", text)          # these SP builds have no such dvar
-        self.assertIn('bind F10 "cg_fov 90"', text)
+    def test_mw2_loses_the_cheat_unlock_and_the_f10_fov_key(self):
+        old = ('seta sensitivity "5"\r\nseta thereisacow "1337"\r\n'
+               'bind F10 "cg_fov 90"\r\nbind w "+forward"\r\n')
+        text, upd = self._run("iw4sp", "players", old)
+        self.assertEqual(text, 'seta sensitivity "5"\r\nbind w "+forward"\r\n')
         upd.assert_called_once()
 
-    def test_mw3_lines_are_restored_in_players2(self):
-        import prelaunch
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "players2").mkdir()
-            cfg = Path(d, "players2", "config.cfg")
-            cfg.write_bytes(b'seta sensitivity "5"\r\n')
-            with patch("sp_mod.update_iw_pad"):
-                prelaunch._iwpad("iw5sp", ["proton", "run", os.path.join(d, "iw5sp.exe")])
-            text = cfg.read_bytes().decode()
-        self.assertIn('seta sensitivity "5"', text)
-        self.assertIn('seta cg_fov "90"', text)
-        self.assertIn('seta cg_fovScale "1"', text)   # the old experiment's scale goes back to 1
-        self.assertNotIn("thereisacow", text)
-        self.assertNotIn("bind F10", text)
+    def test_a_different_f10_bind_of_your_own_is_kept(self):
+        text, _ = self._run("iw4sp", "players", 'bind F10 "screenshot"\r\n')
+        self.assertEqual(text, 'bind F10 "screenshot"\r\n')
 
-    def test_other_keys_get_no_config_lines(self):
+    def test_mw3_also_resets_the_old_fov_scale(self):
+        old = ('seta thereisacow "1337"\r\nseta cg_fovScale "1.385"\r\n'
+               'bind F10 "cg_fov 90; cg_fovscale 1.385"\r\nseta sensitivity "5"\r\n')
+        text, _ = self._run("iw5sp", "players2", old)
+        self.assertEqual(text, 'seta cg_fovScale "1"\r\nseta sensitivity "5"\r\n')
+
+    def test_nothing_is_written_when_there_is_nothing_to_remove(self):
+        text, _ = self._run("iw4sp", "players", 'seta sensitivity "5"\r\n')
+        self.assertEqual(text, 'seta sensitivity "5"\r\n')
+        self.assertNotIn("cg_fov", text)
+
+    def test_other_keys_are_not_touched(self):
         import prelaunch
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "players").mkdir()
             cfg = Path(d, "players", "config.cfg")
-            cfg.write_bytes(b'seta sensitivity "5"\r\n')
-            prelaunch._fov_lines("iw3sp", d)
-            self.assertEqual(cfg.read_bytes(), b'seta sensitivity "5"\r\n')
+            cfg.write_bytes(b'seta thereisacow "1337"\r\n')
+            prelaunch._clean_campaign_config("iw3sp", d)
+            self.assertEqual(cfg.read_bytes(), b'seta thereisacow "1337"\r\n')
 
 
 class FakeMem:
@@ -1681,49 +1680,41 @@ class FpsFovTests(unittest.TestCase):
             self.assertEqual(p.read_bytes().decode(),
                              'bind F10 "cg_fov 90"\r\nbind w "+forward"\r\nbind F11 "x"\r\n')
 
-    def test_mw3_campaign_config_has_no_cheat_unlock_or_fov_bind(self):
+    def test_apply_leaves_the_mw2_and_mw3_campaign_configs_alone(self):
         import game_config as gc
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "players2").mkdir()
-            cfg = self._file(Path(d) / "players2", "config.cfg", 'seta sensitivity "5"\r\n')
-            with patch("config.get_setup_games", return_value={"iw5sp": {"client": "iw-pad"}}), \
-                 patch("config.get_player_name", return_value="Me"), \
-                 patch("config.is_lcd", return_value=False):
-                gc.set_fps_fov(d, {"iw5sp": {"install_dir": d}})
-            text = cfg.read_text()
-            self.assertIn('seta com_maxfps "90"', text)
-            self.assertNotIn("thereisacow", text)
-            self.assertNotIn("bind F10", text)
-
-    def test_mw2_campaign_config_gets_thereisacow_and_the_fov_bind(self):
-        import game_config as gc
-        with tempfile.TemporaryDirectory() as d:
-            mw2 = Path(d, "mw2")
+            mw2, mw3 = Path(d, "mw2"), Path(d, "mw3")
             (mw2 / "players").mkdir(parents=True)
-            stock = self._file(mw2 / "players", "config.cfg", 'seta com_maxfps "85"\r\n')
-            iw4x = self._file(mw2 / "players", "iw4x_sp_config.cfg", 'seta com_maxfps "85"\r\n')
-            games = {"iw4sp": {"install_dir": str(mw2)}}
-            with patch("config.get_setup_games", return_value={"iw4sp": {"client": "iw-pad"}}), \
+            (mw3 / "players2").mkdir(parents=True)
+            c2 = self._file(mw2 / "players", "config.cfg", 'seta com_maxfps "85"\r\n')
+            c3 = self._file(mw3 / "players2", "config.cfg", 'seta com_maxfps "85"\r\n')
+            games = {"iw4sp": {"install_dir": str(mw2)}, "iw5sp": {"install_dir": str(mw3)}}
+            with patch("config.get_setup_games", return_value={"iw4sp": {"client": "iw-pad"},
+                                                               "iw5sp": {"client": "iw-pad"}}), \
                  patch("config.get_player_name", return_value="Me"), \
                  patch("config.is_lcd", return_value=False):
-                gc.set_fps_fov(d, games)
-            text = stock.read_text()
-            self.assertIn('seta thereisacow "1337"', text)
-            self.assertIn('bind F10 "cg_fov 90"', text)
-            self.assertIn('seta com_maxfps "90"', text)
-            # the AlterWare SP config only gets FPS and FOV
-            self.assertNotIn("thereisacow", iw4x.read_text())
-            self.assertIn('seta cg_fov "90"', iw4x.read_text())
+                n = gc.set_fps_fov(d, games)
+            self.assertEqual(n, 0)
+            self.assertEqual(c2.read_text(), 'seta com_maxfps "85"\n')
+            self.assertEqual(c3.read_text(), 'seta com_maxfps "85"\n')
 
-    def test_set_fps_fov_patches_sp_configs_and_the_bo2_autoexec(self):
+    def test_drop_removes_matching_lines_only(self):
         import game_config as gc
         with tempfile.TemporaryDirectory() as d:
-            mw3, bo2 = Path(d, "mw3"), Path(d, "bo2")
-            (mw3 / "players2").mkdir(parents=True)
-            cfg = self._file(mw3 / "players2", "config.cfg", 'seta com_maxfps "85"\r\n')
+            p = self._file(d, "c.cfg", 'seta a "1"\r\nseta thereisacow "1337"\r\nseta b "2"')
+            self.assertTrue(gc._patch_dvars(str(p), {}, drop=(gc._STALE_THEREISACOW,)))
+            self.assertEqual(p.read_bytes().decode(), 'seta a "1"\r\nseta b "2"')
+            self.assertFalse(gc._patch_dvars(str(p), {}, drop=(gc._STALE_THEREISACOW,)))
+
+    def test_set_fps_fov_patches_mp_configs_and_the_bo2_autoexec(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as d:
+            mw2, bo2 = Path(d, "mw2"), Path(d, "bo2")
+            (mw2 / "players").mkdir(parents=True)
+            cfg = self._file(mw2 / "players", "iw4x_config.cfg", 'seta com_maxfps "85"\r\n')
             bo2.mkdir()
-            games = {"iw5sp": {"install_dir": str(mw3)}, "t6sp": {"install_dir": str(bo2)}}
-            setup = {"iw5sp": {"client": "iw-pad"}, "t6sp": {"client": "t6sp_mod"}, "t7": {"client": "cleanops"}}
+            games = {"iw4mp": {"install_dir": str(mw2)}, "t6sp": {"install_dir": str(bo2)}}
+            setup = {"iw4mp": {"client": "iw4x"}, "t6sp": {"client": "t6sp_mod"}, "t7": {"client": "cleanops"}}
             with patch("config.get_setup_games", return_value=setup), \
                  patch("config.get_player_name", return_value="Me"), \
                  patch("config.is_lcd", return_value=False):

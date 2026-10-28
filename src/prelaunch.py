@@ -49,19 +49,19 @@ def _plutonium(key, cmd):
         pu.link_prefix(master, prefix, info, log)
 
 
-def _fov_lines(key, install_dir):
-    """MW2 / MW3 campaign: the game drops cg_fov and the F10 bind from config.cfg
-    when it writes the file on exit, so put them back before each launch (before
-    the IW-Pad update, so a network failure can't skip it). com_maxfps is not
-    written: these SP builds don't have it (FPS is capped by DXVK instead)."""
-    from game_config import _patch_dvars, _dest_from_install, _EXTRA_PATCHES, DEFAULT_FOV
-    extra = _EXTRA_PATCHES.get((key, "config.cfg"))
-    if not extra:
+def _clean_campaign_config(key, install_dir):
+    """MW2 / MW3 campaign: take the lines out of config.cfg that older DeckOps
+    versions added and that no longer do anything (thereisacow, the F10 FOV key,
+    MW3's cg_fovScale). FOV is held by fovwatch.py and FPS by the DXVK launch
+    option, so nothing is written to the config any more. Runs before the IW-Pad
+    update, so a network failure can't skip it."""
+    from game_config import _patch_dvars, _dest_from_install, _CAMPAIGN_CLEANUP
+    spec = _CAMPAIGN_CLEANUP.get(key)
+    if not spec:
         return
-    values = {"cg_fov": str(DEFAULT_FOV), **extra["extra_dvars"]}
     path = os.path.join(_dest_from_install(key, install_dir), "config.cfg")
-    if _patch_dvars(path, values, binds=extra["binds"]):
-        _log.info("prelaunch %s: FOV / FPS lines put back in config.cfg", key)
+    if _patch_dvars(path, spec["dvars"], drop=spec["drop"]):
+        _log.info("prelaunch %s: old FOV lines removed from config.cfg", key)
 
 
 def _iwpad(key, cmd):
@@ -69,7 +69,7 @@ def _iwpad(key, cmd):
     path = next((a for a in cmd if a.lower().endswith(exe)), None)
     if path:
         try:
-            _fov_lines(key, os.path.dirname(path))
+            _clean_campaign_config(key, os.path.dirname(path))
         except Exception as ex:
             _log.warning("prelaunch %s: config lines skipped: %s", key, ex)
         from sp_mod import update_iw_pad

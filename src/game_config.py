@@ -970,22 +970,22 @@ def _rename_in_lan_scripts(player_name, installed_games, prog):
 DEFAULT_FPS = 90
 DEFAULT_FOV = 90
 
-# MW1, MW2, MW3, WaW, BO1 and BO2: every mode
-FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4sp", "iw4mp", "iw5sp", "iw5mp",
+# MW1, MW2 and MW3 multiplayer, MW1 campaign, WaW, BO1 and BO2: every mode.
+# The MW2 and MW3 campaigns are left out: those 64-bit Steam builds ignore the
+# config, so fovwatch.py holds their FOV and the DXVK launch option caps their FPS.
+FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4mp", "iw5mp",
                 "t4sp", "t4mp", "t5sp", "t5mp", "t6sp", "t6mp", "t6zm")
 
-# MW2 (2009) and MW3 (2011) campaigns, stock build: cg_fov is cheat-protected and
-# the game puts it back to 65 when a level loads. thereisacow 1337 unlocks it (for
-# MW3 that is still a guess); F10 re-applies it (map a button to F10 in Steam
-# Input). Only the stock config.cfg gets these.
-_FOV_UNLOCK = {"extra_dvars": {"thereisacow": "1337"}, "binds": {"F10": "cg_fov 90"}}
-# MW3: neither cg_fov, thereisacow nor cg_fovScale did anything in the 64-bit build,
-# so its FOV is held by fovwatch.py (started from prelaunch.sh). The scale goes back
-# to 1 so the two never stack; no cheat unlock or bind.
-_FOV_UNLOCK_MW3 = {"extra_dvars": {"cg_fovScale": "1"}, "binds": {}}
-_EXTRA_PATCHES = {
-    ("iw4sp", "config.cfg"): _FOV_UNLOCK,
-    ("iw5sp", "config.cfg"): _FOV_UNLOCK_MW3,
+# Lines older DeckOps versions put in the MW2 / MW3 campaign config.cfg that no
+# longer do anything: the thereisacow cheat unlock (it can also mark the profile as
+# having used cheats) and the F10 FOV key, plus MW3's cg_fovScale experiment, which
+# goes back to 1. prelaunch.py removes them before each launch. A different F10 bind
+# of your own is left alone.
+_STALE_THEREISACOW = r'^[ \t]*seta[ \t]+thereisacow[ \t]+"[^"\r\n]*"[^\r\n]*(\r?\n|$)'
+_STALE_F10_FOV = r'^[ \t]*bind[ \t]+F10[ \t]+"cg_fov[^"\r\n]*"[^\r\n]*(\r?\n|$)'
+_CAMPAIGN_CLEANUP = {
+    "iw4sp": {"drop": (_STALE_THEREISACOW, _STALE_F10_FOV), "dvars": {}},
+    "iw5sp": {"drop": (_STALE_THEREISACOW, _STALE_F10_FOV), "dvars": {"cg_fovScale": "1"}},
 }
 
 # BO2 SP (T6SP-Mod) keeps its settings in binary profiles. The mod runs
@@ -994,12 +994,13 @@ _EXTRA_PATCHES = {
 _T6SP_AUTOEXEC = ("config_sp.cfg", "persistent_sp.cfg")
 
 
-def _patch_dvars(path, values, create=False, binds=None):
+def _patch_dvars(path, values, create=False, binds=None, drop=()):
     """
     Set `seta <name> "<value>"` for each name in values, in place. An existing
     line gets the new value; a missing one is added (cg_fov after cg_fovScale,
     others at the end). binds ({key: command}) does the same for
-    `bind <key> "<command>"` lines. Line endings and every other line stay as
+    `bind <key> "<command>"` lines. drop is a list of regular expressions; every
+    line one matches is removed first. Line endings and every other line stay as
     they are. create=True makes the file if it isn't there. Returns True if
     it changed.
     """
@@ -1014,6 +1015,8 @@ def _patch_dvars(path, values, create=False, binds=None):
         text = ""
     nl = "\r\n" if "\r\n" in text else "\n"
     new = text
+    for pattern in drop:
+        new = _re.sub(pattern, "", new, flags=_re.IGNORECASE | _re.MULTILINE)
     for name, value in values.items():
         pat = _re.compile(r'^([ \t]*seta[ \t]+' + _re.escape(name) + r'[ \t]+")[^"\r\n]*(")',
                           _re.IGNORECASE | _re.MULTILINE)
@@ -1074,10 +1077,10 @@ def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
     player_name = cfg.get_player_name()
     changed = 0
 
-    def patch(path, label, create=False, extra_dvars=None, binds=None):
+    def patch(path, label, create=False):
         nonlocal changed
         try:
-            if _patch_dvars(path, {**values, **(extra_dvars or {})}, create=create, binds=binds):
+            if _patch_dvars(path, values, create=create):
                 changed += 1
                 prog(f"  + {label}: {os.path.basename(path)}")
         except OSError as ex:
@@ -1111,8 +1114,7 @@ def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
             if not dest_dir:
                 continue
 
-            extra = _EXTRA_PATCHES.get((key, name.lower()), {})
-            patch(os.path.join(dest_dir, name), key, **extra)
+            patch(os.path.join(dest_dir, name), key)
 
             if fixed_dest:
                 if cfg.is_lcd():
