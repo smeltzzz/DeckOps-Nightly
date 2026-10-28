@@ -49,13 +49,11 @@ class WelcomeScreen(QWidget):
         self.results.setTextFormat(Qt.TextFormat.RichText)
         self.notice = _lbl(
             "Before you continue:\n"
-            "•  Downgrading a game (MW3, Ghosts, AW) can take a very long time and needs "
-            "at least that game's full size free on the drive during the install.\n"
-            "•  On a handheld, plug it in. DeckOps keeps the device awake while it "
-            "installs, so you don't need to block sleep yourself.\n"
-            "•  Use a good, stable internet connection.\n"
-            "•  Keep your device somewhere it can breathe. Don't leave it on a blanket or "
-            "anywhere it could overheat.",
+            "•  Downgrading a game (MW3, Ghosts, AW) can take a long time and needs at least "
+            "that game's full size free on the drive.\n"
+            "•  On a handheld, plug it in. DeckOps keeps the device awake during the install.\n"
+            "•  Use a stable internet connection.\n"
+            "•  Keep the device somewhere it can cool down, not on a blanket.",
             12, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
         self.notice.setStyleSheet(
             f"color:{C_TREY};background:#2A1A08;border:1px solid {C_TREY};"
@@ -204,8 +202,7 @@ class SetupScreen(QWidget):
         content = QWidget()
         clay = QVBoxLayout(content); clay.setContentsMargins(60,20,60,40); clay.setSpacing(14)
         clay.addWidget(_lbl(
-            "Choose which games to set up. "
-            "DeckOps will create Proton prefixes automatically.", 13, C_DIM))
+            "Choose which games to set up. DeckOps creates the Proton prefixes for you.", 13, C_DIM))
         selrow = QHBoxLayout(); selrow.setSpacing(8); selrow.addStretch()
         for _txt, _on in (("Select All", True), ("Select None", False)):
             _b = _btn(_txt, C_DARK_BTN, size=10, h=30); _b.setFixedWidth(110)
@@ -406,8 +403,8 @@ class SetupScreen(QWidget):
 
         # Offline Mode: one setting for every Plutonium game, so never greyed out
         from plutonium import GAME_META
-        lan_note = ("Offline launcher, Plutonium Offline in each game's Steam launch menu, "
-                    "bot matches in WaW / BO1 / BO2 / MW3 MP.")
+        lan_note = ("Offline launcher, an Offline entry in each game's Steam launch menu, and "
+                    "bot matches in WaW, BO1, BO2 and MW3 multiplayer.")
         if shown & set(GAME_META):
             self._lan_cb = tile("Plutonium Offline", lan_note, cfg.get_offline_mode())
         elif active & set(GAME_META):
@@ -449,8 +446,8 @@ class SetupScreen(QWidget):
 
         if "cod4mp" in keys and "cod4mp" in all_installed:
             notes = {
-                "cod4r": "Native controller support, server browser, bots and quality-of-life fixes. Built for controllers.",
-                "cod4x": "Established community client. No native controller support, so you'll set up controls manually.",
+                "cod4r": "Built for controllers: native controller support, server browser, bots and quality fixes.",
+                "cod4x": "Long-running community client with no native controller support, so you set up the controls yourself.",
             }
             w, v = _opt_box()
             h = QHBoxLayout(); h.setSpacing(6)
@@ -484,10 +481,10 @@ class SetupScreen(QWidget):
         open_steam_install(42750)
         QMessageBox.information(
             self, "MW3 Multiplayer",
-            "DeckOps is adding the free MW3 Dedicated Server to your "
-            "Steam account. This includes the full multiplayer files.\n\n"
-            "Let Steam finish the download, then close and reopen "
-            "DeckOps. MW3 will appear as a detected game."
+            "DeckOps is adding the free MW3 Dedicated Server to your Steam account. "
+            "It includes the full multiplayer files.\n\n"
+            "Let Steam finish the download, then close and reopen DeckOps. "
+            "MW3 will show up as a detected game."
         )
 
     @staticmethod
@@ -697,9 +694,9 @@ class _BaseInstallScreen(QWidget):
         clay.addLayout(lr)
 
         self.plut_warn = _lbl(
-            "⚠  LCD: Plutonium takes time to download and launch.\n"
-            "     Please be patient — do NOT click the button below until\n"
-            "     Plutonium has fully loaded, you have logged in, and closed the window.",
+            "⚠  LCD: Plutonium takes a while to download and launch.\n"
+            "Wait until it has fully loaded, you have logged in and you have closed its "
+            "window, then press the button below.",
             12, C_TREY, align=Qt.AlignmentFlag.AlignCenter,
         )
         self.plut_warn.setStyleSheet(
@@ -722,8 +719,8 @@ class _BaseInstallScreen(QWidget):
         clay.addLayout(dw)
 
         self.zd_info = _lbl(
-            "Zombies Declassified adds 10 classic Zombies maps to BO2 via Plutonium.\n"
-            "This is an optional download (~9 GB). You can install it later from Manage.",
+            "Zombies Declassified adds 10 classic Zombies maps to BO2 through Plutonium.\n"
+            "It's an optional ~9 GB download. You can install it later from Manage.",
             12, "#CCC", align=Qt.AlignmentFlag.AlignCenter,
         )
         self.zd_info.setStyleSheet(
@@ -905,12 +902,11 @@ class _BaseInstallScreen(QWidget):
         msg = QMessageBox(self)
         msg.setWindowTitle("Depot Downgrade")
         msg.setText(
-            f"The following games need older depot files\n"
-            f"for community client compatibility:\n\n"
+            f"These games need older depot files so the community clients work:\n\n"
             f"  {_games}\n\n"
-            "This downloads several GB per game (free space was checked).\n"
-            "One QR scan covers all games listed above.\n\n"
-            "How would you like to authenticate the download?"
+            "This downloads several GB per game (free space was checked). "
+            "One QR scan covers all the games above.\n\n"
+            "How do you want to sign in for the download?"
         )
         qr_btn = msg.addButton("QR Code Scan (recommended)", QMessageBox.ButtonRole.AcceptRole)
         manual_btn = msg.addButton("Steam Console (manual)", QMessageBox.ButtonRole.AcceptRole)
@@ -929,13 +925,11 @@ class _BaseInstallScreen(QWidget):
         msg = QMessageBox(self)
         msg.setWindowTitle("MW3 Install")
         msg.setText(
-            "Would you like to trim your MW3 install?\n\n"
-            "This removes duplicate 64-bit files that are\n"
-            "already replaced by the 32-bit downgrade,\n"
-            "saving approximately 5-6 GB of disk space.\n\n"
-            "Only choose this if you do not plan on\n"
-            "playing Single Player through Steam.\n"
-            "(Steam's Verify Integrity restores them.)"
+            "Trim your MW3 install?\n\n"
+            "This removes duplicate 64-bit files that the 32-bit downgrade already "
+            "replaces, saving about 5-6 GB.\n\n"
+            "Only choose this if you won't play the MW3 campaign through Steam. "
+            "(Steam's Verify Integrity restores the files.)"
         )
         trim_btn = msg.addButton("Trim Install", QMessageBox.ButtonRole.AcceptRole)
         msg.addButton("Keep Both", QMessageBox.ButtonRole.RejectRole)
@@ -947,10 +941,9 @@ class _BaseInstallScreen(QWidget):
         msg = QMessageBox(self)
         msg.setWindowTitle("MW3 Single Player")
         msg.setText(
-            "MW3 Single Player needs a quick file check.\n\n"
-            "An older DeckOps version replaced the SP exe with\n"
-            "a 32-bit copy that won't launch through Steam.\n"
-            "Steam's Verify Integrity restores the original.\n\n"
+            "The MW3 campaign needs a quick file check.\n\n"
+            "An older DeckOps version replaced its exe with a 32-bit copy that won't "
+            "launch through Steam. Steam's Verify Integrity restores the original.\n\n"
             "Multiplayer is not affected."
         )
         verify_btn = msg.addButton("Verify MW3 Now", QMessageBox.ButtonRole.AcceptRole)

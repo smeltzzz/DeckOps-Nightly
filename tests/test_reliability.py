@@ -1488,6 +1488,43 @@ class FakeMem:
         return True
 
 
+class GuideTextTests(unittest.TestCase):
+    """Setup Complete screen: what to press to start each set-up game."""
+
+    def _text(self, setup, lcd=False):
+        import guide_text
+        return guide_text.how_to_start_text(setup, lcd)
+
+    def test_steam_games_describe_the_menu_buttons(self):
+        text = self._text({"cod4sp": {"client": "iw3sp"}, "cod4mp": {"client": "cod4r"},
+                           "iw4mp": {"client": "iw4x"}, "iw5mp": {"client": "plutonium"},
+                           "t4sp": {"client": "plutonium"}, "t5mp": {"client": "plutonium"},
+                           "t6zm": {"client": "plutonium"}})
+        self.assertIn("MW1: Play starts the campaign", text)
+        self.assertIn("starts CoD4R", text)
+        self.assertIn("MW2: Play starts the campaign. The Multiplayer button in its main menu starts IW4x.", text)
+        self.assertIn("starts Plutonium", text)
+        self.assertIn("WaW, BO1 and BO2: press Play and pick", text)
+        self.assertNotIn("shortcut", text.lower())          # the old separate-shortcut advice is gone
+
+    def test_cod4x_still_has_its_own_entry(self):
+        text = self._text({"cod4mp": {"client": "cod4x"}})
+        self.assertIn("separate DeckOps entry", text)
+        self.assertNotIn("CoD4R", text)
+
+    def test_only_set_up_games_are_mentioned(self):
+        text = self._text({"t6mp": {"client": "plutonium"}})
+        self.assertEqual(text, "BO2: press Play and pick Campaign, Zombies or Multiplayer from the menu.")
+        self.assertEqual(self._text({}), "")
+
+    def test_lcd_waw_and_non_steam_games_get_their_own_notes(self):
+        text = self._text({"t4mp": {"client": "plutonium"}}, lcd=True)
+        self.assertIn("WaW multiplayer is a separate DeckOps entry on the LCD Steam Deck.", text)
+        own = self._text({"iw4mp": {"client": "iw4x", "source": "own"}})
+        self.assertIn("non-Steam have a separate DeckOps entry for each mode", own)
+        self.assertNotIn("MW2: Play starts", own)
+
+
 class FovWatchTests(unittest.TestCase):
     """fovwatch: find dvar_t records in the game's memory and hold their values."""
 

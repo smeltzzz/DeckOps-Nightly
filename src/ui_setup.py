@@ -43,6 +43,25 @@ DEVICES = {
 }
 
 
+# Texts used on more than one setup screen
+_INTRO = ("DeckOps sets up community clients, controller layouts and display settings for your "
+          "Call of Duty games, so they run well on your device.")
+_NOTES = [
+    "⚠   DeckOps creates the Proton prefixes for your games. You don't need to launch each "
+    "game through Steam first.",
+    "⚠   To play Plutonium games online (WaW, BO1, BO2, MW3), create a free account at "
+    "plutonium.pw before you continue.",
+    "⚠   Use a stable internet connection. If the install fails, don't re-run it again and "
+    "again; ask for help on the Discord instead.",
+]
+_CONTROLLER_TYPES = (
+    "PlayStation:  PS5 or PS4 (DualSense / DualShock). Includes gyro aiming.\n"
+    "Xbox:  Xbox 360, Xbox One or Xbox Elite. Standard layout, no gyro.\n"
+    "Steam Controller:  Steam Controller 2 (Triton). Two trackpads, gyro and 4 back buttons.\n"
+    "Other:  Generic or 8BitDo controller. Standard layout, no gyro."
+)
+
+
 class SetupFlowScreen(QWidget):
     """
     Unified first-run setup. One QWidget with show/hide sections
@@ -72,19 +91,9 @@ class SetupFlowScreen(QWidget):
         cl.setContentsMargins(80, 60, 80, 60); cl.setSpacing(16)
         _title_block(cl)
         cl.addSpacing(8)
-        cl.addWidget(_lbl(
-            "DeckOps sets up community multiplayer clients for your Call of Duty games, "
-            "so you can play online with the best possible performance.",
-            14, "#CCCCCC"))
+        cl.addWidget(_lbl(_INTRO, 14, "#CCCCCC"))
         cl.addSpacing(6)
-        for warn in [
-            "⚠   DeckOps will automatically create Proton prefixes for your games. "
-            "You do NOT need to launch each game through Steam first.",
-            "⚠   If you plan to play Plutonium titles online (WaW, BO1, BO2, MW3), "
-            "create a free Plutonium account at plutonium.pw before continuing.",
-            "⚠   Make sure you have a stable internet connection before installing. "
-            "If the install fails, don't re-run it repeatedly, join the Discord for help instead.",
-        ]:
+        for warn in _NOTES:
             cl.addWidget(_lbl(warn, 13, C_TREY, align=Qt.AlignmentFlag.AlignLeft))
         cl.addSpacing(16)
         os_label = {"steamos": "SteamOS", "bazzite": "Bazzite", "cachyos": "CachyOS", "armada": "Armada"}.get(
@@ -109,19 +118,9 @@ class SetupFlowScreen(QWidget):
         lay.setContentsMargins(80, 60, 80, 60); lay.setSpacing(16)
         _title_block(lay)
         lay.addSpacing(8)
-        lay.addWidget(_lbl(
-            "DeckOps sets up community multiplayer clients for your Call of Duty games, "
-            "so you can play online with the best possible performance.",
-            14, "#CCCCCC"))
+        lay.addWidget(_lbl(_INTRO, 14, "#CCCCCC"))
         lay.addSpacing(6)
-        for warn in [
-            "⚠   DeckOps will automatically create Proton prefixes for your games. "
-            "You do NOT need to launch each game through Steam first.",
-            "⚠   If you plan to play Plutonium titles online (WaW, BO1, BO2, MW3), "
-            "create a free Plutonium account at plutonium.pw before continuing.",
-            "⚠   Make sure you have a stable internet connection before installing. "
-            "If the install fails, don't re-run it repeatedly, join the Discord for help instead.",
-        ]:
+        for warn in _NOTES:
             lay.addWidget(_lbl(warn, 13, C_TREY, align=Qt.AlignmentFlag.AlignLeft))
         lay.addSpacing(16)
         lay.addWidget(_lbl("What operating system are you running?", 15, "#CCC"))
@@ -174,8 +173,8 @@ class SetupFlowScreen(QWidget):
         dvl.addWidget(_lbl("Select your device", 15, "#CCC"))
         dvl.addSpacing(4)
         dvl.addWidget(_lbl(
-            "Pick the device closest to yours. This sets the display resolution, "
-            "refresh rate, and controller profile group.",
+            "Pick the device closest to yours. It sets the display resolution, "
+            "refresh rate and controller layout group.",
             13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         dvl.addSpacing(12)
 
@@ -279,9 +278,8 @@ class SetupFlowScreen(QWidget):
         nl.addWidget(_lbl("What's your player name?", 15, "#CCC"))
         nl.addSpacing(4)
         nl.addWidget(_lbl(
-            "This is your in-game name for most mod clients: CoD4x, IW4x, "
-            "and Plutonium (LCD offline mode). "
-            "Your Steam display name is filled in by default. Change it to whatever you want.",
+            "Your name in CoD4x, IW4x, AlterWare, T7X and Plutonium offline. It is not used by "
+            "CleanOps. Your Steam name is filled in; change it to anything you like.",
             13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         nl.addSpacing(12)
         self._name_input = QLineEdit()
@@ -319,12 +317,7 @@ class SetupFlowScreen(QWidget):
         self._ctrl_title_lbl = _lbl("What controller do you use?", 15, "#CCC")
         pcl.addWidget(self._ctrl_title_lbl)
         pcl.addSpacing(4)
-        self._ctrl_desc_lbl = _lbl(
-            "PlayStation:  PS5 or PS4 DualShock/DualSense. Includes gyro aiming.\n"
-            "Xbox:  Xbox 360, Xbox One, or Xbox Elite. Standard layout, no gyro.\n"
-            "Steam Controller:  Steam Controller 2 (Triton). Dual trackpads, gyro, 4 back buttons.\n"
-            "Other:  Generic or 8BitDo controller. Standard layout, no gyro.",
-            13, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        self._ctrl_desc_lbl = _lbl(_CONTROLLER_TYPES, 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         pcl.addWidget(self._ctrl_desc_lbl)
         pcl.addSpacing(12)
         pcrow = QHBoxLayout(); pcrow.setSpacing(20)
@@ -348,8 +341,8 @@ class SetupFlowScreen(QWidget):
         rl.addWidget(self._res_title_lbl)
         rl.addSpacing(4)
         rl.addWidget(_lbl(
-            "Pick the resolution that matches your monitor or TV, "
-            "or choose My Own to set it yourself in-game.",
+            "Pick the resolution of your monitor or TV, or choose My Own to set it "
+            "yourself in the game.",
             13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         rl.addSpacing(12)
 
@@ -391,8 +384,8 @@ class SetupFlowScreen(QWidget):
         pl.addWidget(_lbl("How do you play?", 15, "#CCC"))
         pl.addSpacing(4)
         pl.addWidget(_lbl(
-            "Handheld Only:  you play exclusively on the device screen.\n"
-            "Also Docked:  you also connect to a TV or monitor with an external controller.",
+            "Handheld Only:  you only play on the device's own screen.\n"
+            "Also Docked:  you also play on a TV or monitor with an external controller.",
             13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         pl.addSpacing(12)
         prow = QHBoxLayout(); prow.setSpacing(20)
@@ -418,12 +411,7 @@ class SetupFlowScreen(QWidget):
         dcl.addStretch()
         dcl.addWidget(_lbl("What external controller do you use?", 15, "#CCC"))
         dcl.addSpacing(4)
-        dcl.addWidget(_lbl(
-            "PlayStation:  PS5 or PS4 DualShock/DualSense. Includes gyro aiming.\n"
-            "Xbox:  Xbox 360, Xbox One, or Xbox Elite. Standard layout, no gyro.\n"
-            "Steam Controller:  Steam Controller 2 (Triton). Dual trackpads, gyro, 4 back buttons.\n"
-            "Other:  Generic or 8BitDo controller. Standard layout, no gyro.",
-            13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        dcl.addWidget(_lbl(_CONTROLLER_TYPES, 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         dcl.addSpacing(12)
         dcrow = QHBoxLayout(); dcrow.setSpacing(20)
         for ctrl_key, label in [("playstation", "PlayStation"), ("xbox", "Xbox"), ("steamcontroller", "Steam Controller"), ("other", "Other")]:
@@ -524,9 +512,9 @@ class SetupFlowScreen(QWidget):
         self._gyro_hold_btn.setVisible(True)
         self._gyro_toggle_btn.setVisible(True)
         self._gyro_mode_desc_lbl.setText(
-            "ADS:  gyro activates when you aim down sights (left trigger).\n"
-            "Hold:  gyro active while holding L5.\n"
-            "Toggle:  press L5 to toggle gyro on and off."
+            "ADS:  gyro turns on when you aim down sights (left trigger).\n"
+            "Hold:  gyro is on while you hold L5.\n"
+            "Toggle:  press L5 to turn gyro on and off."
         )
         self._show("_gyro_mode_section")
 

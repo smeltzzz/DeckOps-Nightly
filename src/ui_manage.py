@@ -35,6 +35,7 @@ from ui_constants import (
     go_to, get_screen,
 )
 
+from guide_text import how_to_start_text
 from identity import GITHUB_USER, GITHUB_REPO
 from log import get_logger
 
@@ -381,7 +382,7 @@ class ManagementScreen(QWidget):
         # Never overwrite a check or update the player started meanwhile
         if available and self._deckops_update_btn.isEnabled() and not self._deckops_update_status.text():
             self._deckops_update_status.setText(
-                "A DeckOps update is available. Click Update DeckOps to see it and install it.")
+                "A DeckOps update is available. Press Update DeckOps to review and install it.")
             self._deckops_update_status.setStyleSheet(f"color:{C_IW};")
 
     def _refresh(self):
@@ -519,11 +520,12 @@ class ManagementScreen(QWidget):
 
     def _offline(self, on):
         """Add or remove Offline Mode (offline launcher, Steam menu Offline entries, bot matches)."""
-        text = ("Add Offline Mode? Adds the offline launcher, Plutonium Offline in each game's Steam "
-                "launch menu, and bot matches in WaW / BO1 / BO2 / MW3 MP. Steam closes while it is set up."
+        text = ("Add Offline Mode? It adds the offline launcher, an Offline entry in each game's Steam "
+                "launch menu, and bot matches in WaW, BO1, BO2 and MW3 multiplayer. "
+                "Steam closes while it is set up."
                 if on else
-                "Remove Offline Mode? Removes the offline launcher, the Plutonium Offline launch menu "
-                "entries and the bot match files. Steam closes while it is removed.")
+                "Remove Offline Mode? It removes the offline launcher, the Offline launch menu entries "
+                "and the bot match files. Steam closes while it is removed.")
         if QMessageBox.question(self, "Offline Mode", text) != QMessageBox.StandardButton.Yes:
             return
         def task(sigs):
@@ -540,8 +542,8 @@ class ManagementScreen(QWidget):
 
     def _readd(self, gd):
         """Repair the offline launcher: its files, its prefix and its shortcut."""
-        if QMessageBox.question(self, "Offline Mode", "Repair the offline launcher? Checks its files, "
-                                "rebuilds its prefix and re-adds the shortcut. Steam closes while it runs.") \
+        if QMessageBox.question(self, "Offline Mode", "Repair the offline launcher? It checks the "
+                                "files, rebuilds the prefix and re-adds the shortcut. Steam closes while it runs.") \
                 != QMessageBox.StandardButton.Yes:
             return
         def task(sigs):
@@ -644,11 +646,9 @@ class ManagementScreen(QWidget):
         open_steam_install(42750)
         QMessageBox.information(
             self, gd["base"],
-            "DeckOps is adding the free MW3 Dedicated Server tools to "
-            "your Steam account.\n\n"
-            "Please let it finish installing in Steam. Once it's done, "
-            "close DeckOps and reopen it, then click Set Up on the "
-            "MW3 card."
+            "DeckOps is adding the free MW3 Dedicated Server to your Steam account.\n\n"
+            "Let Steam finish the download, then close and reopen DeckOps and press "
+            "Set Up on the MW3 card."
         )
 
     def _configure(self, gd, installed_keys):
@@ -778,14 +778,14 @@ class ManagementScreen(QWidget):
         if is_installed:
             info = cfg.get_zd_info()
             tag = info.get("release_tag", "unknown")
-            msg.setText(f"Zombies Declassified {tag} is installed.\nWhat would you like to do?")
+            msg.setText(f"Zombies Declassified {tag} is installed.\nWhat do you want to do?")
             upd_btn = msg.addButton("Check and Repair", QMessageBox.ButtonRole.AcceptRole)
             rm_btn  = msg.addButton("Uninstall", QMessageBox.ButtonRole.DestructiveRole)
         else:
             msg.setText(
-                "Zombies Declassified adds 10 classic Zombies maps to BO2.\n"
-                "Download size: ~9 GB\n\n"
-                "Install now?"
+                "Zombies Declassified adds 10 classic Zombies maps to BO2 through Plutonium. "
+                "It's an optional ~9 GB download.\n\n"
+                "Install it now?"
             )
             upd_btn = msg.addButton("Install", QMessageBox.ButtonRole.AcceptRole)
             rm_btn  = None
@@ -1150,8 +1150,8 @@ class SetupCompleteScreen(QWidget):
         t = QLabel("SETUP COMPLETE"); t.setFont(font(28, True)); t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t.setStyleSheet("color:#FFF;background:transparent;"); lay.addWidget(t)
         lay.addWidget(_lbl(
-            "Your games are configured with controller profiles, GE-Proton, "
-            "and display settings. Open Steam (or return to Game Mode) to start playing.",
+            "DeckOps set up controller layouts, GE-Proton and display settings for your games. "
+            "Open Steam, or return to Game Mode, to play.",
             12, C_DIM))
 
         # ── Scrollable content area ───────────────────────────────────────────
@@ -1166,19 +1166,13 @@ class SetupCompleteScreen(QWidget):
         sl.addWidget(_lbl("⚠  Steam Cloud Saves", 12, C_TREY, bold=True, align=Qt.AlignmentFlag.AlignLeft))
         sl.addWidget(_lbl(
             "If Steam asks about cloud saves, choose Keep Local. "
-            "If a game asks for Safe Mode, choose No.",
+            "If a game asks about Safe Mode or hardware changes, choose No.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
 
-        # ── MW1 / WaW shortcuts ───────────────────────────────────────────────
+        # ── How to start each game ────────────────────────────────────────────
         self._mw1waw_div = _hdiv()
-        self._mw1waw_hdr = _lbl("🎮  MW1 & WaW Multiplayer", 12, C_IW, bold=True, align=Qt.AlignmentFlag.AlignLeft)
-        self._mw1waw_body = _lbl(
-            "MW1 and WaW have separate DeckOps multiplayer shortcuts in your "
-            "Steam library. Use the main game entry for singleplayer and the "
-            "DeckOps shortcut for multiplayer.\n\n"
-            "MW1 Singleplayer: on first launch, select the \"Player\" profile. "
-            "This is the profile DeckOps created with your display settings.",
-            11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        self._mw1waw_hdr = _lbl("🎮  Starting Each Game", 12, C_IW, bold=True, align=Qt.AlignmentFlag.AlignLeft)
+        self._mw1waw_body = _lbl("", 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         sl.addWidget(self._mw1waw_div)
         sl.addWidget(self._mw1waw_hdr)
         sl.addWidget(self._mw1waw_body)
@@ -1187,19 +1181,17 @@ class SetupCompleteScreen(QWidget):
         sl.addWidget(_hdiv())
         sl.addWidget(_lbl("⏳  First Launch", 12, "#5B9BD5", bold=True, align=Qt.AlignmentFlag.AlignLeft))
         sl.addWidget(_lbl(
-            "All games take longer to launch the first time. This is normal "
-            "and they will be faster on subsequent launches.\n\n"
-            "Plutonium games must be launched once before they can be used "
-            "with the offline LAN launcher.",
+            "Every game takes longer to launch the first time while Proton sets things up. "
+            "It's faster after that.\n\n"
+            "Plutonium games must be launched once before Offline Mode can use them.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
 
         # ── MW2 MP own-game first launch ──────────────────────────────────────
         self._mw2own_div = _hdiv()
         self._mw2own_hdr = _lbl("🎮  MW2 Multiplayer (Non-Steam)", 12, C_IW, bold=True, align=Qt.AlignmentFlag.AlignLeft)
         self._mw2own_body = _lbl(
-            "MW2 Multiplayer (IW4x) needs to be launched twice on initial "
-            "installation. The first launch will fail, this is normal. "
-            "Launch it again and it will work.",
+            "MW2 Multiplayer (IW4x) has to be launched twice the first time. The first "
+            "launch fails; launch it again and it works.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         sl.addWidget(self._mw2own_div)
         sl.addWidget(self._mw2own_hdr)
@@ -1209,12 +1201,12 @@ class SetupCompleteScreen(QWidget):
         self._bo3_div = _hdiv()
         self._bo3_hdr = _lbl("🎮  Black Ops III: First Launch", 12, C_TREY, bold=True, align=Qt.AlignmentFlag.AlignLeft)
         self._bo3_body = _lbl(
-            "CleanOps finishes installing on its first run. Do the "
-            "first launch in Desktop Mode:\n\n"
-            "1. Launch Black Ops III (CleanOps). It will patch the game and "
-            "may slow the Deck temporarily.\n"
-            "2. If it does not launch, press the blue Stop button in Steam, "
-            "then relaunch to verify it works.",
+            "CleanOps finishes installing the first time you launch it. Do that first "
+            "launch in Desktop Mode:\n\n"
+            "1. Launch Black Ops III (CleanOps). It patches the game and may slow the "
+            "device for a while.\n"
+            "2. If it doesn't start, press the blue Stop button in Steam, then launch it "
+            "again to check it works.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         sl.addWidget(self._bo3_div)
         sl.addWidget(self._bo3_hdr)
@@ -1224,13 +1216,11 @@ class SetupCompleteScreen(QWidget):
         self._lcd_div = _hdiv()
         self._lcd_hdr = _lbl("⚠  LCD Steam Deck Notes", 12, C_TREY, bold=True, align=Qt.AlignmentFlag.AlignLeft)
         self._lcd_body = _lbl(
-            "Plutonium games on LCD may take a moment to launch while a "
-            "shader cache cleanup runs. If a game does not start right "
-            "away, be patient or try again.\n\n"
-            "If Steam tries to compile Vulkan shaders before launching, "
-            "skip it. These are not used by LCD Plutonium games.\n\n"
-            "Quit games from the in-game menu rather than the Steam "
-            "overlay for a faster exit.",
+            "Plutonium games on LCD can take a moment to start while a shader cache cleanup "
+            "runs. If a game doesn't start right away, wait or try again.\n\n"
+            "If Steam offers to compile Vulkan shaders before launching, skip it; LCD "
+            "Plutonium games don't use them.\n\n"
+            "Quit from the game's own menu, not the Steam overlay, for a faster exit.",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         sl.addWidget(self._lcd_div)
         sl.addWidget(self._lcd_hdr)
@@ -1240,8 +1230,8 @@ class SetupCompleteScreen(QWidget):
         self._restore_div = _hdiv()
         self._restore_hdr = _lbl("💾  Restore Player Saves", 12, C_IW, bold=True, align=Qt.AlignmentFlag.AlignLeft)
         self._restore_body = _lbl(
-            "Backups from a previous install were found. "
-            "Restore your configs, stats, and custom classes?",
+            "DeckOps found backups from a previous install. "
+            "Restore your configs, stats and custom classes?",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         self._restore_status = _lbl("", 11, C_IW, align=Qt.AlignmentFlag.AlignLeft)
         self._restore_status.setVisible(False)
@@ -1288,9 +1278,10 @@ class SetupCompleteScreen(QWidget):
         self._lcd_div.setVisible(is_lcd)
         self._lcd_hdr.setVisible(is_lcd)
         self._lcd_body.setVisible(is_lcd)
-        show_mw1waw = cfg.is_game_setup("cod4mp") or cfg.is_game_setup("t4mp")
+        guide = how_to_start_text(cfg.get_setup_games(), is_lcd)
+        self._mw1waw_body.setText(guide)
         for w in (self._mw1waw_div, self._mw1waw_hdr, self._mw1waw_body):
-            w.setVisible(show_mw1waw)
+            w.setVisible(bool(guide))
         show_bo3 = cfg.is_game_setup("t7")
         for w in (self._bo3_div, self._bo3_hdr, self._bo3_body):
             w.setVisible(show_bo3)
@@ -1969,10 +1960,10 @@ class ConfigureScreen(QWidget):
     def _confirm_uninstall(self):
         reply = QMessageBox.warning(
             self, "Full Uninstall",
-            "This will remove all DeckOps files, shortcuts, controller profiles, "
-            "and mod client installations. Your Steam games will NOT be deleted.\n\n"
+            "This removes DeckOps's files, shortcuts, controller layouts and mod client "
+            "installs. Your Steam games are not deleted, and your save backups are kept.\n\n"
             "DeckOps will close and the uninstaller will run in a terminal window.\n\n"
-            "Are you sure?",
+            "Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2200,10 +2191,10 @@ class ConfigureScreen(QWidget):
     def _confirm_reset(self):
         reply = QMessageBox.warning(
             self, "Reset Config",
-            "This will wipe the DeckOps configuration file (deckops.json). "
-            "DeckOps will restart and run the setup flow again.\n\n"
+            "This clears the DeckOps settings file (deckops.json). "
+            "DeckOps will restart and run setup again.\n\n"
             "Your game files and Steam games are not affected.\n\n"
-            "Are you sure?",
+            "Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

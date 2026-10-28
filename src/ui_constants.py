@@ -159,7 +159,7 @@ ALL_GAMES = [
     {"base":"Call of Duty: Black Ops III","keys":["t7"],"appid":311210,"dev":"trey","client":"cleanops",
      "launch_note":"DeckOps creates Proton prefixes automatically."},
     {"base":"DeckOps: Plutonium Offline","keys":[],"appid":None,"dev":"trey","client":"lan",
-     "launch_note":"Offline Mode: offline launcher, Plutonium Offline launch menu entries and bot matches."},
+     "launch_note":"Offline Mode: the offline launcher, an Offline entry in each Plutonium game's launch menu, and bot matches."},
 ]
 
 def _active_keys(gd):
