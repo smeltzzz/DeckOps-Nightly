@@ -142,6 +142,13 @@ class InstallUITests(unittest.TestCase):
         self.assertEqual(self.install.cod4_client, "cod4r")
         self.assertIs(self.stack.currentWidget(), self.install)
 
+    def test_preflight_exception_blocks_first_run_install(self):
+        selected = [("t4mp", ui_install.ALL_GAMES[0], self.game("WaW MP"))]
+        with patch("preflight.check", side_effect=OSError("disk unavailable")), \
+             patch.object(ui_install.QMessageBox, "warning") as warn:
+            self.assertFalse(self.setup._preflight_ok(selected, {}))
+        warn.assert_called_once()
+
     def test_choices_survive_rescan_and_rebuild(self):
         self.setup.steam_installed = {"t4mp": self.game("World at War - Multiplayer")}
         self.setup._build()

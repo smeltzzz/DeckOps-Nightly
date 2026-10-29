@@ -206,19 +206,32 @@ def check_game(key: str, entry: dict, game: dict | None, steam_root: str,
                     problems.extend(issues)
                     fixable = True
 
-            expected = None
+            markers = ()
             if key in _COD4_KEYS:
                 from iw3sp import cod4_launch_option
-                expected = bool(cod4_launch_option(setup_games))
-            elif client in _LAUNCH_OPTION_CLIENTS:
-                expected = True
-            if expected:
+                expected_option = cod4_launch_option(setup_games)
+                markers = tuple(marker for marker in ("prelaunch.sh", "iw3sp_mod.exe")
+                                if marker in expected_option)
+            elif client == "plutonium":
+                import config as cfg
+                markers = ("cache_cleanup.py",) if cfg.is_lcd() else ("prelaunch.sh",)
+            elif client == "t6sp_mod":
+                markers = ("T6SP-Mod.exe",)
+            elif client == "iw-pad":
+                markers = ("prelaunch.sh", "iw-pad.exe")
+            elif client == "iw4x":
+                markers = ("prelaunch.sh", "iw4x-launcher.exe")
+            if markers:
                 options = _launch_options(steam_root, appid)
-                set_ones = [o for o in options if o.strip()]
-                if options and not set_ones:
+                if not options or any(not o.strip() for o in options):
                     problems.append("Its Steam launch option is missing.")
                     fixable = True
-                for o in set_ones:
+                for o in options:
+                    if not o.strip():
+                        continue
+                    if any(marker not in o for marker in markers):
+                        problems.append("Its Steam launch option does not run the DeckOps client.")
+                        fixable = True
                     gone = [p for p in _deckops_paths(o) if not os.path.exists(p)]
                     if gone:
                         problems.append("Its Steam launch option uses a file that no longer exists: "

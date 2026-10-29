@@ -46,9 +46,9 @@ GITHUB_REPO="DeckOps-Nightly"
 # side. While the other one is installed, its install dir, config, VDF ledger,
 # desktop entries, its own Steam shortcut and its Offline launcher shortcut are
 # left alone, and so is ~/.local/share/deckops, which both branches use
-# (Plutonium prefix, Offline Mode, save backups). Uninstalling Nightly used to
-# wipe a working Stable install. When the other branch is NOT installed, its
-# leftovers are cleaned up as before.
+# (Plutonium prefix, Offline Mode, save backups). Even an incomplete sibling
+# is protected: its absence of src/main.py does not authorize deleting its
+# directory, config or shortcuts.
 if [ "$INSTALL_DIR_NAME" = "DeckOps-Nightly" ]; then
     OTHER_DIR_NAME="DeckOps";         OTHER_XDG_ID="deckops";         OTHER_TITLE="DeckOps"
 else
@@ -56,7 +56,10 @@ else
 fi
 OTHER_DIR="$HOME/$OTHER_DIR_NAME"
 KEEP_OTHER=""
-[ -f "$OTHER_DIR/src/main.py" ] && KEEP_OTHER=1
+# An incomplete install (or an unknown directory with this name) is not ours to
+# delete. Treat any existing sibling as protected; repointing will refuse to
+# remove this branch if the sibling lacks files needed by Steam.
+{ [ -e "$OTHER_DIR" ] || [ -L "$OTHER_DIR" ]; } && KEEP_OTHER=1
 # For the embedded Python steps below
 export DECKOPS_INSTALL_DIR="$INSTALL_DIR" DECKOPS_OTHER_DIR="$OTHER_DIR" \
        DECKOPS_OTHER_XDG_ID="$OTHER_XDG_ID" DECKOPS_OTHER_TITLE="$OTHER_TITLE" \
@@ -138,6 +141,8 @@ for r in "${STEAM_ROOTS[@]}"; do
     fi
 done
 
+export DECKOPS_STEAM_ROOT="$STEAM_ROOT"
+
 # Whatever this branch set up last points into its own folder: Steam launch
 # options (prelaunch.sh, and on LCD the venv's python + src/cache_cleanup.py),
 # non-Steam shortcuts (their program, start folder and launch options; the
@@ -169,25 +174,90 @@ if sr:
     for n in ("localconfig.vdf", "shortcuts.vdf"):
         steam_files += sorted(glob.glob(os.path.join(sr, "userdata", "*", "config", n)))
 
-def read(p):
+def read(p, required=False):
     try:
         with open(p, "rb") as f:
             return f.read()
     except OSError:
+        if required:
+            raise
         return b""
+
+def shortcut_strings(data):
+    """Validate the entire typed VDF before editing; return string byte ranges.
+    Refuse unknown types/truncation rather than replacing bytes in integers."""
+    if not data.startswith(b"\x00shortcuts\x00") or not data.endswith(b"\x08\x08"):
+        raise ValueError("invalid shortcuts.vdf header/footer")
+    pos, depth, ranges = len(b"\x00shortcuts\x00"), 1, []
+    while pos < len(data) and depth:
+        t = data[pos]; pos += 1
+        if t == 8:
+            depth -= 1
+            continue
+        if t not in (0, 1, 2, 3, 4, 6, 7, 10):
+            raise ValueError("unknown shortcuts.vdf type")
+        key_end = data.index(b"\x00", pos)
+        if depth == 1 and (t != 0 or not data[pos:key_end].isdigit()):
+            raise ValueError("invalid shortcuts.vdf entry key")
+        pos = key_end + 1
+        if t == 0:
+            depth += 1
+        elif t == 1:
+            end = data.index(b"\x00", pos)
+            ranges.append((pos, end))
+            pos = end + 1
+        else:
+            pos += 8 if t in (7, 10) else 4
+            if pos > len(data):
+                raise ValueError("truncated shortcuts.vdf")
+    if pos != len(data) - 1 or data[pos:] != b"\x08":
+        raise ValueError("invalid shortcuts.vdf structure")
+    return ranges
 
 # Where DeckOps scripts can be: what this branch recorded, every Steam library,
 # and the folders non-Steam shortcuts start from (own copies)
 dirs, scripts = set(), set()
-try:
-    with open(os.path.join(ours, "deckops.json")) as f:
-        sg = json.load(f).get("setup_games") or {}
-    for e in sg.values():
+with open(os.path.join(ours, "deckops.json"), encoding="utf-8") as f:
+    ours_config = json.load(f)
+sg = ours_config.get("setup_games") or {}
+if not isinstance(sg, dict):
+    raise ValueError("Nightly setup_games is damaged; install kept for retry")
+for e in sg.values():
+    if isinstance(e, dict):
         for k in ("wrapper_path", "lan_wrapper_path"):
-            if isinstance(e, dict) and e.get(k):
+            if isinstance(e.get(k), str) and e[k]:
                 scripts.add(e[k])
-except (OSError, ValueError, AttributeError):
-    pass
+# Repointing files alone is not enough: the other branch's offline launcher and
+# game library enumerate only its own deckops.json. Do not remove this branch
+# until the other has corresponding game setups and Offline Mode enabled.
+try:
+    with open(os.path.join(other, "deckops.json"), encoding="utf-8") as f:
+        other_config = json.load(f)
+except (OSError, ValueError):
+    other_config = {}
+other_setup = other_config.get("setup_games") or {}
+if not isinstance(other_setup, dict):
+    other_setup = {}
+missing_setup = []
+for key, entry in sg.items():
+    if not isinstance(entry, dict):
+        missing_setup.append(key)
+        continue
+    replacement = other_setup.get(key)
+    if not isinstance(replacement, dict) or any(
+        replacement.get(field, default) != entry.get(field, default)
+        for field, default in (("client", ""), ("source", "steam"))
+    ) or (entry.get("lan_wrapper_path") and (
+        not isinstance(replacement.get("lan_wrapper_path"), str)
+        or not os.path.isfile(replacement["lan_wrapper_path"])
+        or os.path.realpath(replacement["lan_wrapper_path"]).startswith(os.path.realpath(ours) + os.sep)
+    )):
+        missing_setup.append(key)
+if missing_setup or (ours_config.get("offline_mode") is True and other_config.get("offline_mode") is not True):
+    print("Set up these games in the other DeckOps build before uninstalling this one: "
+          + ", ".join(sorted(missing_setup)) if missing_setup else
+          "Enable Offline Mode in the other DeckOps build before uninstalling this one.")
+    sys.exit(3)
 libs = [os.path.join(sr, "steamapps")] if sr else []
 lf = read(os.path.join(sr, "steamapps", "libraryfolders.vdf")) if sr else b""
 libs += [os.path.join(m.decode(errors="surrogateescape"), "steamapps")
@@ -212,8 +282,16 @@ for p in sorted(scripts):
 
 hits, missing, mapping = {}, set(), {}
 for p in steam_files + script_files:
-    data = read(p)
-    found = {m.group(0) for m in pat.finditer(data)}
+    data = read(p, required=True)
+    if p.endswith("shortcuts.vdf"):
+        ranges = shortcut_strings(data)
+        matches = list(pat.finditer(data))
+        if any(not any(start <= m.start() and m.end() <= end for start, end in ranges)
+               for m in matches):
+            raise ValueError(f"unsafe shortcut replacement in {p}")
+    else:
+        matches = list(pat.finditer(data))
+    found = {m.group(0) for m in matches}
     if not found:
         continue
     hits[p] = data
@@ -283,7 +361,17 @@ repoint_to_other() {
     success "Games and shortcuts now use $OTHER_TITLE's files"
 }
 
+if [ -z "$STEAM_ROOT" ]; then
+    warn "Steam root not found; cannot verify launch options and shortcuts. Install kept."
+    exit 1
+fi
+
 if [ -n "$KEEP_OTHER" ]; then
+    if [ ! -f "$OTHER_DIR/src/main.py" ]; then
+        warn "$OTHER_DIR is incomplete or unrecognized; cannot transfer game launches safely."
+        warn "Repair $OTHER_TITLE before uninstalling $APP_TITLE. Both directories were kept."
+        exit 1
+    fi
     info "$OTHER_TITLE is also installed ($OTHER_DIR)."
     info "Keeping shared game files, Steam settings and Plutonium data for $OTHER_TITLE."
     repoint_to_other || { warn "Could not point your games at $OTHER_TITLE, so $APP_TITLE was left installed. Nothing was removed."; exit 1; }
@@ -310,11 +398,7 @@ close_steam
 
 echo ""
 
-if [ -z "$STEAM_ROOT" ]; then
-    warn "Steam root not found -- skipping game restore steps."
-else
-    success "Steam found at $STEAM_ROOT"
-fi
+success "Steam found at $STEAM_ROOT"
 
 find_install_dir() {
     local appid="$1"
@@ -506,7 +590,10 @@ def split_entries(raw):
             if raw[pos] != 0x00:
                 return None
             start = pos
-            pos = raw.index(b'\x00', pos + 1) + 1  # skip 0x00 <index> 0x00
+            key_end = raw.index(b'\x00', pos + 1)
+            if not raw[pos + 1:key_end].isdigit():
+                return None
+            pos = key_end + 1
             depth = 1
             while depth:
                 t = raw[pos]
@@ -524,6 +611,8 @@ def split_entries(raw):
                 elif t in (0x07, 0x0A):
                     pos += 8
                 else:
+                    return None
+                if pos > len(raw):
                     return None
             entries.append(raw[start:pos])
     except (IndexError, ValueError):
@@ -578,6 +667,14 @@ def is_deckops(fields):
     return any(p in where for p in DECKOPS_PATHS)
 
 
+def reindex(blob, index):
+    """Replace only the validated entry's numeric key, leaving its body intact."""
+    if entry_fields(blob) is None:
+        raise ValueError("invalid shortcut entry")
+    end = blob.index(b'\x00', 1)
+    return b'\x00' + str(index).encode() + blob[end:]
+
+
 def is_deckops_entry(blob):
     """True only for an entry that parses and is DeckOps'. One that does not
     parse is not, so it is left alone."""
@@ -597,18 +694,16 @@ def has_sentinel(folder):
 def readable(data):
     """True if data is a shortcuts.vdf that entries() can read."""
     header = b'\x00shortcuts\x00'
-    pos = data.find(header)
-    return pos >= 0 and split_entries(data[pos + len(header):]) is not None
+    return data.startswith(header) and split_entries(data[len(header):]) is not None
 
 
 def entries(data):
     """(fields, is_deckops) for each shortcut in a whole shortcuts.vdf file.
     Yields nothing if the file is not in the expected shape."""
     header = b'\x00shortcuts\x00'
-    pos = data.find(header)
-    if pos < 0:
+    if not data.startswith(header):
         return
-    for blob in split_entries(data[pos + len(header):]) or ():
+    for blob in split_entries(data[len(header):]) or ():
         fields = entry_fields(blob)
         if fields is not None:
             yield fields, is_deckops(fields)
@@ -626,7 +721,7 @@ import os
 
 import deckops_vdf
 
-STEAM_DIR    = os.path.expanduser("~/.local/share/Steam")
+STEAM_DIR    = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 USERDATA_DIR = os.path.join(STEAM_DIR, "userdata")
 
 # Same exe list as detect_shortcuts.py EXE_TO_KEYS
@@ -847,14 +942,10 @@ if [ -n "$STEAM_ROOT" ]; then
         done
     fi
 
-    # Remove CoD4 user profile/config directory from the Wine prefix
-    info "Removing CoD4 Wine prefix user data..."
+    # This is player data, not a DeckOps-owned cache. A skipped or incomplete
+    # save backup must never silently erase it (and even a backup can omit mods).
     COD4_APPDATA="$STEAM_ROOT/steamapps/compatdata/7940/pfx/drive_c/users/steamuser/AppData/Local/CallofDuty4MW"
-    if [ -d "$COD4_APPDATA" ]; then
-        rm -rf "$COD4_APPDATA" && success "Removed CoD4 Wine prefix AppData" || warn "Failed to remove CoD4 Wine prefix AppData"
-    else
-        skip "CoD4 Wine prefix AppData not found"
-    fi
+    [ ! -d "$COD4_APPDATA" ] || skip "Kept unbacked CoD4 Wine prefix AppData: $COD4_APPDATA"
 
     # Remove CoD4R launcher settings from Wine prefix
     COD4R_APPDATA="$STEAM_ROOT/steamapps/compatdata/7940/pfx/drive_c/users/steamuser/AppData/Local/CoD4R"
@@ -908,9 +999,26 @@ info "Removing CleanOps files from Black Ops III folder..."
 if [ -n "$STEAM_ROOT" ]; then
     bo3_dir=$(find_install_dir 311210) || true
     if [ -n "$bo3_dir" ]; then
-        for f in "d3d11.dll" "deckops_cleanops.json"; do
-            [ -f "$bo3_dir/$f" ] && rm -f "$bo3_dir/$f" && success "Removed $f" || skip "$f not found"
-        done
+        # The DLL name alone is not proof of ownership (ReShade and other mods
+        # use it too). Only remove a binary whose hash is recorded by DeckOps.
+        if [ -f "$bo3_dir/d3d11.dll" ]; then
+            if python3 - "$bo3_dir" 2>/dev/null <<'PYEOF'
+import hashlib, json, os, sys
+folder = sys.argv[1]
+with open(os.path.join(folder, "deckops_cleanops.json"), encoding="utf-8") as f:
+    meta = json.load(f)
+expected = meta.get("d3d11_sha256") or meta.get("sha256")
+with open(os.path.join(folder, "d3d11.dll"), "rb") as f:
+    actual = hashlib.sha256(f.read()).hexdigest()
+sys.exit(0 if isinstance(expected, str) and expected.lower() == actual else 1)
+PYEOF
+            then
+                rm -f "$bo3_dir/d3d11.dll" && success "Removed owned d3d11.dll" || warn "Could not remove d3d11.dll"
+            else
+                skip "Unverified d3d11.dll kept (no matching DeckOps hash)"
+            fi
+        fi
+        [ ! -f "$bo3_dir/deckops_cleanops.json" ] || rm -f "$bo3_dir/deckops_cleanops.json"
     else
         skip "Black Ops III install directory not found"
     fi
@@ -979,11 +1087,11 @@ info "Removing mod client files from non-Steam (My Own) game folders..."
 # library. We find them by scanning shortcuts.vdf for known exe names and
 # cleaning up the same files we would for Steam installs.
 python3 - << 'PYEOF'
-import os, shutil, filecmp
+import os, shutil, filecmp, hashlib, json
 
 import deckops_vdf
 
-STEAM_DIR    = os.path.expanduser("~/.local/share/Steam")
+STEAM_DIR    = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 USERDATA_DIR = os.path.join(STEAM_DIR, "userdata")
 
 # Map exe filename (lowercase) to cleanup actions.
@@ -1050,8 +1158,9 @@ OWN_CLEANUP = {
         "dirs":  [],
     },
     "blackops3.exe": {
-        "files": ["d3d11.dll", "deckops_cleanops.json"],
+        "files": ["deckops_cleanops.json"],
         "dirs":  [],
+        "cleanops_dll": True,
     },
     "t7x.exe": {
         "files": [],
@@ -1235,6 +1344,22 @@ for uid in os.listdir(USERDATA_DIR):
                 except Exception as ex:
                     print(f"    Failed to restore {fname}: {ex}")
 
+        if cleanup.get("cleanops_dll"):
+            dll = os.path.join(install_dir, "d3d11.dll")
+            marker = os.path.join(install_dir, "deckops_cleanops.json")
+            try:
+                with open(marker, encoding="utf-8") as f:
+                    expected = json.load(f).get("d3d11_sha256")
+                with open(dll, "rb") as f:
+                    actual = hashlib.sha256(f.read()).hexdigest()
+                if isinstance(expected, str) and expected.lower() == actual:
+                    os.remove(dll)
+                    print("    Removed owned d3d11.dll")
+                else:
+                    print("    Kept unverified d3d11.dll")
+            except (OSError, ValueError, TypeError):
+                print("    Kept unverified d3d11.dll")
+
         for fname in cleanup["files"]:
             fpath = os.path.join(install_dir, fname)
             if os.path.exists(fpath):
@@ -1336,6 +1461,11 @@ if not cleaned:
 PYEOF
 echo ""
 
+HAS_VDF_LEDGER=""
+if [ -f "$HOME/.config/$XDG_ID/vdf_edits.json" ]; then
+    HAS_VDF_LEDGER=1
+fi
+export HAS_VDF_LEDGER
 info "Removing DeckOps VDF edits using edit ledger (if available)..."
 
 # The VDF edit ledger records every edit DeckOps made to localconfig.vdf and
@@ -1346,12 +1476,9 @@ python3 - << 'PYEOF'
 import os, re, json, shutil
 
 LEDGER_PATH = os.path.expanduser("~/.config/deckops-nightly/vdf_edits.json")
-# The other branch's ledger only when that branch isn't installed (leftover):
-# while it is, those edits are its own and must stay
-if not os.path.exists(LEDGER_PATH) and not os.environ.get("DECKOPS_KEEP_OTHER"):
-    other_xdg = os.environ.get("DECKOPS_OTHER_XDG_ID") or "deckops"
-    LEDGER_PATH = os.path.expanduser(f"~/.config/{other_xdg}/vdf_edits.json")
-steam_dir   = os.path.expanduser("~/.local/share/Steam")
+# Never consume the sibling branch's ledger: an incomplete installation still
+# owns its own Steam edits, and a missing directory proves nothing about them.
+steam_dir   = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 userdata    = os.path.join(steam_dir, "userdata")
 
 if not os.path.exists(LEDGER_PATH):
@@ -1362,8 +1489,7 @@ try:
     with open(LEDGER_PATH, "r", encoding="utf-8") as f:
         ledger = json.load(f)
 except (json.JSONDecodeError, OSError) as ex:
-    print(f"  Ledger read failed ({ex}) — falling back to legacy cleanup.")
-    exit(0)
+    raise ValueError(f"Ledger read failed ({ex}); install kept for retry") from ex
 
 def validate_vdf(data):
     """Check brace balance using a quote-aware parser."""
@@ -1563,7 +1689,7 @@ for uid, apps in lc_edits.items():
                 apps_open  = m.end() - 1
                 apps_close = find_block_end(content, apps_open)
                 if apps_close == -1:
-                    continue
+                    raise ValueError(f"uid {uid}: malformed Deck configurator apps block")
                 apps_block = content[apps_open + 1:apps_close]
                 appid_pat = re.compile(r'"' + re.escape(appid) + r'"\s*\{', re.IGNORECASE)
                 am = appid_pat.search(apps_block)
@@ -1572,6 +1698,17 @@ for uid, apps in lc_edits.items():
                 entry_open  = am.start()
                 entry_close = find_block_end(apps_block, am.end() - 1)
                 if entry_close == -1:
+                    raise ValueError(f"uid {uid}: malformed Deck configurator app {appid}")
+                entry = apps_block[entry_open:entry_close + 1]
+                try:
+                    expected = json.loads(recorded_value)
+                    current = re.search(r'"DefaultLaunchOption"\s*\{\s*"([^"]+)"\s*"([^"]+)"\s*\}', entry)
+                    matches = (current and current.group(1) == expected["hash_key"]
+                               and current.group(2) == str(expected["index"]))
+                except (ValueError, TypeError, KeyError):
+                    matches = False
+                if not matches:
+                    print(f"  uid {uid}: [ledger] kept changed DefaultLaunchOption for appid {appid}")
                     continue
                 apps_block = apps_block[:entry_open] + apps_block[entry_close + 1:]
                 content = content[:apps_open + 1] + apps_block + content[apps_close:]
@@ -1585,8 +1722,7 @@ for uid, apps in lc_edits.items():
                     block = app_block(content, appid)
                     found = flat_values(content, block, key_name) if block else []
                 except ValueError as ex:
-                    print(f"  uid {uid}: [ledger] localconfig.vdf not parsed, appid {appid} skipped ({ex})")
-                    continue
+                    raise ValueError(f"uid {uid}: cannot parse localconfig.vdf for appid {appid}") from ex
                 if not found:
                     continue
                 # Duplicates left by older DeckOps versions all count
@@ -1606,12 +1742,18 @@ for uid, apps in lc_edits.items():
                         print(f"  uid {uid}: [ledger] cleared LaunchOptions for appid {appid}")
                     continue
 
-                # UseSteamControllerConfig: clear to empty (duplicates merged)
+                # Undo only the value DeckOps actually wrote. A user may have
+                # changed this since setup; never erase their controller choice.
+                if any(v != str(recorded_value) for v in values):
+                    print(f"  uid {uid}: [ledger] kept changed {key_name} for appid {appid}")
+                    continue
                 content = set_flat_value(content, found, "")
                 modified = True
                 print(f"  uid {uid}: [ledger] cleared {key_name} for appid {appid}")
 
     if modified:
+        if not validate_vdf(content):
+            raise ValueError(f"uid {uid}: invalid localconfig.vdf after cleanup")
         bak = vdf_path + ".deckops_uninstall.bak"
         if not os.path.exists(bak):
             try:
@@ -1637,13 +1779,21 @@ if compat_edits:
         with open(config_vdf, "r", encoding="utf-8") as f:
             data = f.read()
         cv_modified = False
-        for appid in compat_edits:
-            pattern = rf'\t+"{re.escape(appid)}"\n\t+\{{[^}}]*\}}\n?'
-            if re.search(pattern, data, re.MULTILINE | re.DOTALL):
-                data = re.sub(pattern, "", data, flags=re.MULTILINE | re.DOTALL)
-                cv_modified = True
+        for appid, recorded_version in compat_edits.items():
+            pattern = rf'\t+"{re.escape(appid)}"\s*\{{[^{{}}]*\}}\n?'
+            def undo_compat(match):
+                current = re.search(r'"name"\s*"([^"]*)"', match.group(0), re.IGNORECASE)
+                if not current or current.group(1) != recorded_version:
+                    print(f"  [ledger] kept changed CompatToolMapping for appid {appid}")
+                    return match.group(0)
                 print(f"  [ledger] removed CompatToolMapping for appid {appid}")
+                return ""
+            new_data = re.sub(pattern, undo_compat, data)
+            cv_modified |= new_data != data
+            data = new_data
         if cv_modified:
+            if not validate_vdf(data):
+                raise ValueError("config.vdf invalid after compat cleanup")
             bak = config_vdf + ".bak"
             try:
                 shutil.copy2(config_vdf, bak)
@@ -1671,13 +1821,21 @@ for cs_filename, keys in cs_edits.items():
         with open(cs_path, "r", encoding="utf-8", errors="replace") as f:
             cs_content = f.read()
         cs_modified = False
-        for key in keys:
-            pattern = rf'\t"{re.escape(key)}"\n\t\{{[^}}]*\}}\n?'
-            if re.search(pattern, cs_content, re.MULTILINE | re.DOTALL):
-                cs_content = re.sub(pattern, "", cs_content, flags=re.MULTILINE | re.DOTALL)
-                cs_modified = True
+        for key, recorded_template in keys.items():
+            pattern = rf'\t+"{re.escape(key)}"\s*\{{[^{{}}]*\}}\n?'
+            def undo_configset(match):
+                current = re.search(r'"template"\s*"([^"]*)"', match.group(0), re.IGNORECASE)
+                if not current or current.group(1) != recorded_template:
+                    print(f"  uid {uid}: [ledger] kept changed {key} in {cs_filename}")
+                    return match.group(0)
                 print(f"  uid {uid}: [ledger] removed {key} from {cs_filename}")
+                return ""
+            new_content = re.sub(pattern, undo_configset, cs_content)
+            cs_modified |= new_content != cs_content
+            cs_content = new_content
         if cs_modified:
+            if not validate_vdf(cs_content):
+                raise ValueError(f"invalid configset after cleanup: {cs_path}")
             with open(cs_path, "w", encoding="utf-8") as f:
                 f.write(cs_content)
 
@@ -1690,6 +1848,7 @@ except Exception:
 
 print("  Ledger-based VDF cleanup complete.")
 PYEOF
+[ $? -eq 0 ] || { warn "Steam ledger cleanup failed; install kept for retry."; exit 1; }
 
 echo ""
 
@@ -1703,9 +1862,11 @@ import os, re, shutil
 # These live in the Deck_ConfiguratorInterstitialApps "apps" block, not the
 # standard LaunchOptions flat key, so they need separate removal.
 # See: wrapper.py set_default_launch_option() for the write side.
-DECK_APPIDS = {"7940", "10090"}
+# Without the ledger there is no reliable proof this is still DeckOps' choice.
+# The ledger pass above handles verified entries; leave legacy choices alone.
+DECK_APPIDS = set()
 
-steam_dir = os.path.expanduser("~/.local/share/Steam")
+steam_dir = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 userdata  = os.path.join(steam_dir, "userdata")
 
 if not os.path.isdir(userdata):
@@ -1763,12 +1924,14 @@ for uid in os.listdir(userdata):
     apps_open  = m.end() - 1
     apps_close = find_block_end(content, apps_open)
     if apps_close == -1:
-        continue
+        raise ValueError(f"uid {uid}: malformed Deck configurator apps block")
 
     apps_block = content[apps_open + 1:apps_close]
     modified   = False
 
-    for appid in DECK_APPIDS:
+    # The ledger compares the current value to what DeckOps wrote. Do not let
+    # this legacy fallback subsequently erase a changed value.
+    for appid in (() if os.environ.get("HAS_VDF_LEDGER") else DECK_APPIDS):
         appid_pat = re.compile(r'"' + re.escape(appid) + r'"\s*\{', re.IGNORECASE)
         am = appid_pat.search(apps_block)
         if not am:
@@ -1776,13 +1939,15 @@ for uid in os.listdir(userdata):
         entry_open  = am.start()
         entry_close = find_block_end(apps_block, am.end() - 1)
         if entry_close == -1:
-            continue
+            raise ValueError(f"uid {uid}: malformed Deck configurator app {appid}")
         apps_block = apps_block[:entry_open] + apps_block[entry_close + 1:]
         modified = True
         print(f"  uid {uid}: removed DefaultLaunchOption for appid {appid}")
 
     if modified:
         new_content = content[:apps_open + 1] + apps_block + content[apps_close:]
+        if not validate_vdf(new_content):
+            raise ValueError(f"uid {uid}: invalid localconfig.vdf after default cleanup")
 
         # Backup before writing
         bak = vdf_path + ".deckops_uninstall.bak"
@@ -1806,6 +1971,7 @@ for uid in os.listdir(userdata):
     else:
         print(f"  uid {uid}: no DeckOps configurator defaults found")
 PYEOF
+[ $? -eq 0 ] || { warn "Steam launch defaults cleanup failed; install kept for retry."; exit 1; }
 
 echo ""
 
@@ -1825,7 +1991,7 @@ MANAGED_STEAM_APPIDS = [
     "209160", "209170", "209650", "209660",
 ]
 
-steam_dir = os.path.expanduser("~/.local/share/Steam")
+steam_dir = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 userdata  = os.path.join(steam_dir, "userdata")
 
 if not os.path.isdir(userdata):
@@ -1989,8 +2155,7 @@ for uid in os.listdir(userdata):
             block = app_block(content, appid)
             found = flat_values(content, block, "LaunchOptions") if block else []
         except ValueError as ex:
-            print(f"  uid {uid}: localconfig.vdf not parsed, appid {appid} skipped ({ex})")
-            continue
+            raise ValueError(f"uid {uid}: cannot parse localconfig.vdf for appid {appid}") from ex
         if not any(content[vs:ve].strip() for _, vs, ve in found):
             continue
 
@@ -2009,6 +2174,8 @@ for uid in os.listdir(userdata):
             print(f"  uid {uid}: cleared LaunchOptions for appid {appid}")
 
     if modified:
+        if not validate_vdf(content):
+            raise ValueError(f"uid {uid}: invalid localconfig.vdf after cleanup")
         bak = vdf_path + ".deckops_uninstall.bak"
         if not os.path.exists(bak):
             try:
@@ -2034,6 +2201,7 @@ if cleared == 0:
 else:
     print(f"  Cleared {cleared} launch option(s) total.")
 PYEOF
+[ $? -eq 0 ] || { warn "Steam launch options cleanup failed; install kept for retry."; exit 1; }
 
 echo ""
 
@@ -2150,9 +2318,11 @@ try:
     data = bytearray(open(path, "rb").read())
 except OSError:
     print("  appinfo.vdf not found -- nothing to clean."); sys.exit(0)
+if len(data) < 16:
+    raise ValueError("truncated appinfo.vdf; install kept for retry")
 magic = struct.unpack_from("<I", data, 0)[0]
 if magic not in (0x07564428, 0x07564429):
-    print(f"  Unknown appinfo.vdf version {magic:#x} -- skipped."); sys.exit(0)
+    raise ValueError(f"Unknown appinfo.vdf version {magic:#x}; install kept for retry")
 v29 = magic == 0x07564429
 strings = []
 if v29:
@@ -2215,9 +2385,10 @@ while pos + 8 <= len(data):
     kv = bytes(data[start + 8 + HDR.size:end])
     try:
         node, used = parse(kv)
-    except Exception:
-        continue
-    if used != len(kv) or encode(node) != kv: continue
+    except Exception as ex:
+        raise ValueError(f"Cannot parse appinfo entry {appid}") from ex
+    if used != len(kv) or encode(node) != kv:
+        raise ValueError(f"Cannot validate appinfo entry {appid}")
     launch = child(child(child(node, "appinfo") or [], "config") or [], "launch")
     if launch is None: continue
     keep = [e for e in launch if not (e[0] == 0 and any(k == "executable" and v in OURS for _, k, v in e[2]))]
@@ -2252,6 +2423,7 @@ for leftover in (path + ".bak",):
     if os.path.exists(leftover):
         os.remove(leftover); print("  Removed appinfo.vdf.bak left by DeckOps.")
 PYEOF
+    [ $? -eq 0 ] || { warn "Steam appinfo cleanup failed; install kept for retry."; exit 1; }
     echo ""
 
     info "Removing DeckOps-managed Plutonium from Wine prefixes..."
@@ -2321,8 +2493,8 @@ PYEOF
                 fi
                 prefix_id=$(basename "$prefix_dir")
                 if $KEEP_PLUT_STORAGE && [ -d "$plut_dir/storage" ]; then
-                    # Links point into the master copy, which is removed below.
-                    find "$plut_dir/storage" -type l -delete 2>/dev/null
+                    # storage/ is user data. Even symlinks inside it may be
+                    # user-created; never prune by file type alone.
                     find "$plut_dir" -mindepth 1 -maxdepth 1 ! -name storage -exec rm -rf {} + \
                         && success "Removed DeckOps Plutonium from prefix $prefix_id (kept storage/)" \
                         || warn "Failed to clean Plutonium from prefix $prefix_id"
@@ -2343,7 +2515,20 @@ PYEOF
         fi
         # MW3: downgrade/ holds the 32-bit depot files. Keeping it (with its
         # receipt) lets a reinstall skip the depot download entirely.
-        if [ -n "$game_dir" ] && [ -d "$game_dir/downgrade" ]; then
+        if [[ "$appid" = 42690 || "$appid" = 42750 ]] && [ -n "$game_dir" ] && [ -d "$game_dir/downgrade" ]; then
+            # A folder name is not ownership proof, even inside MW3. Older or
+            # user-created downgrade folders without our receipt stay untouched.
+            if ! python3 - "$game_dir/downgrade/deckops_depot.json" 2>/dev/null <<'PYEOF'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    receipt = json.load(f)
+sys.exit(0 if receipt.get("game_id") == "iw5" and isinstance(receipt.get("files"), dict)
+         and receipt["files"] else 1)
+PYEOF
+            then
+                skip "Unverified MW3 downgrade folder kept for appid $appid"
+                continue
+            fi
             zenity --question \
                 --title="$APP_TITLE Uninstaller" \
                 --text="Remove MW3 32-bit depot files (~10 GB)?\n\nKeeping them lets a reinstall skip the depot download.\nThey do not affect the normal Steam version of MW3." \
@@ -2536,18 +2721,17 @@ SHORTCUT_NAMES = {
 KEEP_OTHER = bool(os.environ.get("DECKOPS_KEEP_OTHER"))
 OTHER_DIR  = os.environ.get("DECKOPS_OTHER_DIR", "")
 LAUNCHER_NAMES = {"DeckOps: Plutonium Offline", "DeckOps: Plutonium Launcher"}
-if KEEP_OTHER:
-    SHORTCUT_NAMES.discard(os.environ.get("DECKOPS_OTHER_TITLE", ""))
+SHORTCUT_NAMES.discard(os.environ.get("DECKOPS_OTHER_TITLE", ""))
 
 def other_branch_entry(blob):
     """True for a launcher shortcut whose exe lives in the other branch's dir."""
-    if not (KEEP_OTHER and OTHER_DIR):
+    if not OTHER_DIR:
         return False
     m = re.search(b'\x01(?:Exe|exe)\x00([^\x00]*)\x00', blob)
     exe = m.group(1).decode('utf-8', errors='replace').strip('"') if m else ""
     return exe.startswith(OTHER_DIR.rstrip("/") + "/")
 
-steam_dir = os.path.expanduser("~/.local/share/Steam")
+steam_dir = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 userdata  = os.path.join(steam_dir, "userdata")
 
 if not os.path.isdir(userdata):
@@ -2564,142 +2748,46 @@ for uid in os.listdir(userdata):
     with open(vdf_path, "rb") as f:
         data = f.read()
 
-    # Find and remove entries whose AppName matches our shortcuts
-    # Each entry starts with \x00<index>\x00 and ends with \x08\x08 (but
-    # the outer \x08 is shared). We rebuild by finding AppName fields.
-    removed = 0
-    # Split on entry boundaries: \x00<single digit or two digits>\x00
-    # Safer: rebuild the whole file keeping only entries not in our set
-
-    # Extract all AppName values to check if we need to do anything
-    names_found = re.findall(b'\x01(?:AppName|appname)\x00([^\x00]+)\x00', data)
-    names_found = [n.decode('utf-8', errors='replace') for n in names_found]
-
-    if not any(n in SHORTCUT_NAMES for n in names_found):
-        print(f"  uid {uid}: no DeckOps shortcuts found")
-        continue
-
-    # Rebuild: walk entries, skip ones matching our names
-    # Header is \x00shortcuts\x00, footer is \x08\x08
+    # Refuse malformed or unsupported files rather than guessing at boundaries.
     header = b'\x00shortcuts\x00'
-    pos = data.find(header)
-    if pos == -1:
-        continue
+    entries = deckops_vdf.split_entries(data[len(header):]) if data.startswith(header) else None
+    if entries is None:
+        raise ValueError(f"uid {uid}: invalid shortcuts.vdf; no shortcut changes made")
+    fields = [deckops_vdf.entry_fields(blob) for blob in entries]
+    if any(f is None for f in fields):
+        raise ValueError(f"uid {uid}: invalid shortcut entry; no shortcut changes made")
 
-    # Collect raw entry blobs between \x00<N>\x00 ... \x08\x08 pattern
-    # Each entry: \x00{index}\x00 ... \x08 (inner end) then next entry or \x08 (outer end)
-    entries_start = pos + len(header)
-    raw_entries   = data[entries_start:]
-
-    # Walk entries manually using proper binary VDF type parsing.
-    # Type bytes: 0x00 = sub-dict, 0x01 = string, 0x02 = int32,
-    #             0x03 = float32, 0x07 = uint64, 0x08 = end-of-dict.
-    kept   = []
-    cursor = 0
-    idx    = 0
-
-    while cursor < len(raw_entries):
-        if raw_entries[cursor:cursor+1] == b'\x08':
-            break  # outer end marker
-
-        # Find entry start: \x00<index_str>\x00
-        if raw_entries[cursor:cursor+1] != b'\x00':
-            cursor += 1
-            continue
-
-        # Read key (index string)
-        key_end = raw_entries.index(b'\x00', cursor + 1)
-        entry_body_start = key_end + 1
-        # Walk through typed fields, tracking sub-dict depth.
-        # Entry body starts at depth 1 (the entry itself is a dict).
-        depth = 1
-        scan  = entry_body_start
-        while scan < len(raw_entries) and depth > 0:
-            ftype = raw_entries[scan]
-            if ftype == 0x00:
-                # Sub-dict start: read key name, enter dict
-                k_end = raw_entries.index(b'\x00', scan + 1)
-                scan = k_end + 1
-                depth += 1
-            elif ftype == 0x08:
-                # End-of-dict
-                depth -= 1
-                scan += 1
-            elif ftype == 0x01:
-                # String: type + key\x00 + value\x00
-                scan += 1
-                k_end = raw_entries.index(b'\x00', scan)
-                scan = k_end + 1
-                v_end = raw_entries.index(b'\x00', scan)
-                scan = v_end + 1
-            elif ftype == 0x02:
-                # Int32: type + key\x00 + 4 bytes
-                scan += 1
-                k_end = raw_entries.index(b'\x00', scan)
-                scan = k_end + 1 + 4
-            elif ftype == 0x03:
-                # Float32: type + key\x00 + 4 bytes
-                scan += 1
-                k_end = raw_entries.index(b'\x00', scan)
-                scan = k_end + 1 + 4
-            elif ftype == 0x07:
-                # Uint64: type + key\x00 + 8 bytes
-                scan += 1
-                k_end = raw_entries.index(b'\x00', scan)
-                scan = k_end + 1 + 8
-            else:
-                # Unknown type - skip one byte and hope for the best
-                scan += 1
-
-        entry_blob = raw_entries[cursor:scan]
-
-        # Check AppName in this blob
-        name_match = re.search(b'\x01(?:AppName|appname)\x00([^\x00]+)\x00', entry_blob)
-        name = name_match.group(1).decode('utf-8', errors='replace') if name_match else ""
-
-        if name in LAUNCHER_NAMES and other_branch_entry(entry_blob):
-            print(f"  uid {uid}: kept \"{name}\" (belongs to the other DeckOps install)")
-            name = ""
-        if name in SHORTCUT_NAMES and not deckops_vdf.is_deckops_entry(entry_blob):
-            # Same title as one of ours, but not made by DeckOps (no DeckOps tag,
-            # and it does not point at anything DeckOps manages): the user's own.
-            print(f"  uid {uid}: kept \"{name}\" (not created by DeckOps)")
-            name = ""
-        if name in SHORTCUT_NAMES:
+    kept = []
+    removed = 0
+    for blob, field in zip(entries, fields):
+        name = field.get("appname", "")
+        if name in LAUNCHER_NAMES and other_branch_entry(blob):
+            print(f"  uid {uid}: kept \"{name}\" (other install)")
+        elif name in SHORTCUT_NAMES and deckops_vdf.is_deckops(field):
             print(f"  uid {uid}: removed shortcut \"{name}\"")
             removed += 1
-        else:
-            # Re-index
-            new_entry = b'\x00' + str(idx).encode() + b'\x00' + entry_blob[key_end - cursor + 1:]
-            kept.append(new_entry)
-            idx += 1
+            continue
+        kept.append(deckops_vdf.reindex(blob, len(kept)))
 
-        cursor = scan
-
-    if removed == 0:
-        print(f"  uid {uid}: nothing to remove")
+    if not removed:
         continue
-
-    # Sanity check: if we have non-DeckOps shortcuts but kept is empty,
-    # the parser desynchronized and we'd wipe the user's entire library.
-    total_shortcuts = len(names_found)
-    non_deckops = total_shortcuts - removed
-    if non_deckops > 0 and len(kept) == 0:
-        print(f"  uid {uid}: parser error — expected {non_deckops} non-DeckOps entries but kept 0, skipping write")
-        continue
-
-    # Backup before writing
-    import shutil
+    new_data = header + b''.join(kept) + b'\x08\x08'
+    if not deckops_vdf.readable(new_data):
+        raise ValueError(f"uid {uid}: rebuilt shortcuts.vdf failed validation")
+    import shutil, tempfile
     bak = vdf_path + ".deckops_uninstall.bak"
     if not os.path.exists(bak):
-        try:
-            shutil.copy2(vdf_path, bak)
-        except Exception:
-            pass
-
-    new_data = header + b''.join(kept) + b'\x08\x08'
-    with open(vdf_path, "wb") as f:
-        f.write(new_data)
+        shutil.copy2(vdf_path, bak)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(vdf_path), prefix=".deckops-shortcuts-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(new_data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, vdf_path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     print(f"  uid {uid}: shortcuts.vdf updated ({removed} removed)")
 
 PYEOF
@@ -2713,17 +2801,20 @@ PYEOF
 SHORTCUTS_SNAPSHOT="$(mktemp -d)"
 export SHORTCUTS_SNAPSHOT
 trap 'rm -rf "$SHORTCUTS_SNAPSHOT" "$DECKOPS_PY_HELPERS"' EXIT
-for _root in "$HOME/.local/share/Steam" "$STEAM_ROOT"; do
+for _root in "$STEAM_ROOT"; do
     [ -n "$_root" ] && [ -d "$_root/userdata" ] || continue
     for _vdf in "$_root"/userdata/*/config/shortcuts.vdf; do
         [ -f "$_vdf" ] || continue
         _uid="$(basename "$(dirname "$(dirname "$_vdf")")")"
         # First root wins; both roots are usually the same dir via symlink.
-        [ -f "$SHORTCUTS_SNAPSHOT/$_uid.vdf" ] || cp -p "$_vdf" "$SHORTCUTS_SNAPSHOT/$_uid.vdf"
+        if [ ! -f "$SHORTCUTS_SNAPSHOT/$_uid.vdf" ]; then
+            cp -p "$_vdf" "$SHORTCUTS_SNAPSHOT/$_uid.vdf" || \
+                { warn "Cannot snapshot Steam shortcuts; install kept for retry."; exit 1; }
+        fi
     done
 done
 
-remove_steam_shortcuts && success "Steam shortcuts cleaned up." || warn "Could not clean Steam shortcuts — remove manually if needed."
+remove_steam_shortcuts && success "Steam shortcuts cleaned up." || { warn "Steam shortcut cleanup failed; install kept for retry."; exit 1; }
 echo ""
 
 info "Removing non-Steam shortcut artwork from Steam grid..."
@@ -2779,7 +2870,7 @@ def calc_shortcut_appid(exe_path, name):
     crc = binascii.crc32(key) & 0xFFFFFFFF
     return str((crc | 0x80000000) & 0xFFFFFFFF)
 
-steam_root = os.path.expanduser("~/.local/share/Steam")
+steam_root = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 userdata   = os.path.join(steam_root, "userdata")
 
 if not os.path.isdir(userdata):
@@ -2870,13 +2961,9 @@ if not shortcut_appids:
 # the quoted exe path + title. We check both the current and old exe paths.
 _LAUNCHER_TITLE = "DeckOps: Plutonium Offline"
 _OLD_LAUNCHER_TITLE = "DeckOps: Plutonium Launcher"
-# This branch's install dir, plus the other branch's only when that one isn't
-# installed (leftovers): while it is, its launcher keeps its artwork.
+# Only this branch's launcher artwork is proven ours.
 _launcher_dirs = [os.environ.get("DECKOPS_INSTALL_DIR")
                   or os.path.join(os.path.expanduser("~"), "DeckOps-Nightly")]
-if not os.environ.get("DECKOPS_KEEP_OTHER"):
-    _launcher_dirs.append(os.environ.get("DECKOPS_OTHER_DIR")
-                          or os.path.join(os.path.expanduser("~"), "DeckOps"))
 _launcher_ids = []
 for _d in _launcher_dirs:
     for _exe in (os.path.join(_d, "assets", "LAN", "DeckOps_Offline.exe"),
@@ -2915,6 +3002,7 @@ for uid in os.listdir(userdata):
         except OSError as ex:
             print(f"  Could not remove {f}: {ex}")
 PYEOF
+[ $? -eq 0 ] || { warn "Steam artwork cleanup failed; install kept for retry."; exit 1; }
 
 echo ""
 
@@ -3002,7 +3090,7 @@ import os, shutil, re, binascii, glob, hashlib
 
 import deckops_vdf
 
-STEAM_DIR = os.path.expanduser("~/.local/share/Steam")
+STEAM_DIR = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 USERDATA  = os.path.join(STEAM_DIR, "userdata")
 STEAM_CONFIG = os.path.join(STEAM_DIR, "config", "config.vdf")
 
@@ -3319,6 +3407,7 @@ for uid in os.listdir(USERDATA):
             if clean_configset(configset_path, all_configset_keys):
                 print(f"  uid {uid}: cleaned {configset}")
 PYEOF
+[ $? -eq 0 ] || { warn "Steam controller cleanup failed; install kept for retry."; exit 1; }
 
 success "Per-game controller configs removed."
 echo ""
@@ -3341,6 +3430,7 @@ LCD_APPIDS_FILE="$(mktemp)"
 if [ -n "$STEAM_ROOT" ] && [ -d "$STEAM_ROOT/userdata" ]; then
 python3 - "$STEAM_ROOT" "$LCD_APPIDS_FILE" <<'PYEOF'
 import os, re, sys, binascii
+import deckops_vdf
 
 steam_root = sys.argv[1]
 out_path   = sys.argv[2]
@@ -3378,58 +3468,18 @@ if os.path.isdir(userdata):
         except Exception:
             continue
 
-        # Extract AppName + Exe + LaunchOptions by position
-        names = [(m.start(), m.group(1).decode("utf-8", "replace"))
-                 for m in re.finditer(rb'\x01AppName\x00([^\x00]*)\x00', data)]
-        exes = [(m.start(), m.group(1).decode("utf-8", "replace"))
-                for m in re.finditer(rb'\x01(?:exe|Exe)\x00([^\x00]*)\x00', data)]
-        launch_opts = [(m.start(), m.group(1).decode("utf-8", "replace"))
-                       for m in re.finditer(rb'\x01LaunchOptions\x00([^\x00]*)\x00', data)]
-
-        for name_pos, name in names:
-            # Find closest following Exe
-            best_exe = None
-            best_exe_pos = None
-            for exe_pos, exe in exes:
-                if exe_pos > name_pos:
-                    if best_exe_pos is None or exe_pos < best_exe_pos:
-                        best_exe_pos = exe_pos
-                        best_exe = exe
-                    break
-            if best_exe is None:
+        if not deckops_vdf.readable(data):
+            raise ValueError(f"uid {uid}: invalid shortcuts snapshot")
+        for fields, _mine in deckops_vdf.entries(data):
+            name = fields.get("appname", "")
+            exe = fields.get("exe", "")
+            lo = fields.get("launchoptions", "")
+            if not isinstance(name, str) or not isinstance(exe, str) or not isinstance(lo, str):
                 continue
-
-            exe_clean = best_exe.strip('"')
-
-            # Pattern 1: old wrapper scripts
-            if "/lcd_wrappers/plut_" in exe_clean and exe_clean.endswith(".sh"):
-                appid = calc_shortcut_appid(best_exe, name)
-                found.add(appid)
-                continue
-
-            # Pattern 2: old Heroic native (Exe="flatpak", LaunchOptions launch a do_ entry)
-            if exe_clean == "flatpak":
-                # Find closest following LaunchOptions
-                best_lo = None
-                for lo_pos, lo in launch_opts:
-                    if lo_pos > name_pos:
-                        best_lo = lo
-                        break
-                if best_lo and DECKOPS_HEROIC_URL.search(best_lo):
-                    appid = calc_shortcut_appid(best_exe, name)
-                    found.add(appid)
-                    continue
-
-            # Pattern 3: Heroic native (Exe="/usr/bin/flatpak", LaunchOptions launch a do_ entry)
-            if exe_clean == "/usr/bin/flatpak":
-                best_lo = None
-                for lo_pos, lo in launch_opts:
-                    if lo_pos > name_pos:
-                        best_lo = lo
-                        break
-                if best_lo and DECKOPS_HEROIC_URL.search(best_lo):
-                    appid = calc_shortcut_appid(best_exe, name)
-                    found.add(appid)
+            clean = exe.strip('"')
+            if (("/lcd_wrappers/plut_" in clean and clean.endswith(".sh")) or
+                (clean in ("flatpak", "/usr/bin/flatpak") and DECKOPS_HEROIC_URL.search(lo))):
+                found.add(calc_shortcut_appid(exe, name))
 
 with open(out_path, "w") as f:
     for appid in sorted(found):
@@ -3437,6 +3487,7 @@ with open(out_path, "w") as f:
 
 print(f"  Found {len(found)} DeckOps LCD shortcut appid(s)")
 PYEOF
+    [ $? -eq 0 ] || { warn "LCD shortcut scan failed; install kept for retry."; exit 1; }
 fi
 
 LCD_APPID_COUNT=$(wc -l <"$LCD_APPIDS_FILE" 2>/dev/null || echo 0)
@@ -3505,44 +3556,7 @@ if not os.path.isdir(userdata):
 DECKOPS_HEROIC_URL = re.compile(r"heroic://launch[^\s\"']*?(?:appName=|/)do_[A-Za-z0-9_-]+")
 
 
-def split_entries(raw):
-    """The shortcut entries of a shortcuts.vdf body, found by walking the typed
-    binary format. (Splitting on two 0x08 bytes does not work: 0x08 also occurs
-    inside integer fields, and an entry without a tags section does not end in
-    two of them, so entries were cut in half or merged with their neighbour.)
-    Each entry comes back whole: its 0x00 <index> 0x00 start up to its closing
-    0x08. Returns None if the data is not the expected shape, so the caller
-    leaves the file alone."""
-    entries, pos = [], 0
-    try:
-        while raw[pos] != 0x08:                    # 0x08 ends the outer map
-            if raw[pos] != 0x00:
-                return None
-            start = pos
-            pos = raw.index(b'\x00', pos + 1) + 1  # skip 0x00 <index> 0x00
-            depth = 1
-            while depth:
-                t = raw[pos]
-                pos += 1
-                if t == 0x08:                      # end of a map
-                    depth -= 1
-                    continue
-                pos = raw.index(b'\x00', pos) + 1  # the field's key
-                if t == 0x00:                      # nested map
-                    depth += 1
-                elif t == 0x01:                    # string
-                    pos = raw.index(b'\x00', pos) + 1
-                elif t in (0x02, 0x03, 0x04, 0x06):    # int32, float32, pointer, colour
-                    pos += 4
-                elif t in (0x07, 0x0A):            # uint64, int64
-                    pos += 8
-                else:
-                    return None
-            entries.append(raw[start:pos])
-    except (IndexError, ValueError):
-        return None
-    # what is left is the end of the outer map and of the file
-    return entries if raw[pos:] == b'\x08\x08' else None
+import deckops_vdf
 
 
 removed_total = 0
@@ -3559,20 +3573,17 @@ for uid in os.listdir(userdata):
         continue
 
     header = b'\x00shortcuts\x00'
-    if not data.startswith(header):
-        continue
-
-    entries = split_entries(data[len(header):])
-    if entries is None:
-        print(f"  uid {uid}: shortcuts.vdf is not in the expected format, leaving it alone")
-        continue
+    entries = deckops_vdf.split_entries(data[len(header):]) if data.startswith(header) else None
+    if entries is None or any(deckops_vdf.entry_fields(part) is None for part in entries):
+        raise ValueError(f"uid {uid}: invalid shortcuts.vdf; install kept for retry")
 
     kept = []
     removed_here = 0
     for part in entries:
-        m_exe = re.search(rb'\x01(?:exe|Exe)\x00([^\x00]*)\x00', part)
-        if m_exe:
-            exe = m_exe.group(1).decode("utf-8", "replace").strip('"')
+        fields = deckops_vdf.entry_fields(part)
+        exe_raw = fields.get("exe", "")
+        if isinstance(exe_raw, str) and exe_raw:
+            exe = exe_raw.strip('"')
 
             # Pattern 1: old wrapper scripts
             if "/lcd_wrappers/plut_" in exe and exe.endswith(".sh"):
@@ -3580,22 +3591,11 @@ for uid in os.listdir(userdata):
                 continue
 
             # Pattern 2: old Heroic native (Exe=flatpak, LaunchOptions launch a do_ entry)
-            if exe == "flatpak":
-                m_lo = re.search(rb'\x01LaunchOptions\x00([^\x00]*)\x00', part)
-                if m_lo:
-                    lo = m_lo.group(1).decode("utf-8", "replace")
-                    if DECKOPS_HEROIC_URL.search(lo):
-                        removed_here += 1
-                        continue
-
-            # Pattern 3: Heroic native (Exe=/usr/bin/flatpak, LaunchOptions launch a do_ entry)
-            if exe == "/usr/bin/flatpak":
-                m_lo = re.search(rb'\x01LaunchOptions\x00([^\x00]*)\x00', part)
-                if m_lo:
-                    lo = m_lo.group(1).decode("utf-8", "replace")
-                    if DECKOPS_HEROIC_URL.search(lo):
-                        removed_here += 1
-                        continue
+            if exe in ("flatpak", "/usr/bin/flatpak"):
+                lo = fields.get("launchoptions", "")
+                if isinstance(lo, str) and DECKOPS_HEROIC_URL.search(lo):
+                    removed_here += 1
+                    continue
 
         kept.append(part)
 
@@ -3603,9 +3603,10 @@ for uid in os.listdir(userdata):
         continue
 
     # Reindex remaining entries
-    new_parts = [re.sub(rb'^\x00\d+\x00', f'\x00{idx}\x00'.encode(), part, count=1)
-                 for idx, part in enumerate(kept)]
+    new_parts = [deckops_vdf.reindex(part, idx) for idx, part in enumerate(kept)]
     new_data = header + b''.join(new_parts) + b'\x08\x08'
+    if not deckops_vdf.readable(new_data):
+        raise ValueError(f"uid {uid}: rebuilt shortcuts.vdf failed validation")
 
     # Backup before writing
     bak = vdf + ".deckops_uninstall.bak"
@@ -3623,6 +3624,7 @@ if removed_total > 0:
 else:
     print("  No DeckOps LCD shortcuts to remove")
 PYEOF
+    [ $? -eq 0 ] || { warn "LCD shortcut cleanup failed; install kept for retry."; exit 1; }
     success "LCD shortcut cleanup done."
 fi
 echo ""
@@ -3708,14 +3710,8 @@ SHORTCUTS=(
     "$HOME/.local/share/applications/${XDG_ID}.desktop"
     "$HOME/Desktop/${INSTALL_DIR_NAME}.desktop"
 )
-# The other branch's entries only when it isn't installed (leftovers)
-if [ -z "$KEEP_OTHER" ]; then
-    SHORTCUTS+=(
-        "$HOME/.local/share/applications/${OTHER_XDG_ID}.desktop"
-        "$HOME/Desktop/${OTHER_DIR_NAME}.desktop"
-        "$HOME/Desktop/deckops.desktop"
-    )
-fi
+# Never infer ownership of the sibling's desktop entries from a missing or
+# incomplete install directory.
 
 for s in "${SHORTCUTS[@]}"; do
     [ -f "$s" ] && rm -f "$s" && success "Removed $s" || skip "$(basename "$s") not found"
@@ -3748,8 +3744,8 @@ if [ -n "$KEEP_OTHER" ]; then
     skip "$HOME/.local/share/deckops -- kept, $OTHER_TITLE still uses it"
     skip "$OTHER_DIR and $HOME/.config/$OTHER_XDG_ID -- kept ($OTHER_TITLE is installed)"
 else
-    DECKOPS_DIRS+=("$OTHER_DIR" "$HOME/.config/$OTHER_XDG_ID")
-    [ "$OTHER_XDG_ID" != "deckops" ] && DECKOPS_DIRS+=("$HOME/.local/share/$OTHER_XDG_ID")
+    # A missing sibling executable does not authorize deleting its config or
+    # data. Only this branch's paths and explicitly shared DeckOps data go.
     DECKOPS_DIRS+=("$HOME/.local/share/deckops")
 fi
 

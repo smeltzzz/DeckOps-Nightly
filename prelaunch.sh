@@ -45,15 +45,24 @@ fi
 # builds, so fovwatch.py runs the game as its child and holds the dvar at 90 (see its
 # header). (These SP builds have no com_maxfps, so FPS is capped by DXVK in the launch
 # option instead.) It gets Steam's LD_PRELOAD / LD_LIBRARY_PATH only for the game, like
-# the check above. If the Python can't run at all, the game is started as usual.
+# the check above. Check helper imports before handing it the game command, so a
+# damaged Python environment does not turn an ordinary game launch into an error.
 case "$KEY" in
     iw4sp) WATCH_EXE=iw4sp.exe ;;
     iw5sp) WATCH_EXE=iw5sp.exe ;;
     *) WATCH_EXE= ;;
 esac
 if [ -n "$WATCH_EXE" ] && [ -x "$DIR/.venv/bin/python3" ] && [ -f "$DIR/src/fovwatch.py" ]; then
-    exec env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
-        DECKOPS_LD_PRELOAD="$LD_PRELOAD" DECKOPS_LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
-        "$DIR/.venv/bin/python3" "$DIR/src/fovwatch.py" "$WATCH_EXE" cg_fov=90 -- "$@"
+    if env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
+        "$DIR/.venv/bin/python3" -c \
+        'import sys; sys.path.insert(0, sys.argv[1]); import fovwatch' "$DIR/src" >/dev/null 2>&1; then
+        env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
+            DECKOPS_LD_PRELOAD="$LD_PRELOAD" DECKOPS_LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+            "$DIR/.venv/bin/python3" "$DIR/src/fovwatch.py" "$WATCH_EXE" cg_fov=90 -- "$@"
+        status=$?
+        if [ "$status" -ne 126 ] && [ "$status" -ne 127 ]; then
+            exit "$status"  # the helper ran the game; do not launch it twice
+        fi
+    fi
 fi
 exec "$@"

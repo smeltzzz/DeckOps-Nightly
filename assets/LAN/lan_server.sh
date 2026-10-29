@@ -22,7 +22,35 @@ MODE=$1 GAME=$2 NAME=$4; shift 4
 PORT=$1 SGAME=$2; [ $# -ge 2 ] && shift 2
 SV="$HOME/.local/share/deckops/lan/$MODE/server"
 CL="$HOME/.local/share/deckops/lan/$MODE/client"
-UNIT="deckops-lan-$MODE"
+# A shared server stays up until the last game using it exits. All session
+# registrations and shutdown decisions are serialized with the startup lock.
+OWN_UNIT=
+SESSION_FILE=
+STATE_DIR="$HOME/.local/share/deckops/lan/$MODE"
+SERVER_STATE="$STATE_DIR/server.unit"
+SESSIONS="$STATE_DIR/.sessions"
+LOCK_FILE="$STATE_DIR/server.lock"
+cleanup_server() {
+  if [ -z "$SESSION_FILE" ]; then
+    [ -z "$OWN_UNIT" ] || systemctl --user stop "$OWN_UNIT" 2>/dev/null
+    return
+  fi
+  exec 9>"$LOCK_FILE"
+  flock 9 || return
+  rm -f "$SESSION_FILE"
+  for member in "$SESSIONS"/*; do
+    [ -f "$member" ] || continue
+    pid=${member##*/}; pid=${pid%%-*}
+    kill -0 "$pid" 2>/dev/null || rm -f "$member"
+  done
+  if ! compgen -G "$SESSIONS/*" >/dev/null && [ -f "$SERVER_STATE" ]; then
+    unit=$(cat "$SERVER_STATE")
+    [ -z "$unit" ] || systemctl --user stop "$unit" 2>/dev/null
+    rm -f "$SERVER_STATE"
+  fi
+  flock -u 9
+  exec 9>&-
+}
 
 mkdir -p "$PROJECT_ROOT/logs"
 exec >"$PROJECT_ROOT/logs/lan_$MODE.log" 2>&1
@@ -37,8 +65,8 @@ echo "runtime: ${SLR:-none, running on the host}  mounts: ${MOUNTS:-none}"
 [ -d "$CL" ] && { [ -z "$PORT" ] || [ -d "$SV" ]; } || { echo "Offline folders missing, add Offline Mode again in DeckOps"; exit 1; }
 
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$SR"
-# Steam's Stop button sends TERM: take the server down with the game
-trap 'systemctl --user stop "$UNIT" 2>/dev/null' EXIT
+# Steam's Stop button sends TERM: release this session's server reference.
+trap cleanup_server EXIT
 
 # ---
 # Server
@@ -78,9 +106,13 @@ if [ -n "$PORT" ]; then
     done
     set -- "${ARGS[@]}"
   fi
+  # Serialize the port check and startup. Without this lock, two launchers
+  # could both observe a closed port and start competing dedicated servers.
+  mkdir -p "$STATE_DIR" "$SESSIONS"
+  exec 9>"$LOCK_FILE"
+  flock 9 || { echo "could not lock server startup"; exit 1; }
   if ! ss -uln | grep -q ":$PORT "; then
-    # A unit left over from an interrupted run blocks systemd-run from reusing the name
-    systemctl --user stop "$UNIT" 2>/dev/null; systemctl --user reset-failed "$UNIT" 2>/dev/null
+    UNIT="deckops-lan-$MODE-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     # systemd-run with the display passed in: a headless server stalls under Proton, and in Game Mode
     # this keeps its window out of the Steam launch so gamescope never focuses it.
     # Game Mode's systemd user environment has no DISPLAY, so it is passed in.
@@ -91,9 +123,18 @@ if [ -n "$PORT" ]; then
       --working-directory="$SV" \
       "$PR" run "$SV/bin/plutonium-bootstrapper-win32.exe" "$MODE" "$SGAME" -lan -dedicated +set net_port "$PORT" "$@" \
       || { echo "server failed to start"; exit 1; }
+    OWN_UNIT=$UNIT
     for i in $(seq 180); do ss -uln | grep -q ":$PORT " && break; sleep 1; done
+    ss -uln | grep -q ":$PORT " || { echo "server did not listen on port $PORT"; exit 1; }
+    printf '%s\n' "$OWN_UNIT" > "$SERVER_STATE"
     echo "$(date +%T) server listening after ${i}s"
   fi
+  if [ -f "$SERVER_STATE" ]; then
+    SESSION_FILE="$SESSIONS/$$-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    : > "$SESSION_FILE"
+  fi
+  flock -u 9
+  exec 9>&-
   # The port opens before the map has loaded, and WaW drops a +connect sent then (PC, 2026-10-09).
   # A server only answers getstatus once its map is up. MW3's never answers getstatus (a fixed 60 s wait), only getinfo.
   Q=getstatus; [ "$MODE" = iw5mp ] && Q=getinfo

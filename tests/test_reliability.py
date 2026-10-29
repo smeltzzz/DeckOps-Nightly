@@ -1,9 +1,12 @@
 """Regressions for update and repair paths that must never report false success."""
 
 import hashlib
+import io
 import json
 import os
+import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 import sys
 import tempfile
@@ -332,15 +335,149 @@ class GeProtonFallbackTests(unittest.TestCase):
 
     def test_falls_back_to_pinned_then_newest_complete_install(self):
         import ge_proton
-        with tempfile.TemporaryDirectory() as tmp, patch.object(ge_proton, "COMPAT_DIR", tmp):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ge_proton, "COMPAT_DIR", tmp), \
+             patch("wrapper._configured_steam_root", return_value=None):
             self.assertIsNone(ge_proton.resolve_ge_version())
             self._tool(tmp, "GE-Proton10-9")
             self._tool(tmp, "GE-Proton10-30")
             Path(tmp, "GE-Proton10-99").mkdir()          # half-extracted: ignored
+            incomplete = Path(tmp, "GE-Proton10-98")
+            incomplete.mkdir()
+            (incomplete / "proton").write_text("")       # script alone is not a usable tool
             self.assertEqual(ge_proton.resolve_ge_version(), "GE-Proton10-30")
             with patch("config.get_ge_proton_version", return_value="GE-Proton10-9"):
                 self.assertEqual(ge_proton.resolve_ge_version(), "GE-Proton10-9")
             self.assertEqual(ge_proton.resolve_ge_version("GE-Proton11-1"), "GE-Proton11-1")
+
+
+class PrelaunchHelperFallbackTests(unittest.TestCase):
+    def test_helper_startup_failure_runs_game_but_other_failures_do_not_duplicate_it(self):
+        if not shutil.which("bash"):
+            self.skipTest("bash unavailable")
+        try:
+            if subprocess.run(["bash", "--version"], capture_output=True).returncode:
+                self.skipTest("bash unavailable on this host")
+        except OSError:
+            self.skipTest("bash unavailable on this host")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".venv" / "bin").mkdir(parents=True)
+            (root / "src").mkdir()
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "prelaunch.sh", root / "prelaunch.sh")
+            (root / "src" / "fovwatch.py").write_text("placeholder")
+            python = root / ".venv" / "bin" / "python3"
+            game = root / "game.sh"
+            game.write_text('#!/bin/sh\necho launched >> "$1"\n')
+            game.chmod(0o755)
+            marker = root / "launched"
+            for status in (127, 1):
+                python.write_text(f"#!/bin/sh\nexit {status}\n")
+                python.chmod(0o755)
+                result = subprocess.run(["bash", str(root / "prelaunch.sh"), "iw4sp",
+                                         str(game), str(marker)], capture_output=True)
+                self.assertEqual(result.returncode, 0 if status == 127 else 1)
+                self.assertEqual(marker.read_text().count("launched") if marker.exists() else 0,
+                                 1 if status == 127 else 0)
+                marker.unlink(missing_ok=True)
+
+
+class SteamRootGeProtonTests(unittest.TestCase):
+    """A separate Steam install must never use the default install's GE tool."""
+
+    def setUp(self):
+        import ge_proton
+        import wrapper
+        self.ge, self.wrapper = ge_proton, wrapper
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.default = Path(self.tmp.name, "default")
+        self.selected = Path(self.tmp.name, "selected")
+        self.override = Path(self.tmp.name, "override")
+        for root in (self.default, self.selected, self.override):
+            (root / "config").mkdir(parents=True)
+            (root / "config" / "config.vdf").write_text(
+                '"InstallConfigStore" { "Software" { "Valve" { "Steam" { } } } }')
+        for p in (patch("config.load", return_value={"steam_root": str(self.selected)}),
+                  patch.object(wrapper, "STEAM_CONFIG", str(self.default / "config" / "config.vdf")),
+                  patch.object(wrapper, "LEDGER_PATH", str(Path(self.tmp.name, "ledger.json")))):
+            p.start(); self.addCleanup(p.stop)
+
+    def tool(self, root, name):
+        tool = root / "compatibilitytools.d" / name
+        (tool / "files" / "share" / "default_pfx").mkdir(parents=True)
+        (tool / "proton").write_text("")
+        (tool / "compatibilitytool.vdf").write_text("")
+        return tool
+
+    def test_configured_root_and_explicit_override_for_lookup_and_mapping(self):
+        self.tool(self.default, "GE-Proton10-99")
+        selected = self.tool(self.selected, "GE-Proton10-2")
+        override = self.tool(self.override, "GE-Proton10-3")
+        with patch("config.get_ge_proton_version", return_value="GE-Proton10-99"):
+            self.assertEqual(self.ge.resolve_ge_version(), "GE-Proton10-2")
+            self.assertEqual(self.wrapper.get_proton_path(), str(selected / "proton"))
+            self.assertEqual(self.wrapper.get_proton_path(str(self.override)), str(override / "proton"))
+            self.assertEqual(self.ge.resolve_ge_version(steam_root=str(self.override)), "GE-Proton10-3")
+            self.assertEqual(self.ge._find_default_pfx("GE-Proton10-99"),
+                             str(selected / "files" / "share" / "default_pfx"))
+        self.assertTrue(self.wrapper.set_compat_tool([10190], "GE-Proton10-2"))
+        self.assertTrue(self.ge.set_compat_tool([10090], "GE-Proton10-3", str(self.override)))
+        self.assertNotIn("CompatToolMapping", (self.default / "config" / "config.vdf").read_text())
+        self.assertIn('"10190"', (self.selected / "config" / "config.vdf").read_text())
+        self.assertIn('"10090"', (self.override / "config" / "config.vdf").read_text())
+        self.wrapper.clear_compat_tool([10190])
+        self.wrapper.clear_compat_tool([10090], steam_root=str(self.override))
+        self.assertNotIn('"10190"', (self.selected / "config" / "config.vdf").read_text())
+        self.assertNotIn('"10090"', (self.override / "config" / "config.vdf").read_text())
+
+    def test_explicit_root_without_ge_uses_its_vanilla_proton_not_other_roots_ge(self):
+        self.tool(self.selected, "GE-Proton10-99")
+        vanilla = self.override / "steamapps" / "common" / "Proton 10" / "proton"
+        vanilla.parent.mkdir(parents=True)
+        vanilla.write_text("")
+        with patch("config.get_ge_proton_version", return_value="GE-Proton10-99"):
+            self.assertIsNone(self.ge.resolve_ge_version(steam_root=str(self.override)))
+            self.assertEqual(self.wrapper.get_proton_path(str(self.override)), str(vanilla))
+
+    def test_install_extracts_into_configured_or_explicit_root(self):
+        name = "GE-Proton11-7-x86_64"
+        tarpath = Path(self.tmp.name, "ge.tar.gz")
+        with tarfile.open(tarpath, "w:gz") as tar:
+            for entry, contents in (("proton", b"#!/bin/sh\n"),
+                                    ("compatibilitytool.vdf", b"tool"),
+                                    ("files/share/default_pfx/drive_c/placeholder", b"pfx")):
+                data = io.BytesIO(contents)
+                info = tarfile.TarInfo(f"{name}/{entry}")
+                info.size = len(contents)
+                tar.addfile(info, data)
+        with patch.object(self.ge, "_get_latest_release", return_value=(name, "fake", None, name)), \
+             patch.object(self.ge, "download", side_effect=lambda _url, path, **_kw: shutil.copyfile(tarpath, path)):
+            self.assertEqual(self.ge.install_ge_proton(), name)
+            self.assertEqual(self.ge.install_ge_proton(steam_root=str(self.override)), name)
+        self.assertTrue((self.selected / "compatibilitytools.d" / name / "proton").is_file())
+        self.assertTrue((self.override / "compatibilitytools.d" / name / "proton").is_file())
+        self.assertFalse((self.default / "compatibilitytools.d" / name).exists())
+
+    def test_detected_root_when_config_has_none(self):
+        self.tool(self.selected, "GE-Proton10-2")
+        with patch("config.load", return_value={"steam_root": None}), \
+             patch("detect_games.find_steam_root", return_value=str(self.selected)):
+            self.assertEqual(self.ge.resolve_ge_version(), "GE-Proton10-2")
+            self.assertEqual(self.wrapper.get_proton_path(),
+                             str(self.selected / "compatibilitytools.d" / "GE-Proton10-2" / "proton"))
+            self.assertTrue(self.wrapper.set_compat_tool([10190], "GE-Proton10-2"))
+        self.assertIn('"10190"', (self.selected / "config" / "config.vdf").read_text())
+        self.assertNotIn("CompatToolMapping", (self.default / "config" / "config.vdf").read_text())
+
+    def test_prefix_deps_use_explicit_root_not_configured_root(self):
+        self.tool(self.selected, "GE-Proton10-2")
+        override = self.tool(self.override, "GE-Proton10-2")
+        default_pfx = override / "files" / "share" / "default_pfx"
+        (default_pfx / "from-override").write_text("correct install")
+        dest = Path(self.tmp.name, "game-prefix")
+        self.assertTrue(self.ge.ensure_prefix_deps("GE-Proton10-2", str(dest),
+                                                    steam_root=str(self.override)))
+        self.assertEqual((dest / "pfx" / "from-override").read_text(), "correct install")
 
 
 def _dll(path, builtin=True, body=b""):
@@ -358,8 +495,10 @@ class SharedDllRefreshTests(unittest.TestCase):
         self.ge = ge_proton
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.compat = Path(self.tmp.name, "compatibilitytools.d")
+        self.compat = Path(self.tmp.name, "Steam", "compatibilitytools.d")
         self.shared = Path(self.tmp.name, "shared_dlls")
+        p = patch("wrapper._configured_steam_root", return_value=None)
+        p.start(); self.addCleanup(p.stop)
         for target, value in (("COMPAT_DIR", str(self.compat)), ("SHARED_DLL_DIR", str(self.shared))):
             p = patch.object(ge_proton, target, value)
             p.start(); self.addCleanup(p.stop)
@@ -440,8 +579,8 @@ class GeProtonCleanupTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name, "home")
         self.home.mkdir()
-        self.compat = Path(self.tmp.name, "compatibilitytools.d")
         self.root = Path(self.tmp.name, "Steam")
+        self.compat = self.root / "compatibilitytools.d"
         (self.root / "config").mkdir(parents=True)
         self.tracked = ["GE-Proton10-1", "GE-Proton10-2", "GE-Proton10-3", "GE-Proton10-4", "GE-Proton10-9"]
         self.saved = None
@@ -482,6 +621,13 @@ class GeProtonCleanupTests(unittest.TestCase):
         self.mapping({"10190": "GE-Proton10-4"})
         self.assertEqual(sorted(self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root))),
                          ["GE-Proton10-1", "GE-Proton10-2"])
+
+    def test_cleanup_does_not_remove_other_steam_roots_versions(self):
+        other = Path(self.tmp.name, "other-Steam") / "compatibilitytools.d"
+        (other / "GE-Proton10-1").mkdir(parents=True)
+        self.mapping({"10190": "GE-Proton10-4"})
+        self.assertIn("GE-Proton10-1", self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root)))
+        self.assertTrue((other / "GE-Proton10-1").is_dir())
 
     def test_versions_still_used_elsewhere_are_kept(self):
         self.mapping({})
@@ -939,7 +1085,7 @@ class SetupCheckTests(unittest.TestCase):
             p = patch(target, return_value=value)
             p.start(); self.addCleanup(p.stop)
         self.write(tool="GE-Proton10-1",
-                   option='DECKOPS_MENU=\\"x\\" bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix())
+                   option='DECKOPS_MENU=\\"iw4mp.exe=iw4x-launcher.exe\\" bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix())
 
     def prefix(self, appid):
         win = self.root / "steamapps" / "compatdata" / appid / "pfx" / "drive_c" / "windows"
@@ -968,13 +1114,26 @@ class SetupCheckTests(unittest.TestCase):
         self.assertTrue(any("launch option is missing" in p for p in r["problems"]), r)
         self.assertTrue(r["fixable"])
 
+    def test_missing_app_block_is_a_missing_launch_option(self):
+        self.write(tool="GE-Proton10-1", option="")
+        local = self.root / "userdata" / "1" / "config" / "localconfig.vdf"
+        local.write_text(self.LOCAL % "")
+        r = self.check()
+        self.assertTrue(any("launch option is missing" in p for p in r["problems"]), r)
+
+    def test_unrelated_launch_option_is_not_healthy(self):
+        self.write(tool="GE-Proton10-1", option="echo %command%")
+        r = self.check()
+        self.assertTrue(any("does not run the DeckOps client" in p for p in r["problems"]), r)
+        self.assertTrue(r["fixable"])
+
     def test_launch_option_calling_a_missing_deckops_file(self):
         (self.inst / "prelaunch.sh").unlink()
         r = self.check()
         self.assertTrue(any("no longer exists" in p and "prelaunch.sh" in p for p in r["problems"]), r)
 
     def test_ge_proton_mapping(self):
-        opt = 'bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix()
+        opt = 'DECKOPS_MENU=\\"iw4mp.exe=iw4x-launcher.exe\\" bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix()
         self.write(tool="GE-Proton9-99", option=opt)
         self.assertTrue(any("not installed" in p for p in self.check()["problems"]))
         self.write(tool=None, option=opt)
@@ -1003,7 +1162,7 @@ class SetupCheckTests(unittest.TestCase):
         self.assertTrue(any("launch option is missing" in p for p in self.check()["problems"]))
 
     def test_other_ge_proton_than_deckops_set_up(self):
-        opt = 'bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix()
+        opt = 'DECKOPS_MENU=\\"iw4mp.exe=iw4x-launcher.exe\\" bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix()
         (self.root / "compatibilitytools.d" / "GE-Proton10-2").mkdir()
         with patch("config.get_ge_proton_version", return_value="GE-Proton10-2"):
             r = self.check()
@@ -1312,7 +1471,7 @@ class LaunchOptionRestoreTests(unittest.TestCase):
              patch("wrapper.find_compatdata", return_value=self.root), \
              patch("wrapper.snapshot_launch_options",
                    side_effect=snapshot if snapshot is not None else self.wrapper.snapshot_launch_options), \
-             patch("wrapper.set_compat_tool", side_effect=lambda appids, version: order.append(
+             patch("wrapper.set_compat_tool", side_effect=lambda appids, version, **kwargs: order.append(
                  ("compat", set(appids))) or True), \
              patch("wrapper.set_steam_input_enabled"), patch.object(ui_manage.cfg, "mark_game_setup"), \
              patch("ge_proton.install_ge_proton", side_effect=OSError("offline")), \

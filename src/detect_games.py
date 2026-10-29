@@ -6,6 +6,8 @@ import glob
 STEAM_PATHS = [
     os.path.expanduser("~/.local/share/Steam"),
     os.path.expanduser("~/.steam/steam"),
+    os.path.expanduser("~/.steam/root"),
+    os.path.expanduser("~/.steam/debian-installation"),
 ]
 
 # Known SD card mount point patterns on Steam Deck
@@ -135,7 +137,7 @@ def get_exe_size(exe_path):
 
 def find_steam_root():
     for path in STEAM_PATHS:
-        if os.path.exists(path):
+        if os.path.isdir(os.path.join(path, "steamapps")):
             return path
     return None
 
@@ -393,6 +395,19 @@ KEY_TO_SENTINEL = {
     "t6sp":   "bo2",  "t6mp":   "bo2",  "t6zm": "bo2",
 }
 
+# Installers sometimes replace a mode's stock exe with a separate client exe
+# or wrapper. Those alternatives still prove the specific mode is launchable.
+# An MP map sentinel alone only proves the title, not SP/ZM availability.
+_OWN_MODE_ALTERNATES = {
+    "cod4sp": ("iw3sp_mod.exe",), "cod4mp": ("cod4r.exe", "cod4x.exe"),
+    "iw4sp": ("iw-pad.exe",), "iw4mp": ("iw4x-launcher.exe",),
+    "iw5sp": ("iw-pad.exe",), "iw5mp": ("iw5plutmp.exe",),
+    "t4sp": ("t4plutsp.exe",), "t4mp": ("t4plutmp.exe",),
+    "t5sp": ("t5plutsp.exe",), "t5mp": ("t5plutmp.exe",),
+    "t6sp": ("T6SP-Mod.exe",), "t6mp": ("t6plutmp.exe",),
+    "t6zm": ("t6plutzm.exe",),
+}
+
 
 def _check_sentinel(candidate_dir, sentinel_group):
     """
@@ -607,6 +622,10 @@ def find_own_installed(extra_paths=None, on_progress=None):
                     continue
 
                 exe_path = os.path.join(game_root, meta["exe"])
+                if not any(os.path.isfile(os.path.join(game_root, name))
+                           for name in (meta["exe"], *_OWN_MODE_ALTERNATES.get(key, ()))):
+                    prog(f"  {folder_name}: {key} executable not found, skipping that mode")
+                    continue
                 found[key] = {
                     **meta,
                     "install_dir": game_root,
@@ -624,11 +643,12 @@ def find_own_installed(extra_paths=None, on_progress=None):
     return found
 
 
-def find_all_games(steam_root=None):
-    """Detect all installed games from both Steam and non-Steam sources.
+def find_all_games(steam_root=None, preferred_sources=None):
+    """Detect both sources, preferring Steam unless a configured game uses an own copy.
 
-    Steam games take priority when a key exists in both.
-    Each entry is tagged with source="steam" or source="own".
+    ``preferred_sources`` maps keys to their configured source (or setup-game
+    entries). This keeps updates and Offline Mode pointed at the installed copy
+    that was actually set up when both copies are present.
     """
     if steam_root is None:
         steam_root = find_steam_root()
@@ -640,6 +660,11 @@ def find_all_games(steam_root=None):
         merged[k] = v
     for k, v in steam.items():
         merged[k] = {**v, "source": "steam"}
+    for k, source in (preferred_sources or {}).items():
+        if isinstance(source, dict):
+            source = source.get("source", "steam")
+        if source == "own" and k in own:
+            merged[k] = own[k]
     return merged
 
 

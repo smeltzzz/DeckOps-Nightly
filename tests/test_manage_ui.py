@@ -220,7 +220,7 @@ class ManagementUITests(unittest.TestCase):
         self.assertLessEqual(self.screen._scroll.widget().width(),
                              self.screen._scroll.viewport().width())
 
-    def test_library_toolbar_has_no_mods_but_game_options_keep_them(self):
+    def test_library_toolbar_opens_manifest_mods_and_game_options_keep_folders(self):
         self.ready.add("cod4mp")
         gd = ui_manage.ALL_GAMES[0]
         self.screen.set_installed({"cod4mp": {"source": "steam", "install_dir": "/game"}})
@@ -229,8 +229,13 @@ class ManagementUITests(unittest.TestCase):
         toolbar = self.screen.layout().itemAt(1).widget()
         buttons = toolbar.findChildren(QPushButton)
         self.assertEqual([b.text() for b in buttons],
-                         ["Add Games", "Update Games", "DeckOps Update", "Guide", "Settings"])
+                         ["Add Games", "Update Games", "Mods", "DeckOps Update", "Guide", "Settings"])
         self.assertEqual((self.stack.width(), self.stack.height()), (800, 500))
+        mods = next(b for b in buttons if b.text() == "Mods")
+        self.assertEqual(mods.accessibleName(), "Manage manifest mods")
+        mods.click()
+        self.assertEqual(self.stack.currentWidget().screen_name, "ManifestModsScreen")
+        self.stack.setCurrentWidget(self.screen)
         for button in buttons:
             with self.subTest(button=button.text()):
                 left = button.mapTo(self.screen, button.rect().topLeft()).x()

@@ -46,6 +46,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from datetime import datetime
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
@@ -423,16 +424,19 @@ def is_installed(root: str, mod_id: str) -> bool:
     return bool(get_receipt(root, mod_id).get("complete"))
 
 
-def _write_receipt(root: str, m: dict, opt: dict, cdn: str, overwritten: list, failed: list):
+def _write_receipt(root: str, m: dict, opt: dict, cdn: str, overwritten: list, failed: list,
+                   files: dict = None):
     rp = _receipt_path(root, m["id"])
     os.makedirs(os.path.dirname(rp), exist_ok=True)
     tmp = rp + ".tmp"
+    if files is None:
+        files = {x["path"]: x["sha256"] or f"size:{x['size']}" for x in opt["files"]}
     with open(tmp, "w") as f:
         json.dump({"id": m["id"], "name": m["name"], "version": m["version"],
-                   "option": opt["id"], "option_hash": option_hash(opt),
+                   "option": opt["id"], "option_hash": option_hash(opt) if not failed else "",
                    "cdn_host": urlsplit(cdn).netloc,
                    "installed_at": datetime.now().isoformat(),
-                   "files": {x["path"]: x["sha256"] or f"size:{x['size']}" for x in opt["files"]},
+                   "files": files,
                    "overwritten": sorted(overwritten),
                    "complete": not failed, "failed": sorted(failed)}, f, indent=2)
     os.replace(tmp, rp)
@@ -601,7 +605,7 @@ def install_manifest(m: dict, option_id: str, cdn_text: str, games_root: str,
     save_cdn(base)
     old = get_receipt(dest_root, m["id"])
     ours = old.get("files") or {}
-    overwritten = [p for p in old.get("overwritten", []) if p in {f["path"] for f in opt["files"]}]
+    overwritten = set(old.get("overwritten", []))
     total, errors = len(plan), []
     # Bar is weighted by bytes so one big file does not crawl at the end.
     size_all = max(total_size(opt), 1)
@@ -609,67 +613,104 @@ def install_manifest(m: dict, option_id: str, cdn_text: str, games_root: str,
     pct = lambda b: 2 + int(b * 96 / size_all)
     prog(2, f"Installing {opt['name']} ({total} files)...")
 
-    for i, (f, dest, url) in enumerate(plan):
-        base_b = done_b; done_b += f["size"]
-        backup = None
-        if os.path.isfile(dest):
+    # Fetch and verify *every* change before touching a working installation or
+    # its backups. net.download also writes .part files, so its destination must
+    # never be the live game file. A failed update leaves the old receipt intact.
+    os.makedirs(os.path.join(dest_root, RECEIPT_DIR), exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".staging-", dir=os.path.join(dest_root, RECEIPT_DIR)) as stage_dir:
+        staged = {}
+        matched_foreign = set()
+        for i, (f, dest, url) in enumerate(plan):
+            base_b = done_b; done_b += f["size"]
             prog(pct(base_b), f"Verifying {i + 1}/{total}: {f['path']}")
-            foreign = f["path"] not in ours and f["path"] not in overwritten
             if _matches(dest, f):
-                # Already there before us: record it as not ours, or a later
-                # option switch / update would delete the user's file.
-                if foreign:
-                    overwritten.append(f["path"])
+                if f["path"] not in ours and f["path"] not in overwritten:
+                    matched_foreign.add(f["path"])
                 log(f"  skip {f['path']} (up to date)")
                 continue
-            if foreign:
-                # Move the user's file aside before replacing it, so it can be
-                # put back (switching away from this file, or a failed download)
-                backup = _backup_path(dest_root, m["id"], f["path"])
-                try:
+            staged_path = os.path.join(stage_dir, str(i))
+            log(f"  get  {f['path']}")
+            try:
+                _download(url, staged_path, timeout=300, headers=MOD_HEADERS,
+                          label=f"{i + 1}/{total}: {f['path']}",
+                          on_progress=lambda p, msg, _b=base_b, _s=f["size"]: prog(pct(_b + _s * p // 100), msg))
+            except DownloadError as ex:
+                log(f"✗ download failed: {f['path']} ({ex})")
+                errors.append(f["path"])
+                continue
+            except Exception as ex:
+                _log.warning("manifest %s: download failed for %s", m["id"], f["path"], exc_info=True)
+                log(f"✗ download failed: {f['path']} ({ex})")
+                errors.append(f["path"])
+                continue
+            if not _matches(staged_path, f):
+                _log.warning("manifest %s: checksum mismatch for %s", m["id"], f["path"])
+                log(f"✗ checksum mismatch: {f['path']}")
+                errors.append(f["path"])
+                continue
+            staged[f["path"]] = staged_path
+
+        if errors:
+            # Nothing was committed, including files that downloaded correctly.
+            # In particular, never replace a valid old receipt with the hashes
+            # of files we did not actually install.
+            prog(100, f"Update failed: {len(errors)} file(s); existing files kept")
+            _log.warning("manifest %s install errors: %s", m["id"], errors)
+            return errors
+
+        overwritten.update(matched_foreign)
+        for f, dest, _url in plan:
+            p = f["path"]
+            if p not in staged:
+                continue
+            # A matching user file can be recorded as overwritten without a
+            # backup yet. If a later version changes it, save that original now.
+            was_overwritten = p in overwritten
+            backup_path = _backup_path(dest_root, m["id"], p)
+            needs_backup = os.path.isfile(dest) and (p not in ours and not was_overwritten
+                                                      or was_overwritten and not os.path.lexists(backup_path))
+            backup = backup_path if needs_backup else None
+            moved = False
+            try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if backup:
                     if os.path.lexists(backup):
                         raise OSError(f"a backup already exists at {backup}")
                     _move(dest, backup)
-                except OSError as ex:
-                    _log.warning("manifest %s: could not back up %s: %s", m["id"], f["path"], ex)
-                    log(f"✗ not replaced, could not back up the existing file: {f['path']} ({ex})")
-                    errors.append(f["path"]); continue
-                overwritten.append(f["path"])
-                log(f"  backed up existing {f['path']}")
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        log(f"  get  {f['path']}")
-        failed = False
-        try:
-            _download(url, dest, timeout=300, headers=MOD_HEADERS, label=f"{i + 1}/{total}: {f['path']}",
-                      on_progress=lambda p, msg, _b=base_b, _s=f["size"]: prog(pct(_b + _s * p // 100), msg))
-        except DownloadError as ex:
-            log(f"✗ download failed: {f['path']} ({ex})")
-            failed = True
-        except Exception as ex:
-            _log.warning("manifest %s: download failed for %s", m["id"], f["path"], exc_info=True)
-            log(f"✗ download failed: {f['path']} ({ex})")
-            failed = True
-        if not failed and not _matches(dest, f):
-            _log.warning("manifest %s: checksum mismatch for %s", m["id"], f["path"])
-            log(f"✗ checksum mismatch: {f['path']}")
-            _remove(dest, dest_root)
-            failed = True
-        if failed:
-            errors.append(f["path"])
-            if backup:
-                try:
-                    _restore_backup(dest_root, m["id"], f["path"], dest)
-                    log(f"  restored existing {f['path']}")
-                except OSError as ex:
-                    _log.warning("manifest %s: could not restore %s from %s: %s",
-                                 m["id"], f["path"], backup, ex)
+                    moved = True
+                    overwritten.add(p)
+                    log(f"  backed up existing {p}")
+                os.replace(staged[p], dest)
+            except OSError as ex:
+                _log.warning("manifest %s: could not install %s: %s", m["id"], p, ex)
+                log(f"✗ not replaced: {p} ({ex})")
+                errors.append(p)
+                if moved and os.path.isfile(backup):
+                    try:
+                        _restore_backup(dest_root, m["id"], p, dest)
+                        if not was_overwritten:
+                            overwritten.discard(p)
+                    except OSError:
+                        _log.warning("manifest %s: could not restore %s", m["id"], p, exc_info=True)
 
-    # Switching option or version: drop our files the new option does not list.
-    _remove_ours(dest_root, old, keep={f["path"] for f in opt["files"]})
+    if errors:
+        # A filesystem error during commit may leave a mixture of old and new
+        # files. Record only tags which still match files on disk, and keep old
+        # option-only files/backups until the user can retry or uninstall.
+        tags = dict(ours)
+        tags.update({f["path"]: f["sha256"] or f"size:{f['size']}"
+                     for f in opt["files"] if f["path"] not in errors})
+        files = {p: tag for p, tag in tags.items()
+                 if os.path.isfile(_safe_dest(dest_root, p)) and _receipt_ok(_safe_dest(dest_root, p), tag)}
+    else:
+        # Switching option or version: drop our files the new option does not list.
+        _remove_ours(dest_root, old, keep={f["path"] for f in opt["files"]})
+        files = None
+        overwritten.intersection_update(f["path"] for f in opt["files"])
 
-    _write_receipt(dest_root, m, opt, cdn, overwritten, errors)
+    _write_receipt(dest_root, m, opt, cdn, overwritten, errors, files=files)
     _remember(m["id"], option=opt["id"], games_root=games_root, complete=not errors,
-              option_hash=option_hash(opt), installed_at=datetime.now().isoformat())
+              option_hash=option_hash(opt) if not errors else "", installed_at=datetime.now().isoformat())
 
     if errors:
         prog(100, f"Installed with {len(errors)} error(s)")

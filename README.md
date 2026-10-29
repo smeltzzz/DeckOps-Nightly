@@ -119,7 +119,7 @@ Supported game modes receive `gpad_stick_deadzone_min "0.05"` and `gpad_stick_de
 | FPS and FOV | **Apply 90 FPS / 90 FOV** writes both into the game configs of MW1 (campaign and multiplayer), MW2 and MW3 multiplayer, WaW, BO1, and BO2 (every mode); nothing else in those files changes. The MW2 and MW3 campaigns (64-bit Steam builds) ignore their config files, so that button does nothing for them. Their FOV is set to 90 automatically every time you start the game (`fovwatch.py`). Their FPS is set by the **MW2/MW3 FPS Limit** button, which limits the frame rate to 90 with DXVK in the launch option (it closes Steam when you change it). |
 | Shader Cache (LCD only) | Clears the shader cache of every game you have set up. |
 | Updates & Logs | **Check for Updates** looks for a new DeckOps version. **Copy Log** and **View Log** show what DeckOps has done, for bug reports. |
-| Full Uninstall | Removes DeckOps from your games and Steam while keeping save backups and unrelated Plutonium data. If Stable is also installed, shared game files and Steam settings stay in place. |
+| Full Uninstall | Removes DeckOps from your games and Steam while keeping save backups and unrelated Plutonium data. If Stable is also installed, shared game files and Steam settings stay in place. Set up the same games and Offline Mode in Stable first; uninstall stops rather than leave games pointing at missing configuration. Unverified mods and player data are kept. |
 | Reset DeckOps Config | Clears your setup and runs setup again. |
 | Links | Support on Discord, and the Stable and Nightly project pages. |
 

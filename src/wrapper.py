@@ -378,15 +378,30 @@ def _dlo_entry(appid, hash_key, index):
     )
 
 
-def get_proton_path(steam_root):
+def _configured_steam_root():
+    """Use the setup root, or discover Steam for callers without an explicit root."""
+    try:
+        import config as _cfg
+        root = _cfg.load().get("steam_root")
+        if root:
+            return os.path.expanduser(root)
+    except (OSError, ValueError, TypeError, AttributeError):
+        _log.debug("Steam root not read from config", exc_info=True)
+    from detect_games import find_steam_root
+    return find_steam_root()
+
+
+def _steam_root(steam_root=None):
+    return os.path.expanduser(steam_root) if steam_root else (
+        _configured_steam_root() or os.path.dirname(os.path.dirname(STEAM_CONFIG)))
+
+
+def get_proton_path(steam_root=None):
     """
     Find the best available Proton binary for running Windows executables.
 
-    Preference order:
-      1. Config-pinned GE-Proton version (from config.json ge_proton_version)
-      2. GE-Proton in ~/.local/share/Steam/compatibilitytools.d/
-      3. GE-Proton in steam_root/compatibilitytools.d/
-      4. Newest vanilla Proton in steam_root/steamapps/common/
+    Search the selected Steam root's compatibilitytools.d, then its vanilla
+    Proton installs. Never select GE-Proton from another Steam installation.
 
     The config pin ensures DeckOps uses the exact GE-Proton version it
     installed, even if newer (potentially unstable) versions are present
@@ -395,11 +410,8 @@ def get_proton_path(steam_root):
     Uses numeric version sorting so GE-Proton9-28 > GE-Proton9-5,
     and Proton 10 > Proton 9.
     """
-    ge_search_dirs = [
-        os.path.expanduser("~/.local/share/Steam/compatibilitytools.d"),
-    ]
-    if steam_root:
-        ge_search_dirs.append(os.path.join(steam_root, "compatibilitytools.d"))
+    steam_root = _steam_root(steam_root)
+    ge_dir = os.path.join(steam_root, "compatibilitytools.d")
 
     # Try config-pinned version first
     try:
@@ -409,20 +421,16 @@ def get_proton_path(steam_root):
         pinned = None
 
     if pinned:
-        for ge_dir in ge_search_dirs:
-            candidate = os.path.join(ge_dir, pinned, "proton")
-            if os.path.exists(candidate):
-                return candidate
+        candidate = os.path.join(ge_dir, pinned, "proton")
+        if os.path.isfile(candidate):
+            return candidate
 
-    # Pinned version not found — fall back to newest GE-Proton on disk
-    for ge_dir in ge_search_dirs:
-        name = newest_proton_dir(ge_dir, "GE-Proton")
-        if name:
-            return os.path.join(ge_dir, name, "proton")
+    # Pinned version not found — fall back to newest GE-Proton on this root
+    name = newest_proton_dir(ge_dir, "GE-Proton")
+    if name:
+        return os.path.join(ge_dir, name, "proton")
 
     # Fall back to vanilla Proton
-    if not steam_root:
-        return None
     common = os.path.join(steam_root, "steamapps", "common")
     name = newest_proton_dir(common, "Proton")
     return os.path.join(common, name, "proton") if name else None
@@ -770,7 +778,7 @@ def set_steam_input_enabled(steam_root, appids=None):
 STEAM_CONFIG = os.path.expanduser("~/.local/share/Steam/config/config.vdf")
 
 
-def set_compat_tool(appids, version):
+def set_compat_tool(appids, version, steam_root=None):
     """
     Write CompatToolMapping entries in Steam's config.vdf for each appid.
     Single source of truth — called from both ge_proton.py and shortcut.py
@@ -784,11 +792,13 @@ def set_compat_tool(appids, version):
 
     appids  — list of int or str appids, e.g. ["10190", "42690"]
     version — GE-Proton version string, e.g. "GE-Proton10-32"
+    steam_root — optional override of the configured/detected Steam root
     """
-    if not os.path.exists(STEAM_CONFIG):
-        raise FileNotFoundError(f"Steam config not found: {STEAM_CONFIG}")
+    config_path = os.path.join(_steam_root(steam_root), "config", "config.vdf")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Steam config not found: {config_path}")
 
-    with open(STEAM_CONFIG, "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         data = f.read()
 
     def _entry(appid_str):
@@ -835,14 +845,14 @@ def set_compat_tool(appids, version):
                     count=1,
                 )
 
-    if not _write_and_validate_vdf(STEAM_CONFIG, data):
+    if not _write_and_validate_vdf(config_path, data):
         return False
     for appid in appids:
         _record_config_vdf(str(appid), "CompatToolMapping", version)
     return True
 
 
-def clear_compat_tool(appids):
+def clear_compat_tool(appids, steam_root=None):
     """
     Remove CompatToolMapping entries for the given appids from Steam's
     config.vdf. Inverse of set_compat_tool — used for games where Steam
@@ -860,11 +870,13 @@ def clear_compat_tool(appids):
     Must be called while Steam is closed so the change persists.
 
     appids — list of int or str appids
+    steam_root — optional override of the configured/detected Steam root
     """
-    if not os.path.exists(STEAM_CONFIG):
+    config_path = os.path.join(_steam_root(steam_root), "config", "config.vdf")
+    if not os.path.exists(config_path):
         return
 
-    with open(STEAM_CONFIG, "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         data = f.read()
 
     modified = False
@@ -877,7 +889,7 @@ def clear_compat_tool(appids):
             data = re.sub(pattern, "", data, flags=re.MULTILINE | re.DOTALL)
             modified = True
 
-    if modified and _write_and_validate_vdf(STEAM_CONFIG, data):
+    if modified and _write_and_validate_vdf(config_path, data):
         for appid in appids:
             _remove_config_vdf(str(appid), "CompatToolMapping")
 

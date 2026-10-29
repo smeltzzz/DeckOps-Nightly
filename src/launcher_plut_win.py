@@ -10,8 +10,8 @@ Designed to run as a non-Steam shortcut with Proton in Game Mode.
 This is a Windows executable built with PyInstaller. It runs inside
 GE-Proton as a non-Steam shortcut.
 
-Launching writes an intent file (.lan_intent.json) and exits; the wrapper
-script (launcher_offline.sh) reads it and exec's the game's -lan wrapper,
+Launching writes a private intent file (passed with --intent-file) and exits;
+the wrapper script (launcher_offline.sh) reads it and exec's the game's -lan wrapper,
 which runs the game in its own Proton prefix. Same flow on every device.
 
 Every launch attempt is logged to .lan_launch.log on the Linux filesystem.
@@ -28,6 +28,7 @@ Return/Escape. Qt sees these as keyPressEvents. evdev is not available
 inside Wine, but the keyboard mapping works identically.
 """
 
+import argparse
 import os
 import sys
 import json
@@ -95,10 +96,9 @@ _LINUX_HOME = _detect_linux_home()
 _LINUX_PROJECT_ROOT = os.path.join(_LINUX_HOME, _INSTALL_DIR_NAME)
 _DECKOPS_JSON = os.path.join(_LINUX_PROJECT_ROOT, "deckops.json")
 
-# Intent file -- written by the exe when the user picks a game.
-# launcher_offline.sh reads this after the exe exits and exec's the
-# per-game LAN wrapper script. Used by all deck models.
-_INTENT_FILE = os.path.join(_LINUX_PROJECT_ROOT, ".lan_intent.json")
+# Supplied by launcher_offline.sh for this invocation. Never use a shared
+# fallback: a second launcher must not overwrite or consume this one's choice.
+_INTENT_FILE = None
 # The launcher's own settings (music mute). deckops.json is only read here.
 _SETTINGS_FILE = os.path.join(_LINUX_PROJECT_ROOT, ".lan_launcher.json")
 
@@ -408,12 +408,14 @@ _LAUNCH_MESSAGE_MS = 3000
 def _write_intent(lan_wrapper_path: str):
     """Commit a complete intent to the same directory before exiting the UI.
 
-    The shell wrapper consumes only .lan_intent.json; a partial write must
-    never be mistaken for a successful launch. Keep the payload unchanged.
+    A partial write must never be mistaken for a successful launch.
+    Keep the payload unchanged and rename within the private directory.
     """
+    if not _INTENT_FILE or not os.path.isabs(_INTENT_FILE):
+        raise ValueError("No absolute launch intent path was provided")
     pending = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=_LINUX_PROJECT_ROOT,
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(_INTENT_FILE),
                                          prefix=".lan_intent-", suffix=".tmp", delete=False) as f:
             pending = f.name
             json.dump({"lan_wrapper_path": lan_wrapper_path}, f)
@@ -476,9 +478,9 @@ def _get_setup_plut_keys() -> dict:
     Return Plutonium game keys that have been set up, with the data each
     launch path needs.
 
-    All models now use the intent-file bridge: the exe writes
-    .lan_intent.json with the lan_wrapper_path and exits.
-    launcher_offline.sh reads the intent and exec's the per-game LAN
+    All models use the private intent-file bridge: the exe writes
+    the lan_wrapper_path to the path supplied by launcher_offline.sh and exits.
+    The shell reads that intent and exec's the per-game LAN
     wrapper script, which runs the bootstrapper in the correct per-game
     Proton prefix.
 
@@ -491,10 +493,10 @@ def _get_setup_plut_keys() -> dict:
 
         result = {}
         for k, v in setup_games.items():
-            if v.get("client") != "plutonium":
+            if not isinstance(v, dict) or v.get("client") != "plutonium":
                 continue
             lan_path = v.get("lan_wrapper_path")
-            if lan_path and os.path.exists(lan_path):
+            if isinstance(lan_path, str) and os.path.isabs(lan_path) and os.path.isfile(lan_path):
                 result[k] = {"lan_wrapper_path": lan_path}
         return result
     except Exception:
@@ -909,7 +911,15 @@ class LauncherWindow(QWidget):
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    app = QApplication(sys.argv)
+    global _INTENT_FILE
+    parser = argparse.ArgumentParser(description="DeckOps offline game selection")
+    parser.add_argument("--intent-file", required=True,
+                        help="private Windows (Wine Z:) path provided by launcher_offline.sh")
+    args, qt_args = parser.parse_known_args(sys.argv[1:])
+    if not os.path.isabs(args.intent_file):
+        parser.error("--intent-file must be an absolute path")
+    _INTENT_FILE = args.intent_file
+    app = QApplication([sys.argv[0], *qt_args])
     _load_font()
 
     win = LauncherWindow()

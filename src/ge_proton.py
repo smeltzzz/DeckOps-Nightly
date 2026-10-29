@@ -11,10 +11,10 @@ any game prefix that's missing them. This eliminates the need for users
 to launch each game once before mods can be installed.
 
 Install path:
-    ~/.steam/root/compatibilitytools.d/GE-ProtonX-XX/
+    <selected Steam root>/compatibilitytools.d/GE-ProtonX-XX/
 
 CompatToolMapping written to:
-    ~/.local/share/Steam/config/config.vdf
+    <selected Steam root>/config/config.vdf
 """
 
 import json
@@ -27,15 +27,28 @@ import urllib.request
 
 from log import get_logger
 from net import BROWSER_UA as _BROWSER_UA, download
-from steam_common import nvme_compatdata as _nvme_compatdata, newest_proton_dir
+from steam_common import nvme_compatdata as _nvme_compatdata
 
 _log = get_logger(__name__)
 
 
 GITHUB_API   = "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
-COMPAT_DIR   = os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")
+COMPAT_DIR   = os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")  # legacy fallback
 
-# Steam appids that DeckOps manages — GE-Proton will be set for all of these
+
+def _compat_dir(steam_root: str | None = None) -> str:
+    """GE-Proton belongs to the selected Steam installation, not another root.
+
+    Retain COMPAT_DIR for older callers with no configured or detected Steam
+    installation.
+    """
+    if steam_root:
+        return os.path.join(os.path.expanduser(steam_root), "compatibilitytools.d")
+    from wrapper import _configured_steam_root
+    root = _configured_steam_root()
+    return os.path.join(root, "compatibilitytools.d") if root else COMPAT_DIR
+
+# Steam appids DeckOps can manage. Setup maps only the appids selected in that run.
 MANAGED_APPIDS = [
     "7940",    # CoD4
     "10090",   # WaW
@@ -99,23 +112,29 @@ def _is_complete(tool_dir: str) -> bool:
             and os.path.isdir(os.path.join(tool_dir, "files", "share", "default_pfx")))
 
 
-def _is_installed(version):
+def _is_installed(version, steam_root: str | None = None):
     """Returns True if this GE-Proton version is fully extracted. Checking
     only that the folder exists treated a half-extracted one (disk full,
     killed mid-install) as up to date forever."""
-    return _is_complete(os.path.join(COMPAT_DIR, version))
+    return _is_complete(os.path.join(_compat_dir(steam_root), version))
 
 
-def _get_local_version() -> str | None:
+def _get_local_version(steam_root: str | None = None) -> str | None:
     """
     Scan compatibilitytools.d for the newest installed GE-Proton version.
     Returns the version string (e.g. 'GE-Proton10-32') or None if not found.
     Works regardless of how GE-Proton was installed (ProtonUp-Qt, manual, etc.)
     """
-    return newest_proton_dir(COMPAT_DIR, "GE-Proton")
+    compat_dir = _compat_dir(steam_root)
+    if not os.path.isdir(compat_dir):
+        return None
+    return max((name for name in os.listdir(compat_dir)
+                if name.startswith("GE-Proton") and _is_complete(os.path.join(compat_dir, name))),
+               key=lambda name: tuple(int(p) for p in re.findall(r"\d+", name)), default=None)
 
 
-def resolve_ge_version(fresh: str | None = None) -> str | None:
+def resolve_ge_version(fresh: str | None = None,
+                       steam_root: str | None = None) -> str | None:
     """GE-Proton version to map onto the games.
 
     The one just installed wins. If the download failed (offline, GitHub rate
@@ -131,33 +150,35 @@ def resolve_ge_version(fresh: str | None = None) -> str | None:
         pinned = _cfg.get_ge_proton_version()
     except Exception:
         pinned = None
-    for candidate in (pinned, _get_local_version()):
-        if candidate and _is_installed(candidate):
+    for candidate in (pinned, _get_local_version(steam_root)):
+        if candidate and _is_installed(candidate, steam_root):
             return candidate
     return None
 
 
 # ── default_pfx resolution ───────────────────────────────────────────────────
 
-def _find_default_pfx(ge_version: str | None) -> str | None:
+def _find_default_pfx(ge_version: str | None,
+                      steam_root: str | None = None) -> str | None:
     """
     Locate GE-Proton's default_pfx directory.
 
     Tries the exact version first, then falls back to scanning for the
     newest available GE-Proton install. Returns the path or None.
     """
+    compat_dir = _compat_dir(steam_root)
     # Try exact version first
     if ge_version:
-        candidate = os.path.join(COMPAT_DIR, ge_version, "files", "share", "default_pfx")
+        candidate = os.path.join(compat_dir, ge_version, "files", "share", "default_pfx")
         if os.path.isdir(candidate):
             return candidate
 
     # Fallback: newest GE-Proton that has a default_pfx
-    if os.path.isdir(COMPAT_DIR):
-        for entry in sorted(os.listdir(COMPAT_DIR), reverse=True):
+    if os.path.isdir(compat_dir):
+        for entry in sorted(os.listdir(compat_dir), reverse=True):
             if not entry.startswith("GE-Proton"):
                 continue
-            candidate = os.path.join(COMPAT_DIR, entry, "files", "share", "default_pfx")
+            candidate = os.path.join(compat_dir, entry, "files", "share", "default_pfx")
             if os.path.isdir(candidate):
                 return candidate
 
@@ -166,30 +187,32 @@ def _find_default_pfx(ge_version: str | None) -> str | None:
 
 # ── Install ───────────────────────────────────────────────────────────────────
 
-def install_ge_proton(on_progress=None):
+def install_ge_proton(on_progress=None, steam_root: str | None = None):
     """
     Download and install the latest GE-Proton to compatibilitytools.d.
     Returns the version string (e.g. 'GE-Proton10-34') so it can be
     passed to set_compat_tool().
 
     on_progress — optional callback(percent: int, msg: str)
+    steam_root  — optional override of the configured/detected Steam root
     """
     prog = on_progress or (lambda *a: None)
+    compat_dir = _compat_dir(steam_root)
 
-    local_version = _get_local_version()
+    local_version = _get_local_version(steam_root)
     prog(0, "Checking for GE-Proton updates...")
 
     version, tarball_url, checksum_url, dir_name = _get_latest_release()
 
-    if _is_installed(dir_name):
+    if _is_installed(dir_name, steam_root):
         prog(100, f"GE-Proton {dir_name} is up to date.")
         return dir_name
 
-    if local_version == dir_name or os.path.isdir(os.path.join(COMPAT_DIR, dir_name)):
+    if local_version == dir_name or os.path.isdir(os.path.join(compat_dir, dir_name)):
         prog(5, f"GE-Proton {dir_name} is incomplete (interrupted install?) -- reinstalling")
     else:
         prog(5, f"New version available: {dir_name}")
-    os.makedirs(COMPAT_DIR, exist_ok=True)
+    os.makedirs(compat_dir, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="deckops_ge_") as tmp:
         tarball_path = os.path.join(tmp, f"{dir_name}.tar.gz")
@@ -209,7 +232,7 @@ def install_ge_proton(on_progress=None):
                  digest=digest)
 
         prog(87, f"Extracting {dir_name}...")
-        _extract_atomically(tarball_path, dir_name)
+        _extract_atomically(tarball_path, dir_name, steam_root=steam_root)
         prog(100, f"GE-Proton {dir_name} installed.")
 
     return dir_name
@@ -244,7 +267,8 @@ def _safe_extractall(tar: tarfile.TarFile, dest: str):
     tar.extractall(dest)
 
 
-def _extract_atomically(tarball_path: str, dir_name: str):
+def _extract_atomically(tarball_path: str, dir_name: str,
+                        steam_root: str | None = None):
     """
     Extract a GE-Proton tarball so compatibilitytools.d/<dir_name> only ever
     appears complete: extract into a hidden staging folder on the same
@@ -254,7 +278,8 @@ def _extract_atomically(tarball_path: str, dir_name: str):
     """
     import subprocess
 
-    staging = tempfile.mkdtemp(prefix=".deckops_extract_", dir=COMPAT_DIR)
+    compat_dir = _compat_dir(steam_root)
+    staging = tempfile.mkdtemp(prefix=".deckops_extract_", dir=compat_dir)
     try:
         # System tar first: much faster and lighter than tarfile on a
         # multi-GB archive. Any failure falls back to the safe tarfile path.
@@ -279,7 +304,7 @@ def _extract_atomically(tarball_path: str, dir_name: str):
             raise RuntimeError(
                 f"GE-Proton archive did not contain a complete {dir_name}/ (found: {found})")
 
-        final = os.path.join(COMPAT_DIR, dir_name)
+        final = os.path.join(compat_dir, dir_name)
         if os.path.lexists(final):
             # Only reached when it failed _is_installed: a broken leftover
             if os.path.isdir(final) and not os.path.islink(final):
@@ -371,7 +396,7 @@ def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
     """
     prog = on_progress or (lambda *a: None)
 
-    default_pfx = _find_default_pfx(ge_version)
+    default_pfx = _find_default_pfx(ge_version, steam_root)
     if not default_pfx:
         prog("⚠ No GE-Proton default_pfx found — cannot install dependencies")
         return False
@@ -695,7 +720,8 @@ def _read_stamp() -> str | None:
         return None
 
 
-def _ensure_shared_dlls(ge_version: str | None, on_progress=None) -> bool:
+def _ensure_shared_dlls(ge_version: str | None, on_progress=None,
+                        steam_root: str | None = None) -> bool:
     """
     Ensure the shared DLL directory holds GE-Proton's default_pfx
     system32 and syswow64.
@@ -710,7 +736,7 @@ def _ensure_shared_dlls(ge_version: str | None, on_progress=None) -> bool:
     """
     prog = on_progress or (lambda *a: None)
 
-    default_pfx = _find_default_pfx(ge_version)
+    default_pfx = _find_default_pfx(ge_version, steam_root)
     if not default_pfx:
         prog("⚠ No GE-Proton default_pfx found -- cannot set up shared DLLs")
         return False
@@ -890,13 +916,13 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
 
     prog = on_progress or (lambda *a: None)
 
-    default_pfx = _find_default_pfx(ge_version)
+    default_pfx = _find_default_pfx(ge_version, steam_root)
     if not default_pfx:
         prog("⚠ No GE-Proton default_pfx found -- cannot install dependencies")
         return 0
 
     # ── Step 1: Ensure shared DLLs exist ──────────────────────────────────
-    if not _ensure_shared_dlls(ge_version, on_progress=on_progress):
+    if not _ensure_shared_dlls(ge_version, on_progress=on_progress, steam_root=steam_root):
         prog("⚠ Shared DLL setup failed -- falling back to full copies")
         # Fall back to the old approach if shared DLLs can't be set up
         shared_available = False
@@ -1072,8 +1098,8 @@ def _deckops_prefixes(steam_root: str | None = None) -> list:
     """compatdata roots DeckOps set up: the managed appids' prefixes, every
     prefix linked to the shared DLLs (own-copy shortcuts included) and the
     offline prefixes."""
-    from steam_common import STEAM_ROOT
-    sr = steam_root or STEAM_ROOT
+    from wrapper import _steam_root
+    sr = _steam_root(steam_root)
     out, seen = [], set()
 
     def add(p):
@@ -1104,12 +1130,13 @@ def _deckops_prefixes(steam_root: str | None = None) -> list:
     return out
 
 
-def relink_dangling_builtins(ge_version: str, prefixes: list) -> tuple[int, int]:
+def relink_dangling_builtins(ge_version: str, prefixes: list,
+                             steam_root: str | None = None) -> tuple[int, int]:
     """Point broken links into a removed GE-Proton at the same file in
     ge_version. A broken Wine builtin link with no counterpart is removed;
     Proton recreates it on the next launch. Looks in the shared DLLs and in
     each prefix's drive_c/windows. Returns (relinked, removed)."""
-    tool = os.path.join(COMPAT_DIR, ge_version) if ge_version else None
+    tool = os.path.join(_compat_dir(steam_root), ge_version) if ge_version else None
     relinked = removed = 0
     roots = [SHARED_DLL_DIR] + [os.path.join(p, "pfx", "drive_c", "windows") for p in prefixes]
     for top in roots:
@@ -1207,16 +1234,17 @@ def cleanup_old_ge_versions(current: str, steam_root: str | None = None,
     Nothing is removed if config.vdf can't be read. Returns removed names.
     """
     import config as _cfg
-    from steam_common import STEAM_ROOT
+    from wrapper import _steam_root
     prog = on_progress or (lambda *a: None)
-    sr = steam_root or STEAM_ROOT
+    sr = _steam_root(steam_root)
+    compat_dir = _compat_dir(sr)
 
-    if not current or not _is_installed(current):
+    if not current or not _is_installed(current, sr):
         return []
     tracked = set(_cfg.get_ge_proton_installed()) | {current}
     on_disk = {v for v in tracked
-               if os.path.isdir(os.path.join(COMPAT_DIR, v))
-               and not os.path.islink(os.path.join(COMPAT_DIR, v))}
+               if os.path.isdir(os.path.join(compat_dir, v))
+               and not os.path.islink(os.path.join(compat_dir, v))}
     older = sorted((v for v in on_disk if _version_key(v) < _version_key(current)),
                    key=_version_key, reverse=True)
     if len(older) < 2:
@@ -1233,7 +1261,7 @@ def cleanup_old_ge_versions(current: str, steam_root: str | None = None,
             prog(f"  {v} kept: still in use")
             continue
         try:
-            shutil.rmtree(os.path.join(COMPAT_DIR, v))
+            shutil.rmtree(os.path.join(compat_dir, v))
             removed.append(v)
             prog(f"  ✓ Removed old {v}")
         except OSError as ex:
@@ -1243,7 +1271,7 @@ def cleanup_old_ge_versions(current: str, steam_root: str | None = None,
         (v for v in tracked if v == current or (v in on_disk and v not in removed)),
         key=_version_key))
     if removed:
-        relinked, gone = relink_dangling_builtins(current, _deckops_prefixes(sr))
+        relinked, gone = relink_dangling_builtins(current, _deckops_prefixes(sr), steam_root=sr)
         if relinked or gone:
             prog(f"  ✓ {relinked} prefix link(s) moved to {current}")
     return removed
@@ -1260,8 +1288,8 @@ def repair_prefixes(ge_version: str, steam_root: str | None = None,
     prefixes = _deckops_prefixes(steam_root)
     ok = True
     if any(_links_to_shared(p) for p in prefixes):
-        ok = _ensure_shared_dlls(ge_version, on_progress=prog)
-    relinked, removed = relink_dangling_builtins(ge_version, prefixes)
+        ok = _ensure_shared_dlls(ge_version, on_progress=prog, steam_root=steam_root)
+    relinked, removed = relink_dangling_builtins(ge_version, prefixes, steam_root=steam_root)
     if relinked or removed:
         prog(f"  ✓ Repaired {relinked + removed} prefix link(s) to a removed GE-Proton")
     return ok

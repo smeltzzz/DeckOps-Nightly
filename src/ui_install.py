@@ -506,7 +506,10 @@ class SetupScreen(QWidget):
                 downgrade_keys=[k for k, _gd, _g in steam_selected])  # own copies are already 32-bit
         except Exception as ex:
             _log_to_file(f"[SetupScreen] preflight failed: {ex}")
-            return True
+            QMessageBox.warning(self, "Preflight unavailable",
+                                "Could not check disk space and power. No games were changed. "
+                                "Please retry before installing.")
+            return False
         return _show_preflight(self, checks)
 
     def _review_install(self, steam_selected, own_selected):
@@ -1352,7 +1355,7 @@ class _BaseInstallScreen(QWidget):
         from iw4x import install_iw4x
         from iw3sp import install_iw3sp
         from t6sp_mod import install_t6sp_mod
-        from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
+        from ge_proton import install_ge_proton, resolve_ge_version
 
         # --- Source awareness setup
         own_selected = self.own_selected
@@ -1422,7 +1425,8 @@ class _BaseInstallScreen(QWidget):
             self._s.pulse_start.emit("Installing GE-Proton")
             self._s.log.emit("Installing GE-Proton...")
             ge_version = install_ge_proton(
-                on_progress=lambda pct, msg: self._s.progress.emit(self._ppct(pct), msg)
+                on_progress=lambda pct, msg: self._s.progress.emit(self._ppct(pct), msg),
+                steam_root=self.steam_root,
             )
             self._s.pulse_stop.emit()
             self._s.log.emit(f"✓  {ge_version} downloaded")
@@ -1434,7 +1438,7 @@ class _BaseInstallScreen(QWidget):
         # A failed download must not leave games without a compat tool:
         # fall back to a GE-Proton that is already installed.
         if not ge_version:
-            ge_version = resolve_ge_version()
+            ge_version = resolve_ge_version(steam_root=self.steam_root)
             if ge_version:
                 self._s.log.emit(f"  Using the installed {ge_version}")
             else:
@@ -1926,13 +1930,12 @@ class _BaseInstallScreen(QWidget):
             from wrapper import clear_launch_options, clear_compat_tool
             from detect_games import GAMES
             run_appids = {GAMES[k]["appid"] for k, _, _ in steam_sel if k in GAMES}
-            for appid in MANAGED_APPIDS:
-                if appid in run_appids:
-                    clear_launch_options(self.steam_root, appid)
+            for appid in run_appids:
+                clear_launch_options(self.steam_root, appid)
             # Only clear mappings that are re-applied below (GE-Proton found
             # and Steam games selected); otherwise earlier setups would lose them.
             if ge_version and steam_sel:
-                clear_compat_tool(MANAGED_APPIDS)
+                clear_compat_tool(run_appids, steam_root=self.steam_root)
             self._s.log.emit("✓  Cleared launch options" +
                              (" and compat tools" if ge_version and steam_sel else ""))
             # The CoD4 phase ran before Steam closed, so its launch option
@@ -1944,13 +1947,13 @@ class _BaseInstallScreen(QWidget):
         except Exception as ex:
             self._s.log.emit(f"  Launch option / compat tool cleanup skipped: {ex}")
 
-        # --- Set GE-Proton compat for MANAGED_APPIDS
+        # --- Set GE-Proton compat for Steam appids in this run only
         # Must run AFTER kill_steam -- Steam overwrites config.vdf on exit.
         # Only write for Steam appids if the user actually has Steam games
         # selected; otherwise this may trigger Steam to re-download games.
         if ge_version and steam_sel:
             try:
-                set_compat_tool(MANAGED_APPIDS, ge_version)
+                set_compat_tool(run_appids, ge_version, steam_root=self.steam_root)
                 self._s.log.emit(f"✓  {ge_version} set for Steam game appids")
             except Exception as ex:
                 self._s.log.emit(f"  CompatToolMapping for Steam appids skipped: {ex}")

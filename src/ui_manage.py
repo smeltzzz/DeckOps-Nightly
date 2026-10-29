@@ -457,13 +457,16 @@ class ManagementScreen(QWidget):
         add_btn.clicked.connect(self._add_games)
         self._game_update_btn = _btn("Update Games", C_DARK_BTN, size=9, h=38)
         self._game_update_btn.clicked.connect(self._update_all_games)
+        mods_btn = _btn("Mods", C_DARK_BTN, size=9, h=38)
+        mods_btn.setAccessibleName("Manage manifest mods")
+        mods_btn.clicked.connect(lambda: go_to(self.stack, "ManifestModsScreen"))
         self._deckops_update_btn = _btn("DeckOps Update", C_DARK_BTN, size=9, h=38)
         self._deckops_update_btn.clicked.connect(self._check_deckops_update)
         guide_btn = _btn("Guide", C_DARK_BTN, size=9, h=38)
         guide_btn.clicked.connect(self._open_guide)
         cfg_btn = _btn("Settings", C_DARK_BTN, size=9, h=38)
         cfg_btn.clicked.connect(lambda: go_to(self.stack, "ConfigureScreen"))
-        for button in (add_btn, self._game_update_btn,
+        for button in (add_btn, self._game_update_btn, mods_btn,
                        self._deckops_update_btn, guide_btn, cfg_btn):
             button.setStyleSheet(button.styleSheet().replace("padding:0 18px;", "padding:0 4px;"))
             button.setMinimumWidth(0)
@@ -548,7 +551,7 @@ class ManagementScreen(QWidget):
 
     def _do_scan(self):
         try:
-            self._scanned = find_all_games()
+            self._scanned = find_all_games(preferred_sources=cfg.get_setup_games())
         except Exception:
             _log.warning("game scan failed", exc_info=True)
             self._scanned = None
@@ -1845,7 +1848,7 @@ class ConfigureScreen(QWidget):
                 steam_root = cfg.load().get("steam_root", "") or find_steam_root()
                 if not steam_root:
                     raise RuntimeError("Steam library not found")
-                installed = find_all_games()
+                installed = find_all_games(steam_root, preferred_sources=cfg.get_setup_games())
                 count = set_deadzone(steam_root, installed,
                                      on_progress=lambda msg: _log.info("deadzone: %s", msg.strip()))
                 s.log.emit(f"✓  Deadzones set in {count} config file(s). "
@@ -1935,7 +1938,8 @@ class ConfigureScreen(QWidget):
             try:
                 from setup_check import check_setup, check_shortcuts
                 mgmt = get_screen(self.stack, "ManagementScreen")
-                installed = (getattr(mgmt, "installed", None) or find_all_games())
+                installed = (getattr(mgmt, "installed", None) or
+                             find_all_games(preferred_sources=cfg.get_setup_games()))
                 sr, setup = find_steam_root(), cfg.get_setup_games()
                 results = check_setup(sr, installed, setup)
                 try:
@@ -2626,7 +2630,7 @@ class UpdateScreen(QWidget):
             self._s.done.emit(False)
             return
         from wrapper import get_proton_path, find_compatdata, kill_steam, set_compat_tool
-        from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
+        from ge_proton import install_ge_proton, resolve_ge_version
         from iw4x import install_iw4x
         from cod4r import install_cod4r
         from iw3sp import install_iw3sp
@@ -2740,7 +2744,8 @@ class UpdateScreen(QWidget):
             self._s.log.emit("Checking GE-Proton...")
             self._did_work = True
             ge_version = install_ge_proton(
-                on_progress=lambda pct, msg: self._s.progress.emit(16 + int(pct * 0.08), msg)
+                on_progress=lambda pct, msg: self._s.progress.emit(16 + int(pct * 0.08), msg),
+                steam_root=self.steam_root,
             )
             cfg.set_ge_proton_version(ge_version)
             ge_fresh = True
@@ -2750,7 +2755,7 @@ class UpdateScreen(QWidget):
         # A failed download must not leave the games without a compat tool:
         # keep using the GE-Proton that is already installed.
         if not ge_version:
-            ge_version = resolve_ge_version()
+            ge_version = resolve_ge_version(steam_root=self.steam_root)
             if ge_version:
                 self._s.log.emit(f"  Using the installed {ge_version}")
             else:
@@ -2927,7 +2932,7 @@ class UpdateScreen(QWidget):
         success_appids = {GAMES[k]["appid"] for k, _, _ in successful_steam}
         if ge_version and success_appids:
             try:
-                if set_compat_tool(success_appids, ge_version) is False:
+                if set_compat_tool(success_appids, ge_version, steam_root=self.steam_root) is False:
                     raise RuntimeError("Steam rejected the compatibility mapping")
                 self._s.log.emit(f"✓  {ge_version} set for updated Steam appids")
             except Exception as ex:

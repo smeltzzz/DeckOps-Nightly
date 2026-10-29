@@ -1485,37 +1485,51 @@ def apply_offline_mode(on: bool, steam_root: str, prog=lambda pct, msg: None):
     from detect_games import find_all_games
     from wrapper import get_proton_path
     import shortcut
-    _cfg.set_offline_mode(on)
-    if not on:
-        remove_lan(lambda m: prog(5, m))
-        shortcut.remove_launcher_shortcut(lambda m: prog(8, m))
-        for p in (LAN_SERVER_PREFIX, LAN_PREFIX):
-            if os.path.isdir(p):
-                shutil.rmtree(p)
-    found = find_all_games(steam_root)
-    setup = _cfg.get_setup_games()
-    games = {k: found[k] for k, e in setup.items()
-             if e.get("client") == "plutonium" and k in GAME_META and k in found}
-    proton = get_proton_path(steam_root)
-    step = 80 // max(len(games), 1)
-    for i, (k, g) in enumerate(games.items()):
-        src = setup[k].get("source", "steam")
-        base = 10 + i * step
-        prog(base, f"{g.get('name', k)}...")
-        try:
-            install_plutonium(g, k, steam_root, proton, _plut_compat(k, g, src, steam_root),
-                              on_progress=lambda pct, msg, b=base: prog(b + pct * step // 100, msg),
-                              installed_games=games, source=src)
-        except Exception as ex:
-            _log.warning("offline mode: %s failed", k, exc_info=True)
-            prog(base, f"  ⚠ {k}: {ex}")
-    if on and games:
-        # Configs last, like the install's finalize phase: game_config also fills the
-        # offline copies (resolution, FOV, sensitivity, name) now that they exist
-        from game_config import apply_game_configs
-        apply_game_configs(selected_keys=list(games), installed_games=games, steam_root=steam_root,
-                           deck_model=_cfg.get_deck_model() or "oled", on_progress=lambda m: prog(93, m))
-        shortcut.create_launcher_shortcut(on_progress=lambda m: prog(95, m))
+    _cfg.set_offline_mode(on)  # setup_lan reads the setting during each game install
+    try:
+        if not on:
+            remove_lan(lambda m: prog(5, m))
+            shortcut.remove_launcher_shortcut(lambda m: prog(8, m))
+            for p in (LAN_SERVER_PREFIX, LAN_PREFIX):
+                if os.path.isdir(p):
+                    shutil.rmtree(p)
+        setup = _cfg.get_setup_games()
+        found = find_all_games(steam_root, preferred_sources=setup)
+        configured = {k: e for k, e in setup.items()
+                      if e.get("client") == "plutonium" and k in GAME_META}
+        games = {k: found[k] for k, entry in configured.items()
+                 if k in found and found[k].get("source", "steam") == entry.get("source", "steam")}
+        if on and not configured:
+            raise RuntimeError("No configured Plutonium games were found. Set up a game before adding Offline Mode.")
+        errors = [f"{k}: configured {entry.get('source', 'steam')} game folder not found"
+                  for k, entry in configured.items() if k not in games]
+        proton = get_proton_path(steam_root)
+        step = 80 // max(len(games), 1)
+        for i, (k, g) in enumerate(games.items()):
+            src = configured[k].get("source", "steam")
+            base = 10 + i * step
+            prog(base, f"{g.get('name', k)}...")
+            try:
+                install_plutonium(g, k, steam_root, proton, _plut_compat(k, g, src, steam_root),
+                                  on_progress=lambda pct, msg, b=base: prog(b + pct * step // 100, msg),
+                                  installed_games=games, source=src)
+            except Exception as ex:
+                _log.warning("offline mode: %s failed", k, exc_info=True)
+                prog(base, f"  ⚠ {k}: {ex}")
+                errors.append(f"{k}: {ex}")
+        if errors:
+            raise RuntimeError("Offline Mode was not set up for all games: " + "; ".join(errors))
+        if on:
+            # Configs last: game_config also fills the offline copies now that they exist.
+            from game_config import apply_game_configs
+            apply_game_configs(selected_keys=list(games), installed_games=games, steam_root=steam_root,
+                               deck_model=_cfg.get_deck_model() or "oled", on_progress=lambda m: prog(93, m))
+            shortcut.create_launcher_shortcut(on_progress=lambda m: prog(95, m))
+    except Exception:
+        # A partial add or removal must never leave the library claiming the
+        # offline launcher is Ready. A later Add can repair leftover files.
+        _cfg.set_offline_mode(False)
+        raise
 
 
 def remove_lan(prog=lambda m: None):

@@ -35,7 +35,6 @@ class ManifestModsScreen(QWidget):
         super().__init__(); self.stack = stack; self.screen_name = "ManifestModsScreen"
         self._found = []; self._rows = []; self._busy = False; self._roots = []
         self._first_run = cfg.is_first_run(); self._scan_error = False
-
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         lay.addWidget(_header_bar()[0])
 
@@ -504,7 +503,7 @@ class ManifestModsScreen(QWidget):
                 lines.append(f'<span style="color:{C_IW}">&#10003; {name} installed</span>')
             elif errs:
                 lines.append(f'<span style="color:{C_TREY}">&#10007; {name}: {len(errs)} file(s) failed. '
-                             f'Install again to retry only those.</span>')
+                             f'Install again to finish.</span>')
             else:
                 lines.append(f'<span style="color:{C_TREY}">&#10007; {name}: {html.escape(msg)}</span>')
         if not all_ok:

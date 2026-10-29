@@ -30,7 +30,10 @@ class OfflineLauncherTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.intent = self.root / ".lan_intent.json"
+        self.intent = self.root / ".lan_intent.a" / "intent.json"
+        self.intent.parent.mkdir()
+        self.other_intent = self.root / ".lan_intent.b" / "intent.json"
+        self.other_intent.parent.mkdir()
         for name, value in (("_LINUX_PROJECT_ROOT", str(self.root)),
                             ("_INTENT_FILE", str(self.intent)),
                             ("_LAN_LOG", str(self.root / "lan.log")),
@@ -81,6 +84,38 @@ class OfflineLauncherTests(unittest.TestCase):
                          {"lan_wrapper_path": "/games/launch-lan.sh"})
         self.assertEqual(calls, ["Game"])
         self.assertEqual(list(self.root.glob("*.tmp")), [])
+
+    def test_separate_invocations_do_not_touch_each_others_intent(self):
+        shared = self.root / ".lan_intent.json"
+        shared.write_text("old intent")
+        launcher._write_intent("/games/first.sh")
+        with patch.object(launcher, "_INTENT_FILE", str(self.other_intent)):
+            launcher._write_intent("/games/second.sh")
+        self.assertEqual(json.loads(self.intent.read_text())["lan_wrapper_path"], "/games/first.sh")
+        self.assertEqual(json.loads(self.other_intent.read_text())["lan_wrapper_path"], "/games/second.sh")
+        self.assertEqual(shared.read_text(), "old intent")
+        self.assertEqual(list(self.root.rglob("*.tmp")), [])
+
+    def test_main_requires_and_passes_private_path_to_ui(self):
+        with patch.object(sys, "argv", ["DeckOps_Offline.exe", "--intent-file", str(self.intent),
+                                        "-platform", "offscreen"]), \
+             patch.object(launcher, "QApplication") as app_class, \
+             patch.object(launcher, "LauncherWindow"), \
+             patch.object(launcher, "_load_font"), \
+             patch.object(launcher, "_start_audio"):
+            app_class.return_value.exec_.return_value = 0
+            with self.assertRaises(SystemExit) as exited:
+                launcher.main()
+            self.assertEqual(exited.exception.code, 0)
+            self.assertEqual(launcher._INTENT_FILE, str(self.intent))
+            app_class.assert_called_once_with(["DeckOps_Offline.exe", "-platform", "offscreen"])
+
+    def test_missing_or_relative_intent_destination_never_writes_shared_file(self):
+        for path in (None, "intent.json"):
+            with self.subTest(path=path), patch.object(launcher, "_INTENT_FILE", path):
+                with self.assertRaisesRegex(ValueError, "absolute launch intent"):
+                    launcher._write_intent("/games/first.sh")
+        self.assertFalse(self.intent.exists())
 
     def test_failed_replace_stays_and_can_retry_without_false_success(self):
         errors, starts = [], []
