@@ -227,8 +227,8 @@ for e in sg.values():
         for k in ("wrapper_path", "lan_wrapper_path"):
             if isinstance(e.get(k), str) and e[k]:
                 scripts.add(e[k])
-# Repointing files alone is not enough: the other branch's offline launcher and
-# game library enumerate only its own deckops.json. Do not remove this branch
+# Repointing files alone is not enough: the offline launcher and game library of
+# the other branch enumerate only its own deckops.json. Do not remove this branch
 # until the other has corresponding game setups and Offline Mode enabled.
 try:
     with open(os.path.join(other, "deckops.json"), encoding="utf-8") as f:

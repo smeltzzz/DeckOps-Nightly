@@ -381,6 +381,27 @@ class PrelaunchHelperFallbackTests(unittest.TestCase):
                 marker.unlink(missing_ok=True)
 
 
+class ShellSyntaxTests(unittest.TestCase):
+    """The updater refuses any .sh file that fails `bash -n`, so a syntax error
+    in a shipped script blocks every user's update."""
+
+    def test_all_shell_scripts_pass_bash_syntax_check(self):
+        try:
+            if subprocess.run(["bash", "--version"], capture_output=True).returncode:
+                self.skipTest("bash unavailable on this host")
+        except OSError:
+            self.skipTest("bash unavailable on this host")
+        root = Path(__file__).resolve().parents[1]
+        skip = {".git", ".venv", ".update", "node_modules"}
+        scripts = [p for p in root.rglob("*.sh")
+                   if not skip.intersection(p.relative_to(root).parts)]
+        self.assertTrue(scripts)
+        for script in scripts:
+            with self.subTest(script=str(script.relative_to(root))):
+                result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class SteamRootGeProtonTests(unittest.TestCase):
     """A separate Steam install must never use the default install's GE tool."""
 
