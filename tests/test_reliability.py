@@ -344,6 +344,182 @@ class GeProtonFallbackTests(unittest.TestCase):
             self.assertEqual(ge_proton.resolve_ge_version("GE-Proton11-1"), "GE-Proton11-1")
 
 
+def _dll(path, builtin=True, body=b""):
+    """A file Proton's builtin test recognises (marker at 0x40), or a native one."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_bytes(b"MZ" + b"\0" * 0x3e + (b"Wine builtin DLL" if builtin else b"Native DLL here!")
+                           + b"\0" * 8 + body)
+
+
+class SharedDllRefreshTests(unittest.TestCase):
+    """The shared system32/syswow64 follow GE-Proton upgrades without losing native DLLs."""
+
+    def setUp(self):
+        import ge_proton
+        self.ge = ge_proton
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.compat = Path(self.tmp.name, "compatibilitytools.d")
+        self.shared = Path(self.tmp.name, "shared_dlls")
+        for target, value in (("COMPAT_DIR", str(self.compat)), ("SHARED_DLL_DIR", str(self.shared))):
+            p = patch.object(ge_proton, target, value)
+            p.start(); self.addCleanup(p.stop)
+
+    def tool(self, version, body):
+        win = self.compat / version / "files" / "share" / "default_pfx" / "drive_c" / "windows"
+        _dll(win / "system32" / "kernel32.dll", body=body)
+        _dll(win / "system32" / "drivers" / "mountmgr.sys", body=body)
+        _dll(win / "syswow64" / "kernel32.dll", body=body)
+        _dll(win / "system32" / "d3dx9_43.dll", body=body)
+        return win
+
+    def test_new_version_updates_builtins_and_keeps_native_dlls(self):
+        self.tool("GE-Proton10-1", b"old")
+        self.assertTrue(self.ge._ensure_shared_dlls("GE-Proton10-1"))
+        sys32 = self.shared / "system32"
+        self.assertTrue((sys32 / "drivers" / "mountmgr.sys").is_file())
+        self.assertEqual((self.shared / ".ge_version").read_text().strip(), "GE-Proton10-1")
+        _dll(sys32 / "d3dx9_43.dll", builtin=False)          # a redist installed the native one
+        _dll(sys32 / "game_only.dll", builtin=False)         # not in default_pfx at all
+
+        win = self.tool("GE-Proton10-2", b"new, longer")
+        _dll(win / "system32" / "added.dll", body=b"new")
+        self.assertTrue(self.ge._ensure_shared_dlls("GE-Proton10-2"))
+        self.assertTrue((sys32 / "kernel32.dll").read_bytes().endswith(b"new, longer"))
+        self.assertTrue((self.shared / "syswow64" / "kernel32.dll").read_bytes().endswith(b"new, longer"))
+        self.assertTrue((sys32 / "added.dll").is_file())
+        self.assertIn(b"Native DLL here!", (sys32 / "d3dx9_43.dll").read_bytes())
+        self.assertTrue((sys32 / "game_only.dll").is_file())
+        self.assertEqual((self.shared / ".ge_version").read_text().strip(), "GE-Proton10-2")
+
+        with patch.object(self.ge, "_refresh_dll_dir") as refresh:   # same version: nothing to do
+            self.assertTrue(self.ge._ensure_shared_dlls("GE-Proton10-2"))
+        refresh.assert_not_called()
+
+    def test_relinks_links_into_a_removed_version(self):
+        self.tool("GE-Proton10-2", b"x")
+        lib = self.compat / "GE-Proton10-2" / "files" / "lib" / "wine" / "x86_64-windows"
+        _dll(lib / "kernel32.dll")
+        sys32 = self.shared / "system32"
+        sys32.mkdir(parents=True)
+        old = str(self.compat / "GE-Proton9-1" / "files" / "lib" / "wine" / "x86_64-windows")
+        try:
+            os.symlink(old + "/kernel32.dll", str(sys32 / "kernel32.dll"))
+        except OSError:
+            self.skipTest("symlinks not available")
+        os.symlink(old + "/gone.dll", str(sys32 / "gone.dll"))
+        os.symlink("/somewhere/else/user.dll", str(sys32 / "user.dll"))   # not Proton's: left alone
+        self.assertEqual(self.ge.relink_dangling_builtins("GE-Proton10-2", []), (1, 1))
+        self.assertEqual(os.readlink(sys32 / "kernel32.dll"), str(lib / "kernel32.dll"))
+        self.assertFalse(os.path.lexists(sys32 / "gone.dll"))
+        self.assertTrue(os.path.islink(sys32 / "user.dll"))
+
+    def test_repair_recreates_a_deleted_shared_folder(self):
+        self.tool("GE-Proton10-2", b"x")
+        root = Path(self.tmp.name, "Steam")
+        win = root / "steamapps" / "compatdata" / "10190" / "pfx" / "drive_c" / "windows"
+        win.mkdir(parents=True)
+        try:
+            for d in ("system32", "syswow64"):
+                os.symlink(str(self.shared / d), str(win / d))
+        except OSError:
+            self.skipTest("symlinks not available")
+        with patch.dict(os.environ, {"HOME": self.tmp.name}):
+            self.assertTrue(self.ge.repair_prefixes("GE-Proton10-2", str(root)))
+        self.assertTrue((win / "system32" / "kernel32.dll").is_file())
+        self.assertTrue((win / "syswow64" / "kernel32.dll").is_file())
+
+
+class GeProtonCleanupTests(unittest.TestCase):
+    """Old GE-Protons go, but only DeckOps's own, the rollback one stays,
+    and nothing that is still in use is removed."""
+
+    def setUp(self):
+        import ge_proton
+        self.ge = ge_proton
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name, "home")
+        self.home.mkdir()
+        self.compat = Path(self.tmp.name, "compatibilitytools.d")
+        self.root = Path(self.tmp.name, "Steam")
+        (self.root / "config").mkdir(parents=True)
+        self.tracked = ["GE-Proton10-1", "GE-Proton10-2", "GE-Proton10-3", "GE-Proton10-4", "GE-Proton10-9"]
+        self.saved = None
+        for v in ["GE-Proton10-0"] + self.tracked:          # 10-0: the player's own
+            tool = self.compat / v
+            (tool / "files" / "share" / "default_pfx").mkdir(parents=True)
+            (tool / "proton").write_text("")
+            (tool / "compatibilitytool.vdf").write_text("")
+        self.mapping({"10190": "GE-Proton10-2", "0": "proton_9"})
+        patches = [patch.object(ge_proton, "COMPAT_DIR", str(self.compat)),
+                   patch.object(ge_proton, "SHARED_DLL_DIR", str(Path(self.tmp.name, "shared"))),
+                   patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}),
+                   patch("config.get_ge_proton_installed", side_effect=lambda: list(self.tracked)),
+                   patch("config.set_ge_proton_installed", side_effect=self.save),
+                   patch("config.get_ge_proton_version", return_value="GE-Proton10-4")]
+        for p in patches:
+            p.start(); self.addCleanup(p.stop)
+
+    def save(self, versions):
+        self.saved = versions
+
+    def mapping(self, maps):
+        body = "".join(SetupCheckTests.MAP % (a, n) for a, n in maps.items())
+        (self.root / "config" / "config.vdf").write_text(SetupCheckTests.CONFIG % body)
+
+    def left(self):
+        return sorted(os.listdir(self.compat))
+
+    def test_keeps_current_previous_newer_mapped_and_players_own(self):
+        removed = self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root))
+        self.assertEqual(removed, ["GE-Proton10-1"])
+        self.assertEqual(self.left(), ["GE-Proton10-0", "GE-Proton10-2", "GE-Proton10-3",
+                                       "GE-Proton10-4", "GE-Proton10-9"])
+        self.assertNotIn("GE-Proton10-1", self.saved)
+        self.assertIn("GE-Proton10-4", self.saved)
+
+    def test_mapping_released_then_removed(self):
+        self.mapping({"10190": "GE-Proton10-4"})
+        self.assertEqual(sorted(self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root))),
+                         ["GE-Proton10-1", "GE-Proton10-2"])
+
+    def test_versions_still_used_elsewhere_are_kept(self):
+        self.mapping({})
+        heroic = self.home / ".var" / "app" / "com.heroicgameslauncher.hgl" / "config" / "heroic" / "GamesConfig"
+        heroic.mkdir(parents=True)
+        (heroic / "do_x.json").write_text(json.dumps({"do_x": {"wineVersion": {
+            "bin": str(Path("~/.local/share/Steam/compatibilitytools.d/GE-Proton10-1/proton")).replace("\\", "/")}}}))
+        (self.home / "DeckOps").mkdir()
+        (self.home / "DeckOps" / "deckops.json").write_text(json.dumps({"ge_proton_version": "GE-Proton10-2"}))
+        self.assertEqual(self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root)), [])
+
+    def test_nothing_removed_when_steam_settings_unreadable(self):
+        (self.root / "config" / "config.vdf").unlink()
+        self.assertEqual(self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root)), [])
+        (self.root / "config" / "config.vdf").write_text('"InstallConfigStore" { "Software" { broken')
+        self.assertEqual(self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root)), [])
+        self.assertIn("GE-Proton10-1", self.left())
+
+    def test_incomplete_current_version_removes_nothing(self):
+        (self.compat / "GE-Proton10-4" / "proton").unlink()
+        self.assertEqual(self.ge.cleanup_old_ge_versions("GE-Proton10-4", str(self.root)), [])
+
+
+class GeProtonTrackingTests(unittest.TestCase):
+    def test_versions_deckops_used_are_remembered(self):
+        import config
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "deckops.json")
+            Path(path).write_text(json.dumps({"ge_proton_version": "GE-Proton9-20"}))   # older install
+            with patch.object(config, "CONFIG_PATH", path), patch.object(config, "_cache", None):
+                self.assertEqual(config.get_ge_proton_installed(), ["GE-Proton9-20"])
+                config.set_ge_proton_version("GE-Proton10-1")
+                config.set_ge_proton_version("GE-Proton10-1")
+                self.assertEqual(config.get_ge_proton_version(), "GE-Proton10-1")
+                self.assertEqual(sorted(config.get_ge_proton_installed()), ["GE-Proton10-1", "GE-Proton9-20"])
+
+
 class SaveBackupFailureTests(unittest.TestCase):
     def test_skipped_group_is_reported_not_called_complete(self):
         import save_backup as sb
@@ -807,8 +983,20 @@ class SetupCheckTests(unittest.TestCase):
         (self.mw2 / "iw4x-launcher.exe").write_text("x")
         self.setup = {"iw4mp": {"client": "iw4x", "source": "steam"}}
         self.installed = {"iw4mp": {"install_dir": str(self.mw2)}}
+        for appid in ("10190", "7940"):
+            self.prefix(appid)
+        for target, value in (("config.get_ge_proton_version", "GE-Proton10-1"),
+                              ("config.is_lcd", False)):
+            p = patch(target, return_value=value)
+            p.start(); self.addCleanup(p.stop)
         self.write(tool="GE-Proton10-1",
                    option='DECKOPS_MENU=\\"x\\" bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix())
+
+    def prefix(self, appid):
+        win = self.root / "steamapps" / "compatdata" / appid / "pfx" / "drive_c" / "windows"
+        for d in ("system32", "syswow64"):
+            (win / d).mkdir(parents=True, exist_ok=True)
+        return win
 
     def write(self, tool=None, option="", appid="10190"):
         maps = self.MAP % (appid, tool) if tool is not None else ""
@@ -865,6 +1053,90 @@ class SetupCheckTests(unittest.TestCase):
         (cod4 / "deckops_cod4r.json").write_text("{}")
         self.assertTrue(any("launch option is missing" in p for p in self.check()["problems"]))
 
+    def test_other_ge_proton_than_deckops_set_up(self):
+        opt = 'bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix()
+        (self.root / "compatibilitytools.d" / "GE-Proton10-2").mkdir()
+        with patch("config.get_ge_proton_version", return_value="GE-Proton10-2"):
+            r = self.check()
+            self.assertTrue(any("GE-Proton10-1" in p and "DeckOps set up GE-Proton10-2" in p
+                                for p in r["problems"]), r)
+            self.assertTrue(r["fixable"])
+        # DeckOps's version is gone from disk: the mapped one is the best there is
+        with patch("config.get_ge_proton_version", return_value="GE-Proton10-9"):
+            self.assertEqual(self.check()["problems"], [])
+        self.write(tool="proton_9", option=opt)            # the player's own choice
+        with patch("config.get_ge_proton_version", return_value="GE-Proton10-2"):
+            self.assertEqual(self.check()["problems"], [])
+
+    def test_missing_or_incomplete_prefix(self):
+        import shutil
+        win = self.root / "steamapps" / "compatdata" / "10190" / "pfx" / "drive_c" / "windows"
+        shutil.rmtree(win / "syswow64")
+        r = self.check()
+        self.assertIn("Its Proton prefix is incomplete.", r["problems"])
+        self.assertTrue(r["fixable"])
+        shutil.rmtree(self.root / "steamapps" / "compatdata" / "10190")
+        r = self.check()
+        self.assertIn(self.sc.PREFIX_MISSING, r["problems"])
+        self.assertTrue(r["fixable"])
+
+    def test_lcd_plutonium_runs_in_heroic_prefix(self):
+        import shutil
+        shutil.rmtree(self.root / "steamapps" / "compatdata")
+        bo2 = Path(self.tmp.name, "games", "BO2"); bo2.mkdir()
+        (bo2 / "deckops_plutonium.json").write_text("{}")
+        self.installed = {"t6mp": {"install_dir": str(bo2)}}
+        self.setup = {"t6mp": {"client": "plutonium", "source": "steam"}}
+        self.write(tool="GE-Proton10-1", option='bash \\"%s/prelaunch.sh\\" %%command%%'
+                   % self.inst.as_posix(), appid="202990")
+        with patch("config.is_lcd", return_value=True):
+            self.assertNotIn(self.sc.PREFIX_MISSING, self.check()["problems"])
+        self.assertIn(self.sc.PREFIX_MISSING, self.check()["problems"])
+
+    def test_prefix_links(self):
+        import shutil
+        win = self.root / "steamapps" / "compatdata" / "10190" / "pfx" / "drive_c" / "windows"
+        shutil.rmtree(win / "system32")
+        try:
+            os.symlink(str(Path(self.tmp.name, "shared_dlls", "system32")), str(win / "system32"))
+        except OSError:
+            self.skipTest("symlinks not available")
+        self.assertIn("Its Proton prefix uses a shared DLL folder that is missing.", self.check()["problems"])
+        os.remove(win / "system32")
+        (win / "system32").mkdir()
+        os.symlink("/x/compatibilitytools.d/GE-Proton9-1/files/lib/wine/x86_64-windows/kernel32.dll",
+                   str(win / "system32" / "kernel32.dll"))
+        r = self.check()
+        self.assertIn("Its Proton prefix links to a GE-Proton version that was removed.", r["problems"])
+        self.assertTrue(r["fixable"])
+
+    def test_shortcuts(self):
+        import shortcut
+        expected = {"cod4mp": ("steam", "CoD4 MP"), "t6mp": ("heroic", "BO2 MP (HGL)")}
+        maps = {"111": "GE-Proton10-1"}
+        with patch.object(shortcut, "expected_shortcuts", return_value=(expected, True)), \
+             patch.object(shortcut, "present_shortcut_names",
+                          return_value={"CoD4 MP", "BO2 MP (HGL)", shortcut.LAUNCHER_TITLE}), \
+             patch.object(shortcut, "get_shortcut_appid", return_value=111), \
+             patch.object(self.sc, "_compat_tool", side_effect=lambda sr, a: maps.get(a, "")):
+            r = self.sc.check_shortcuts(str(self.root), {})
+            self.assertEqual((r["problems"], r["fix"]), ([], "shortcuts"))
+            maps.clear()                                   # CoD4 MP lost its compat tool
+            r = self.sc.check_shortcuts(str(self.root), {})
+            self.assertEqual(r["problems"], ["CoD4 MP is not set to run with GE-Proton."])
+            self.assertTrue(r["fixable"])
+            maps["111"] = "GE-Proton9-1"                   # removed GE-Proton
+            self.assertIn("not installed", self.sc.check_shortcuts(str(self.root), {})["problems"][0])
+        with patch.object(shortcut, "expected_shortcuts", return_value=(expected, True)), \
+             patch.object(shortcut, "present_shortcut_names", return_value={"CoD4 MP"}), \
+             patch.object(shortcut, "get_shortcut_appid", return_value=111), \
+             patch.object(self.sc, "_compat_tool", return_value="GE-Proton10-1"):
+            r = self.sc.check_shortcuts(str(self.root), {})
+            self.assertEqual(r["problems"], ["BO2 MP (HGL) is missing from Steam.",
+                                             f"{shortcut.LAUNCHER_TITLE} is missing from Steam."])
+        with patch.object(shortcut, "expected_shortcuts", return_value=({}, False)):
+            self.assertIsNone(self.sc.check_shortcuts(str(self.root), {}))
+
     def test_own_copy_skips_steam_checks(self):
         self.setup = {"iw4mp": {"client": "iw4x", "source": "own"}}
         self.write(tool=None, option="")
@@ -903,6 +1175,27 @@ class SetupCheckTests(unittest.TestCase):
         gd, keys = mgmt._update.call_args[0]
         self.assertEqual(keys, ["iw4mp"])
         self.assertIn("iw4mp", gd["keys"])
+
+    def test_shortcut_fix_runs_repair_shortcuts(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PyQt6.QtWidgets import QApplication, QPushButton
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        app = _qapp(QApplication)
+        import ui_manage
+        screen = ui_manage.ConfigureScreen(None)
+        results = [{"key": "shortcuts", "name": "DeckOps shortcuts", "fix": "shortcuts",
+                    "problems": ["CoD4 MP is missing from Steam."], "fixable": True}]
+        with patch.object(ui_manage.QDialog, "exec", return_value=0), \
+             patch.object(screen, "_repair_shortcuts") as repair, \
+             patch.object(screen, "_fix_game") as fix_game:
+            screen._show_setup_report(results, {})
+            [fix] = [b for b in screen._setup_dialog.findChildren(QPushButton) if b.text() == "Fix"]
+            fix.click()
+            app.processEvents()
+        repair.assert_called_once_with()
+        fix_game.assert_not_called()
 
 
 class SteamFileSafetyTests(unittest.TestCase):

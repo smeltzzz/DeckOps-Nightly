@@ -19,6 +19,7 @@ CompatToolMapping written to:
 
 import json
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -625,15 +626,85 @@ def _overlay_prefix(source_pfx_dir: str, dest_prefix_path: str,
 # This lives under DeckOps's data dir so Steam can't touch it.
 
 SHARED_DLL_DIR = os.path.expanduser("~/.local/share/deckops/shared_dlls")
+# GE-Proton version the shared DLLs were last refreshed from
+SHARED_DLL_STAMP = ".ge_version"
+
+# A symlink Proton made to one of its own Wine builtin libraries, e.g.
+# .../compatibilitytools.d/GE-Proton10-34/files/lib/wine/x86_64-windows/kernel32.dll
+_WINE_LIB_LINK = re.compile(r"/files/(lib(?:64)?/wine/.+)$")
+
+
+def _is_wine_builtin(path: str) -> bool:
+    """True for a Wine builtin/placeholder DLL, including a link into some
+    Proton's lib/wine that may be broken. Same test as Proton's
+    file_is_wine_builtin_dll: these are the files Proton itself replaces
+    when it upgrades a prefix. Anything else (a game's or redist's native
+    DLL) is never touched."""
+    if os.path.islink(path):
+        target = os.readlink(path).replace("\\", "/")
+        if re.search(r"/lib(?:64)?/wine(?:/[^/]+)?$", os.path.dirname(target)):
+            return True
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "rb") as f:
+            f.seek(0x40)
+            return f.read(20).startswith((b"Wine placeholder DLL", b"Wine builtin DLL"))
+    except OSError:
+        return False
+
+
+def _same_file(a: str, b: str) -> bool:
+    import filecmp
+    try:
+        return not os.path.islink(b) and filecmp.cmp(a, b, shallow=True)
+    except OSError:
+        return False
+
+
+def _refresh_dll_dir(src: str, dst: str) -> tuple[int, int]:
+    """Bring dst up to date with src (a default_pfx system32/syswow64)
+    without deleting anything: add missing files and replace Wine builtins
+    that differ. Native DLLs a game or redist installed are kept.
+    Returns (added, replaced)."""
+    added = replaced = 0
+    for root, dirs, files in os.walk(src):
+        rel = os.path.relpath(root, src)
+        out = os.path.normpath(os.path.join(dst, rel))
+        os.makedirs(out, exist_ok=True)
+        for name in files:
+            s, d = os.path.join(root, name), os.path.join(out, name)
+            if not os.path.exists(s):          # broken link in default_pfx
+                continue
+            if os.path.lexists(d):
+                if not _is_wine_builtin(d) or _same_file(s, d):
+                    continue
+                os.remove(d)
+                replaced += 1
+            else:
+                added += 1
+            shutil.copy2(s, d)   # follows default_pfx's links: a real copy, as before
+    return added, replaced
+
+
+def _read_stamp() -> str | None:
+    try:
+        with open(os.path.join(SHARED_DLL_DIR, SHARED_DLL_STAMP)) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
 
 
 def _ensure_shared_dlls(ge_version: str | None, on_progress=None) -> bool:
     """
-    Ensure the shared DLL directory exists with the full set of DLLs
-    from GE-Proton's default_pfx.
+    Ensure the shared DLL directory holds GE-Proton's default_pfx
+    system32 and syswow64.
 
-    If the directory already has the expected file count, this is a no-op.
-    Otherwise it copies system32 and syswow64 from default_pfx.
+    No-op if it was last refreshed from this GE-Proton version. Otherwise
+    missing files are added and Wine builtins replaced, never deleted: every
+    symlinked prefix uses these folders, and they can hold native DLLs a
+    game installed. (This used to rmtree and re-copy both folders whenever
+    the new GE-Proton had more DLLs, and skip a new version otherwise.)
 
     Returns True if shared DLLs are ready, False on failure.
     """
@@ -648,31 +719,26 @@ def _ensure_shared_dlls(ge_version: str | None, on_progress=None) -> bool:
     shared_wow64 = os.path.join(SHARED_DLL_DIR, "syswow64")
     src_sys32 = os.path.join(default_pfx, "drive_c", "windows", "system32")
     src_wow64 = os.path.join(default_pfx, "drive_c", "windows", "syswow64")
+    # The version default_pfx really came from (it falls back to the newest)
+    source_version = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.normpath(default_pfx)))))
 
-    # Check if already populated -- count DLLs in source vs dest
-    if os.path.isdir(shared_sys32) and os.path.isdir(shared_wow64):
-        src_count = sum(1 for f in os.listdir(src_sys32) if f.lower().endswith(".dll"))
-        dst_count = sum(1 for f in os.listdir(shared_sys32) if f.lower().endswith(".dll"))
-        if dst_count >= src_count:
-            prog(f"  ✓ Shared DLLs verified ({dst_count} files)")
-            return True
+    if (os.path.isdir(shared_sys32) and os.path.isdir(shared_wow64)
+            and _read_stamp() == source_version):
+        prog(f"  ✓ Shared DLLs up to date ({source_version})")
+        return True
 
     import time
-    prog("  Setting up shared DLL directory...")
+    prog(f"  Updating shared DLLs from {source_version}...")
     start = time.time()
 
     try:
-        # Copy full directories from default_pfx -- includes all file types
-        # not just DLLs (some .exe, .drv, etc. are also needed by Wine)
-        if os.path.isdir(shared_sys32):
-            shutil.rmtree(shared_sys32)
-        if os.path.isdir(shared_wow64):
-            shutil.rmtree(shared_wow64)
-        os.makedirs(SHARED_DLL_DIR, exist_ok=True)
-        shutil.copytree(src_sys32, shared_sys32)
-        shutil.copytree(src_wow64, shared_wow64)
+        a32, r32 = _refresh_dll_dir(src_sys32, shared_sys32)
+        a64, r64 = _refresh_dll_dir(src_wow64, shared_wow64)
+        with open(os.path.join(SHARED_DLL_DIR, SHARED_DLL_STAMP), "w") as f:
+            f.write(source_version + "\n")
         elapsed = time.time() - start
-        prog(f"  ✓ Shared DLLs ready ({elapsed:.1f}s)")
+        prog(f"  ✓ Shared DLLs ready: {a32 + a64} added, {r32 + r64} updated ({elapsed:.1f}s)")
         return True
     except Exception as ex:
         prog(f"  ⚠ Shared DLL setup failed: {ex}")
@@ -972,3 +1038,230 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
             success += 1
 
     return success
+
+
+# ── Old GE-Proton cleanup and prefix link repair ─────────────────────────────
+#
+# Proton fills a prefix's system32/syswow64 with links into its own
+# compatibilitytools.d/<version>/files/lib/wine. Prefixes DeckOps cloned
+# share one system32/syswow64 (SHARED_DLL_DIR), and Proton writes those links
+# through the shared folder, so a prefix can hold links into a GE-Proton other
+# than the one it runs with. Proton only refreshes them when the prefix's own
+# version changes, so deleting an old GE-Proton can leave a prefix whose
+# version did not change with broken links. Every removal is followed by
+# relink_dangling_builtins, which points them at the current GE-Proton.
+
+_PROTON_FILES_LINK = re.compile(r"/compatibilitytools\.d/(GE-Proton[^/]*)/files/(.+)$")
+
+
+def _version_key(name: str) -> tuple:
+    # Same order as steam_common.newest_proton_dir
+    return tuple(int(p) for p in re.findall(r"\d+", name))
+
+
+def _links_to_shared(prefix: str) -> bool:
+    shared = os.path.realpath(SHARED_DLL_DIR)
+    for d in ("system32", "syswow64"):
+        p = os.path.join(prefix, "pfx", "drive_c", "windows", d)
+        if os.path.islink(p) and os.path.realpath(p).startswith(shared + os.sep):
+            return True
+    return False
+
+
+def _deckops_prefixes(steam_root: str | None = None) -> list:
+    """compatdata roots DeckOps set up: the managed appids' prefixes, every
+    prefix linked to the shared DLLs (own-copy shortcuts included) and the
+    offline prefixes."""
+    from steam_common import STEAM_ROOT
+    sr = steam_root or STEAM_ROOT
+    out, seen = [], set()
+
+    def add(p):
+        if p and os.path.isdir(os.path.join(p, "pfx")):
+            real = os.path.realpath(p)
+            if real not in seen:
+                seen.add(real)
+                out.append(p)
+
+    try:
+        from wrapper import find_compatdata
+        for appid in MANAGED_APPIDS:
+            add(find_compatdata(sr, appid))
+    except Exception:
+        _log.debug("managed prefixes not resolved", exc_info=True)
+    root = os.path.join(sr, "steamapps", "compatdata")
+    if os.path.isdir(root):
+        for name in sorted(os.listdir(root)):
+            p = os.path.join(root, name)
+            if _links_to_shared(p):
+                add(p)
+    try:
+        from plutonium import LAN_PREFIX, LAN_SERVER_PREFIX
+        add(LAN_PREFIX)
+        add(LAN_SERVER_PREFIX)
+    except Exception:
+        _log.debug("offline prefixes not resolved", exc_info=True)
+    return out
+
+
+def relink_dangling_builtins(ge_version: str, prefixes: list) -> tuple[int, int]:
+    """Point broken links into a removed GE-Proton at the same file in
+    ge_version. A broken Wine builtin link with no counterpart is removed;
+    Proton recreates it on the next launch. Looks in the shared DLLs and in
+    each prefix's drive_c/windows. Returns (relinked, removed)."""
+    tool = os.path.join(COMPAT_DIR, ge_version) if ge_version else None
+    relinked = removed = 0
+    roots = [SHARED_DLL_DIR] + [os.path.join(p, "pfx", "drive_c", "windows") for p in prefixes]
+    for top in roots:
+        if not os.path.isdir(top):
+            continue
+        for root, _dirs, files in os.walk(top):      # does not follow linked folders
+            for name in files:
+                path = os.path.join(root, name)
+                if not os.path.islink(path) or os.path.exists(path):
+                    continue
+                target = os.path.normpath(os.path.join(root, os.readlink(path))).replace("\\", "/")
+                m = _PROTON_FILES_LINK.search(target)
+                if not m:
+                    continue
+                new = os.path.join(tool, "files", m.group(2)) if tool else None
+                try:
+                    if new and os.path.exists(new):
+                        os.remove(path)
+                        os.symlink(new, path)
+                        relinked += 1
+                    elif _is_wine_builtin(path):
+                        os.remove(path)
+                        removed += 1
+                except OSError:
+                    _log.warning("could not repair link %s", path, exc_info=True)
+    return relinked, removed
+
+
+def _mapped_ge_versions(steam_root: str) -> set | None:
+    """Every compat tool name in config.vdf's CompatToolMapping (all appids,
+    the global default "0" included). None if config.vdf can't be read."""
+    from wrapper import _vdf_child_block, _flat_values, _vdf_children
+    path = os.path.join(steam_root, "config", "config.vdf")
+    try:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
+            content = f.read()
+        block = (-1, len(content))
+        for key in ("InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping"):
+            block = _vdf_child_block(content, block, key)
+            if not block:
+                return set()
+        names = set()
+        for _k, _ks, vs, ve, is_block in _vdf_children(content, block[0] + 1, block[1]):
+            if is_block:
+                for _ks2, nvs, nve in _flat_values(content, (vs, ve), "name"):
+                    names.add(content[nvs:nve])
+        return names
+    except (OSError, ValueError):
+        _log.warning("config.vdf not readable, old GE-Proton kept", exc_info=True)
+        return None
+
+
+def _ge_versions_in_use(steam_root: str) -> set | None:
+    """GE-Proton names something still points at: Steam's compat tool
+    mappings, this and the other DeckOps build's pinned version, and Heroic's
+    game configs (LCD Plutonium). None if Steam's mappings can't be read."""
+    used = _mapped_ge_versions(steam_root)
+    if used is None:
+        return None
+    for name in ("DeckOps", "DeckOps-Nightly"):         # Stable and Nightly side by side
+        try:
+            with open(os.path.expanduser(f"~/{name}/deckops.json")) as f:
+                v = json.load(f).get("ge_proton_version")
+            if isinstance(v, str) and v:
+                used.add(v)
+        except (OSError, ValueError, AttributeError):
+            continue
+    try:
+        import config as _cfg
+        if _cfg.get_ge_proton_version():
+            used.add(_cfg.get_ge_proton_version())
+    except Exception:
+        _log.debug("pinned GE-Proton not read", exc_info=True)
+    for d in (os.path.expanduser("~/.var/app/com.heroicgameslauncher.hgl/config/heroic/GamesConfig"),
+              os.path.expanduser("~/.config/heroic/GamesConfig")):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            try:
+                with open(os.path.join(d, name), errors="replace") as f:
+                    used.update(re.findall(r"compatibilitytools\.d/([^/\"\\]+)", f.read()))
+            except OSError:
+                pass
+    return used
+
+
+def cleanup_old_ge_versions(current: str, steam_root: str | None = None,
+                            on_progress=None) -> list:
+    """
+    Remove GE-Proton versions DeckOps installed that are older than current,
+    keeping current and the newest one before it (a rollback). Only versions
+    DeckOps recorded (config ge_proton_installed) are candidates, so
+    GE-Protons the player installed are never touched; neither is any version
+    a game, shortcut, Heroic config or the other DeckOps build still uses.
+    Nothing is removed if config.vdf can't be read. Returns removed names.
+    """
+    import config as _cfg
+    from steam_common import STEAM_ROOT
+    prog = on_progress or (lambda *a: None)
+    sr = steam_root or STEAM_ROOT
+
+    if not current or not _is_installed(current):
+        return []
+    tracked = set(_cfg.get_ge_proton_installed()) | {current}
+    on_disk = {v for v in tracked
+               if os.path.isdir(os.path.join(COMPAT_DIR, v))
+               and not os.path.islink(os.path.join(COMPAT_DIR, v))}
+    older = sorted((v for v in on_disk if _version_key(v) < _version_key(current)),
+                   key=_version_key, reverse=True)
+    if len(older) < 2:
+        return []
+
+    in_use = _ge_versions_in_use(sr)
+    if in_use is None:
+        prog("  Old GE-Proton versions kept: Steam's settings could not be read")
+        return []
+
+    removed = []
+    for v in older[1:]:                      # older[0] is the rollback version
+        if v in in_use:
+            prog(f"  {v} kept: still in use")
+            continue
+        try:
+            shutil.rmtree(os.path.join(COMPAT_DIR, v))
+            removed.append(v)
+            prog(f"  ✓ Removed old {v}")
+        except OSError as ex:
+            prog(f"  ⚠ Could not remove {v}: {ex}")
+
+    _cfg.set_ge_proton_installed(sorted(
+        (v for v in tracked if v == current or (v in on_disk and v not in removed)),
+        key=_version_key))
+    if removed:
+        relinked, gone = relink_dangling_builtins(current, _deckops_prefixes(sr))
+        if relinked or gone:
+            prog(f"  ✓ {relinked} prefix link(s) moved to {current}")
+    return removed
+
+
+def repair_prefixes(ge_version: str, steam_root: str | None = None,
+                    on_progress=None) -> bool:
+    """Bring DeckOps's prefixes in line with ge_version: refresh (or
+    recreate) the shared DLLs if any prefix uses them and repoint links into
+    a removed GE-Proton. Returns False if the shared DLLs could not be set up."""
+    prog = on_progress or (lambda *a: None)
+    if not ge_version:
+        return True
+    prefixes = _deckops_prefixes(steam_root)
+    ok = True
+    if any(_links_to_shared(p) for p in prefixes):
+        ok = _ensure_shared_dlls(ge_version, on_progress=prog)
+    relinked, removed = relink_dangling_builtins(ge_version, prefixes)
+    if relinked or removed:
+        prog(f"  ✓ Repaired {relinked + removed} prefix link(s) to a removed GE-Proton")
+    return ok

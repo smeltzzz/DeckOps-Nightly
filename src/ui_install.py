@@ -1518,6 +1518,7 @@ class _BaseInstallScreen(QWidget):
 
         # --- GE-Proton download (Steam still running)
         ge_version = None
+        ge_fresh = False
         self._phase("ge")
         try:
             self._s.pulse_start.emit("Installing GE-Proton")
@@ -1528,6 +1529,7 @@ class _BaseInstallScreen(QWidget):
             self._s.pulse_stop.emit()
             self._s.log.emit(f"✓  {ge_version} downloaded")
             cfg.set_ge_proton_version(ge_version)
+            ge_fresh = True
         except Exception as ex:
             self._s.pulse_stop.emit()
             self._s.log.emit(f"  GE-Proton setup skipped: {ex}")
@@ -2057,6 +2059,16 @@ class _BaseInstallScreen(QWidget):
                 self._s.log.emit(f"✓  {ge_version} set for Steam game appids")
             except Exception as ex:
                 self._s.log.emit(f"  CompatToolMapping for Steam appids skipped: {ex}")
+
+        # Old GE-Protons DeckOps installed that nothing uses any more
+        # (keeps this one and the one before it). Steam is closed here.
+        if ge_fresh:
+            try:
+                from ge_proton import cleanup_old_ge_versions
+                cleanup_old_ge_versions(ge_version, self.steam_root,
+                                        on_progress=self._s.log.emit)
+            except Exception as ex:
+                self._s.log.emit(f"  Old GE-Proton cleanup skipped: {ex}")
 
         # --- Plutonium games (skipped if the Plutonium login failed)
         if plut_ok:

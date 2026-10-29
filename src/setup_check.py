@@ -2,10 +2,12 @@
 setup_check.py — read-only "Check My Setup" report for the games DeckOps set up.
 
 For every set-up game: is its folder there, are DeckOps's mod files there, and
-(Steam copies) does Steam still map it to an installed compatibility tool and
-still have the launch option DeckOps set, with every DeckOps file it calls on
-disk. Nothing is written; Steam may be running. Repairs go through the normal
-per-game Update flow (ui_manage), never through this module.
+(Steam copies) does Steam still map it to an installed compatibility tool --
+the GE-Proton DeckOps set up -- and still have the launch option DeckOps set,
+with every DeckOps file it calls on disk, and is its Proton prefix intact.
+check_shortcuts does the same for DeckOps's non-Steam shortcuts. Nothing is
+written; Steam may be running. Repairs go through the normal per-game Update
+flow or Repair Shortcuts (ui_manage), never through this module.
 """
 
 import os
@@ -91,6 +93,77 @@ def _deckops_paths(option: str) -> list:
     return [p for root in roots for p in re.findall(re.escape(root) + r'[^\s"\']+', option)]
 
 
+def _pinned_ge() -> str | None:
+    """The GE-Proton DeckOps set up last, or None."""
+    try:
+        import config as cfg
+        return cfg.get_ge_proton_version()
+    except Exception:
+        return None
+
+
+def _ge_installed(steam_root: str, tool: str) -> bool:
+    return any(os.path.isdir(os.path.join(d, tool)) for d in _tool_dirs(steam_root))
+
+
+def _ge_problem(steam_root: str, tool, pinned) -> str | None:
+    """Problem with a Steam compat tool mapping that should be DeckOps's
+    GE-Proton. Another tool (Valve Proton) is the player's choice: no problem."""
+    if tool == "":
+        return "is not set to run with GE-Proton."
+    if tool and tool.startswith("GE-Proton"):
+        if not _ge_installed(steam_root, tool):
+            return f"is set to {tool}, which is not installed."
+        if pinned and tool != pinned and _ge_installed(steam_root, pinned):
+            return f"runs with {tool}, but DeckOps set up {pinned}."
+    return None
+
+
+def uses_steam_prefix(key: str, client: str, source: str) -> bool:
+    """True if this game runs in its Steam appid's prefix. LCD Plutonium
+    runs in Heroic's prefix instead; own copies use their shortcut's."""
+    if source != "steam":
+        return False
+    if client == "plutonium":
+        try:
+            import config as cfg
+            if cfg.is_lcd():
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def prefix_path(steam_root: str, key: str, client: str, game: dict) -> str | None:
+    """The prefix (compatdata root) Update and the client installers use."""
+    appid = _appid(key, client)
+    if not appid:
+        return None
+    from wrapper import find_compatdata
+    return find_compatdata(steam_root, appid, game_install_dir=(game or {}).get("install_dir"))
+
+
+PREFIX_MISSING = "Its Proton prefix is missing."
+
+
+def prefix_problems(compat: str | None) -> list:
+    """What is wrong with a prefix: missing, a symlinked system32/syswow64
+    whose shared DLL folder is gone, or links into a removed GE-Proton."""
+    if not compat or not os.path.isdir(os.path.join(compat, "pfx", "drive_c")):
+        return [PREFIX_MISSING]
+    win = os.path.join(compat, "pfx", "drive_c", "windows")
+    for d in ("system32", "syswow64"):
+        p = os.path.join(win, d)
+        if os.path.islink(p) and not os.path.isdir(p):
+            return ["Its Proton prefix uses a shared DLL folder that is missing."]
+        if not os.path.isdir(p):
+            return ["Its Proton prefix is incomplete."]
+    k32 = os.path.join(win, "system32", "kernel32.dll")
+    if os.path.islink(k32) and not os.path.exists(k32):
+        return ["Its Proton prefix links to a GE-Proton version that was removed."]
+    return []
+
+
 def check_game(key: str, entry: dict, game: dict | None, steam_root: str,
                setup_games: dict) -> dict:
     """One game's result: {"key", "name", "problems": [str], "fixable": bool}."""
@@ -118,10 +191,20 @@ def check_game(key: str, entry: dict, game: dict | None, steam_root: str,
             if tool == "":
                 problems.append("Steam is not set to run it with GE-Proton.")
                 fixable = True
-            elif tool and tool.startswith("GE-Proton") and \
-                    not any(os.path.isdir(os.path.join(d, tool)) for d in _tool_dirs(steam_root)):
+            elif tool and tool.startswith("GE-Proton") and not _ge_installed(steam_root, tool):
                 problems.append(f"{tool} is selected in Steam but is not installed.")
                 fixable = True
+            elif tool and tool.startswith("GE-Proton"):
+                pinned = _pinned_ge()
+                if pinned and tool != pinned and _ge_installed(steam_root, pinned):
+                    problems.append(f"Steam runs it with {tool}, but DeckOps set up {pinned}.")
+                    fixable = True
+
+            if uses_steam_prefix(key, client, source):
+                issues = prefix_problems(prefix_path(steam_root, key, client, game))
+                if issues:
+                    problems.extend(issues)
+                    fixable = True
 
             expected = None
             if key in _COD4_KEYS:
@@ -143,6 +226,46 @@ def check_game(key: str, entry: dict, game: dict | None, steam_root: str,
                         fixable = True
                         break
     result["fixable"] = fixable
+    return result
+
+
+SHORTCUTS_KEY = "shortcuts"
+
+
+def check_shortcuts(steam_root: str, setup_games: dict) -> dict | None:
+    """One result for DeckOps's non-Steam shortcuts (CoD4x MP, LCD WaW MP,
+    own copies, the Offline launcher): missing for a Steam user, or a
+    GE-Proton shortcut with no, a missing or another GE-Proton.
+    {"key": SHORTCUTS_KEY, ..., "fix": "shortcuts"}; None if DeckOps made none.
+    Fix is Repair Shortcuts."""
+    import shortcut
+    expected, has_launcher = shortcut.expected_shortcuts(setup_games)
+    if not expected and not has_launcher:
+        return None
+    result = {"key": SHORTCUTS_KEY, "name": "DeckOps shortcuts", "problems": [],
+              "fixable": False, "fix": "shortcuts"}
+    problems = result["problems"]
+    present = shortcut.present_shortcut_names()
+    if present is None:
+        problems.append("No Steam user was found, so the shortcuts could not be checked.")
+        return result
+
+    names = [(key, kind, name) for key, (kind, name) in expected.items()]
+    if has_launcher:
+        names.append((None, "launcher", shortcut.LAUNCHER_TITLE))
+    pinned = _pinned_ge()
+    for key, kind, name in names:
+        if name not in present:
+            problems.append(f"{name} is missing from Steam.")
+            continue
+        if key is None or not shortcut.shortcut_wants_ge(key, kind):
+            continue
+        appid = shortcut.get_shortcut_appid(name)
+        issue = _ge_problem(steam_root, _compat_tool(steam_root, str(appid)), pinned) \
+            if appid is not None else None
+        if issue:
+            problems.append(f"{name} {issue}")
+    result["fixable"] = bool(problems)
     return result
 
 

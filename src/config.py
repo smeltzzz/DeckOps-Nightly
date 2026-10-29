@@ -41,6 +41,8 @@ DEFAULTS = {
     "docked_resolution": None,   # "1280x720", "1280x800", "1920x1080", "1920x1200", or "own" -- picks Other/<res> configs when docked and on PC (get_model_config_dir)
                                  # NOTE: this will also be used for future Bazzite, Steam Box, and other handheld support on SteamOS
     "ge_proton_version": None,   # e.g. "GE-Proton10-32"
+    "ge_proton_installed": None, # GE-Proton versions DeckOps has used; only these are ever
+                                 #   removed by ge_proton.cleanup_old_ge_versions. None = older install
     "steam_root": None,
     "setup_games": {},           # key: game key, value: { "client": ..., "source": "steam"|"own", "setup_at": timestamp,
                                  #   "lan_wrapper_path": path to -lan bash script for offline launcher (all sources) }
@@ -385,8 +387,36 @@ def get_ge_proton_version() -> str | None:
 
 
 def set_ge_proton_version(version: str):
-    """Save the installed GE-Proton version after CompatToolMapping is applied."""
-    _set("ge_proton_version", version)
+    """Save the installed GE-Proton version after CompatToolMapping is applied.
+    Also remembers it (and the version it replaces) as one DeckOps uses, so
+    cleanup_old_ge_versions can tell DeckOps's GE-Protons from ones the player
+    installed with ProtonUp-Qt or by hand."""
+    config = load()
+    used = _ge_used(config)
+    if version and version not in used:
+        used.append(version)
+    config["ge_proton_version"] = version
+    config["ge_proton_installed"] = used
+    save(config)
+
+
+def _ge_used(config: dict) -> list:
+    used = config.get("ge_proton_installed")
+    used = [v for v in used if isinstance(v, str) and v] if isinstance(used, list) else []
+    # Installs from before this list existed: the pinned version is DeckOps's own
+    pinned = config.get("ge_proton_version")
+    if pinned and pinned not in used:
+        used.append(pinned)
+    return used
+
+
+def get_ge_proton_installed() -> list:
+    """GE-Proton versions DeckOps installed or used, in no particular order."""
+    return _ge_used(load())
+
+
+def set_ge_proton_installed(versions: list):
+    _set("ge_proton_installed", [v for v in versions if isinstance(v, str) and v])
 
 
 PLAYER_NAME_MAX = 32

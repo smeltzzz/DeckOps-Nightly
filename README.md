@@ -93,6 +93,8 @@ If Steam asks about cloud saves, choose **Keep Local**. If asked about safe mode
 
 In **My Games**, choose **Update Games** to check and repair the mod-client modes you have already set up, or **Game Options → Update Client** for one game's configured modes. Review the mode list before continuing: other Plutonium modes may be included because they share client files. DeckOps backs up saves first and closes Steam before changing its settings. Checking the optional Zombies Declassified maps is a separate, unchecked choice and may download up to ~9 GB.
 
+Each update also installs the latest GE-Proton. DeckOps then removes GE-Proton versions it installed earlier, keeping the current one and the one before it. It never removes a version that a game, shortcut or the other DeckOps build still uses, or one you installed yourself.
+
 If something fails, the result screen shows what needs attention and offers **Retry Failed Updates**. **Stop After Current Step** waits for the active operation to finish; it does not interrupt a download or installation in the middle of a write. Completed changes are kept. If a save backup is incomplete, you can decline before game files or Steam settings change.
 
 ---
@@ -118,7 +120,7 @@ DeckOps installs a controller profile for every game. Choose your gyro mode duri
 | Controller Profiles | Pick the gyro mode, then **Re-apply Templates** writes the controller layout for all your games. Closes Steam. |
 | Shortcuts | **Repair Shortcuts** re-adds any missing DeckOps shortcuts and repairs the launch menus and launch options of your games. Closes Steam. |
 | Save Backup | Copies your saves, stats and Plutonium mods to a folder that survives an uninstall. Steam can stay open. |
-| Check My Setup | Checks each game's folder, mod files, GE-Proton and Steam launch option. It changes nothing; **Fix** runs that game's Update. |
+| Check My Setup | Checks each game's folder, mod files, Steam launch option, Proton prefix, and that Steam runs it with the GE-Proton DeckOps set up. Also checks the DeckOps shortcuts (CoD4x MP, your own copies, Plutonium Offline). It changes nothing; **Fix** runs that game's Update, or **Repair Shortcuts** for the shortcuts. |
 | Player Name | Your name in CoD4x, IW4x, and Plutonium offline. |
 | FPS and FOV | **Apply 90 FPS / 90 FOV** writes both into the game configs of MW1 (campaign and multiplayer), MW2 and MW3 multiplayer, WaW, BO1, and BO2 (every mode); nothing else in those files changes. The MW2 and MW3 campaigns (64-bit Steam builds) ignore their config files, so that button does nothing for them. Their FOV is set to 90 automatically every time you start the game (`fovwatch.py`). Their FPS is set by the **MW2/MW3 FPS Limit** button, which limits the frame rate to 90 with DXVK in the launch option (it closes Steam when you change it). |
 | Shader Cache (LCD only) | Clears the shader cache of every game you have set up. |

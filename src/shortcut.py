@@ -2110,23 +2110,17 @@ def migrate_own_t6sp(game: dict, on_progress=None) -> bool:
     return True
 
 
-def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
-    """Re-add shortcuts for set-up games that are missing for any Steam
-    user, and move an old own BO2 SP shortcut to t6sp.exe. Returns the
-    names that were re-added or moved."""
+def expected_shortcuts(setup: dict) -> tuple[dict, bool]:
+    """The non-Steam shortcuts DeckOps should have for this setup:
+    ({key: (kind, name)}, offline launcher expected). kind is "steam"
+    (CoD4x MP, LCD WaW MP), "own" (own copies) or "heroic" (LCD own Plutonium)."""
     import config as cfg
-    from detect_games import parse_library_folders, find_installed_games, find_own_installed
-
-    prog = on_progress or (lambda *a: None)
-
-    sr = steam_root or STEAM_ROOT
-    setup = cfg.get_setup_games()
-    lcd = cfg.is_lcd()
     from plutonium_lcd import HEROIC_PLUT_GAMES
-
-    # key -> (kind, name). kind picks the writer below.
+    lcd = cfg.is_lcd()
     expected = {}
-    for key, entry in setup.items():
+    for key, entry in (setup or {}).items():
+        if not isinstance(entry, dict):
+            continue
         src = entry.get("source", "steam")
         if src == "steam" and key in SHORTCUTS and not mp_on_main_tile(key):
             expected[key] = ("steam", SHORTCUTS[key]["name"])
@@ -2135,7 +2129,76 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
         elif src == "own" and key in OWN_SHORTCUTS:
             expected[key] = ("own", OWN_SHORTCUTS[key]["name"])
     # The offline launcher exists only with Offline Mode added
-    has_plut = cfg.get_offline_mode() and any(e.get("client") == "plutonium" for e in setup.values())
+    has_launcher = bool(cfg.get_offline_mode()) and any(
+        isinstance(e, dict) and e.get("client") == "plutonium" for e in (setup or {}).values())
+    return expected, has_launcher
+
+
+def shortcut_wants_ge(key: str, kind: str) -> bool:
+    """True if DeckOps maps this shortcut to GE-Proton. Heroic shortcuts and
+    LCD WaW MP (a flatpak launch) must have no compat tool."""
+    if kind == "own":
+        return True
+    if kind == "steam":
+        import config as cfg
+        return not (key == "t4mp" and cfg.is_lcd())
+    return False
+
+
+def present_shortcut_names() -> set | None:
+    """Shortcut names every Steam user has, or None if there is no user."""
+    present = None
+    for uid in _find_all_steam_uids():
+        names = set(_read_existing_shortcuts(
+            os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")))
+        present = names if present is None else present & names
+    return present
+
+
+def _remap_shortcut_ge(steam_root: str, expected: dict, present: set, prog) -> list:
+    """Point present GE-Proton shortcuts that have no compat tool, a missing
+    GE-Proton or another GE-Proton than DeckOps's at DeckOps's GE-Proton.
+    A non-GE tool the player picked is left alone. Returns the names fixed."""
+    import config as cfg
+    from setup_check import _compat_tool, _ge_installed
+    pinned = cfg.get_ge_proton_version()
+    if not pinned or not _ge_installed(steam_root, pinned):
+        return []
+    fixed = []
+    for key, (kind, name) in expected.items():
+        if name not in present or not shortcut_wants_ge(key, kind):
+            continue
+        appid = get_shortcut_appid(name)
+        if appid is None:
+            continue
+        tool = _compat_tool(steam_root, str(appid))
+        if tool is None or tool == pinned or (tool and not tool.startswith("GE-Proton")):
+            continue
+        try:
+            from wrapper import set_compat_tool
+            if set_compat_tool([str(appid)], pinned) is not False:
+                prog(f"  ✓ {name}: GE-Proton set to {pinned}")
+                fixed.append(f"{name} GE-Proton")
+        except Exception as ex:
+            prog(f"  ⚠ {name}: could not set GE-Proton: {ex}")
+    return fixed
+
+
+def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
+    """Re-add shortcuts for set-up games that are missing for any Steam
+    user, point present ones back at DeckOps's GE-Proton, and move an old
+    own BO2 SP shortcut to t6sp.exe. Returns the names that were re-added,
+    remapped or moved."""
+    import config as cfg
+    from detect_games import parse_library_folders, find_installed_games, find_own_installed
+
+    prog = on_progress or (lambda *a: None)
+
+    sr = steam_root or STEAM_ROOT
+    setup = cfg.get_setup_games()
+
+    # key -> (kind, name). kind picks the writer below.
+    expected, has_plut = expected_shortcuts(setup)
 
     uids = _find_all_steam_uids()
     if not uids:
@@ -2169,11 +2232,8 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
         if g and migrate_own_t6sp(g, on_progress):
             readded.append(OWN_SHORTCUTS["t6sp"]["name"])
 
-    present = None
-    for uid in uids:
-        names = set(_read_existing_shortcuts(
-            os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")))
-        present = names if present is None else present & names
+    present = present_shortcut_names() or set()
+    readded += _remap_shortcut_ge(sr, expected, present, prog)
 
     missing = {k: v for k, v in expected.items() if v[1] not in present}
     launcher_missing = has_plut and LAUNCHER_TITLE not in present

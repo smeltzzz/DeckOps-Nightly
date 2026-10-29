@@ -2061,11 +2061,20 @@ class ConfigureScreen(QWidget):
 
         def _run():
             try:
-                from setup_check import check_setup
+                from setup_check import check_setup, check_shortcuts
                 mgmt = get_screen(self.stack, "ManagementScreen")
                 installed = (getattr(mgmt, "installed", None) or find_all_games())
-                self._setup_results = (check_setup(find_steam_root(), installed, cfg.get_setup_games()),
-                                       installed)
+                sr, setup = find_steam_root(), cfg.get_setup_games()
+                results = check_setup(sr, installed, setup)
+                try:
+                    sc = check_shortcuts(sr, setup)
+                except Exception as ex:
+                    _log.warning("shortcut check failed", exc_info=True)
+                    sc = {"key": "shortcuts", "name": "DeckOps shortcuts", "fix": "shortcuts",
+                          "problems": [f"Could not be checked: {ex}"], "fixable": False}
+                if sc:
+                    results.append(sc)
+                self._setup_results = (results, installed)
                 s.log.emit("Setup check finished.")
             except Exception as ex:
                 _log.error("setup check failed", exc_info=True)
@@ -2089,7 +2098,7 @@ class ConfigureScreen(QWidget):
         bad = [r for r in results if r["problems"]]
         vl.addWidget(_lbl("No games are set up yet." if not results else
                           "Everything looks fine." if not bad else
-                          f"{len(bad)} of {len(results)} game(s) need attention.",
+                          f"{len(bad)} of {len(results)} item(s) need attention.",
                           13, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft))
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         inner = QWidget(); rows = QVBoxLayout(inner); rows.setSpacing(8)
@@ -2101,7 +2110,10 @@ class ConfigureScreen(QWidget):
                                align=Qt.AlignmentFlag.AlignLeft), stretch=1)
             if r["fixable"]:
                 fix = _btn("Fix", C_IW, size=11, h=36); fix.setFixedWidth(90)
-                fix.clicked.connect(lambda _c=False, k=r["key"]: (dlg.accept(), self._fix_game(k)))
+                if r.get("fix") == "shortcuts":      # Repair Shortcuts, not a game's Update
+                    fix.clicked.connect(lambda _c=False: (dlg.accept(), self._repair_shortcuts()))
+                else:
+                    fix.clicked.connect(lambda _c=False, k=r["key"]: (dlg.accept(), self._fix_game(k)))
                 row.addWidget(fix)
             rows.addLayout(row)
         rows.addStretch()
@@ -2715,6 +2727,35 @@ class UpdateScreen(QWidget):
         except Exception as ex:
             self._s.log.emit(f"  Could not restore launch options: {ex}")
 
+    def _ensure_missing_prefixes(self, ge_version, proton, setup_games):
+        """Recreate the prefix of each selected Steam game whose prefix is
+        missing (Check My Setup's "prefix is missing"). Intact prefixes are
+        never touched; a failure is logged and the client update goes on."""
+        try:
+            from setup_check import uses_steam_prefix, prefix_path, prefix_problems, PREFIX_MISSING
+            targets = []
+            for key, gd, game in self.selected:
+                if not game:
+                    continue
+                entry = setup_games.get(key, {})
+                c = entry.get("client") or KEY_CLIENT.get(key, gd.get("client", ""))
+                if not uses_steam_prefix(key, c, entry.get("source", "steam")):
+                    continue
+                compat = prefix_path(self.steam_root, key, c, game)
+                if compat and prefix_problems(compat) == [PREFIX_MISSING]:
+                    targets.append((key, compat))
+            if not targets:
+                return
+            from ge_proton import ensure_all_prefix_deps
+            self._s.log.emit(f"Recreating {len(targets)} missing Proton prefix(es)...")
+            done = ensure_all_prefix_deps(ge_version, targets,
+                                          on_progress=self._s.log.emit,
+                                          proton_path=proton, steam_root=self.steam_root)
+            self._s.log.emit(f"✓  Prefixes recreated: {done}/{len(targets)}")
+        except Exception as ex:
+            _log.warning("missing prefix setup failed", exc_info=True)
+            self._s.log.emit(f"  Missing prefixes not recreated: {ex}")
+
     def _run_steps(self):
         self._lo_snapshot = None
         do_zd, self.update_zd = self.update_zd, False
@@ -2850,6 +2891,7 @@ class UpdateScreen(QWidget):
 
         # ── GE-Proton download (Steam may still be running) ─────────
         ge_version = None
+        ge_fresh = False
         try:
             self._s.progress.emit(16, "Checking GE-Proton...")
             self._s.log.emit("Checking GE-Proton...")
@@ -2858,6 +2900,7 @@ class UpdateScreen(QWidget):
                 on_progress=lambda pct, msg: self._s.progress.emit(16 + int(pct * 0.08), msg)
             )
             cfg.set_ge_proton_version(ge_version)
+            ge_fresh = True
             self._s.log.emit(f"✓  {ge_version} ready")
         except Exception as ex:
             self._s.log.emit(f"  GE-Proton update skipped: {ex}")
@@ -2869,6 +2912,11 @@ class UpdateScreen(QWidget):
                 self._s.log.emit(f"  Using the installed {ge_version}")
             else:
                 self._s.log.emit("✗  No GE-Proton is installed; Steam's compatibility settings were left unchanged.")
+
+        # A Steam game whose prefix is gone gets the same GE-Proton preload as
+        # a first install, before its client writes into the prefix.
+        if ge_version:
+            self._ensure_missing_prefixes(ge_version, proton, setup_games)
 
         if self._stop_requested.is_set():
             self._cancelled = True
@@ -3057,6 +3105,25 @@ class UpdateScreen(QWidget):
                 for item in successful_steam:
                     if item not in self._failed_games:
                         self._failed_games.append(item)
+
+        # Old GE-Protons nothing uses any more, then the prefixes: shared
+        # DLLs from this GE-Proton, links into removed versions repointed.
+        if ge_version and succeeded and not self._cancelled:
+            from ge_proton import cleanup_old_ge_versions, repair_prefixes
+            if ge_fresh:
+                try:
+                    cleanup_old_ge_versions(ge_version, self.steam_root,
+                                            on_progress=self._s.log.emit)
+                except Exception as ex:
+                    _log.warning("GE-Proton cleanup failed", exc_info=True)
+                    self._s.log.emit(f"  Old GE-Proton cleanup skipped: {ex}")
+            try:
+                if not repair_prefixes(ge_version, self.steam_root,
+                                       on_progress=self._s.log.emit):
+                    self._s.log.emit("✗  Shared prefix DLLs could not be updated")
+            except Exception as ex:
+                _log.warning("prefix repair failed", exc_info=True)
+                self._s.log.emit(f"  Prefix check skipped: {ex}")
 
         if self._cancelled:
             self._s.done.emit(False)
