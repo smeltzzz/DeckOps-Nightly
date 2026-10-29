@@ -10,6 +10,8 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import guide_text
+
 try:
     from qt import QApplication, QStackedWidget, QWidget, QPushButton, QLabel, QCheckBox
     import ui_install
@@ -44,6 +46,23 @@ class Settings:
 
 
 _APP = None
+
+
+class MW1GuideTextTests(unittest.TestCase):
+    def test_new_cod4r_uses_main_menu(self):
+        text = guide_text.how_to_start_text({"cod4mp": {"client": "cod4r"}}, lcd=False)
+        self.assertIn("starts CoD4R", text)
+        self.assertNotIn("CoD4x", text)
+
+    def test_legacy_cod4x_keeps_separate_shortcut_advice(self):
+        text = guide_text.how_to_start_text({"cod4mp": {"client": "cod4x"}}, lcd=False)
+        self.assertIn("Multiplayer (CoD4x) is the separate DeckOps entry", text)
+
+    def test_non_steam_and_unknown_clients_do_not_claim_cod4x(self):
+        for entry in ({"client": "cod4r", "source": "own"}, {"client": "cod4x", "source": "own"}, {}):
+            with self.subTest(entry=entry):
+                text = guide_text.how_to_start_text({"cod4mp": entry}, lcd=False)
+                self.assertNotIn("Multiplayer (CoD4x)", text)
 
 
 @unittest.skipIf(QApplication is None, "PyQt is not installed")
@@ -101,14 +120,29 @@ class InstallUITests(unittest.TestCase):
         self.assertIn(f"background:{ui_theme.C_CARD}",
                       self.setup._lw.findChildren(QWidget, "gameRow")[0].styleSheet())
         buttons = {b.text(): b for b in self.setup.findChildren(QPushButton)}
-        client = buttons["CoD4R (recommended)"]
-        self.assertIn(f"background:{ui_theme.C_IW};color:{ui_theme.C_BG}", client.styleSheet())
-        self.assertIn(f"border-color:{ui_theme.C_TEXT}", client.styleSheet())
+        self.assertNotIn("CoD4x", buttons)
+        self.assertNotIn("CoD4R (recommended)", buttons)
+        self.assertEqual(self.setup._checks["cod4mp"][0].text(), "Multiplayer")
+        self.assertTrue(any("cod4r" in label.text() for label in
+                            self.setup._lw.findChildren(QWidget, "gameRow")[0].findChildren(QLabel)))
         self.assertIn(f"color:{ui_theme.C_DIM}", self.install.log.styleSheet())
         self.assertIn(f"background:{ui_theme.C_SURFACE}", self.install.summary.styleSheet())
         self.assertIn(f"color:{ui_theme.C_TEXT}", self.install.summary.styleSheet())
         self.assertIn(f"background:{ui_theme.C_SURFACE}", self.install.plut_warn.styleSheet())
         self.assertIn(f"color:{ui_theme.C_BG}", self.install.plut_btn.styleSheet())
+
+    def test_new_cod4_mp_setup_only_requests_cod4r(self):
+        self.install.cod4_client = "cod4x"  # stale value from an older management run
+        self.setup.steam_installed = {"cod4mp": self.game("CoD4 - Multiplayer")}
+        self.setup._build()
+        with patch.object(self.setup, "_preflight_ok", return_value=True), \
+             patch.object(self.setup, "_review_install", return_value=True), \
+             patch.object(ui_install.QTimer, "singleShot"), \
+             patch.object(ui_install.inhibit, "start"):
+            self.setup._go_install()
+        self.assertEqual([k for k, _, _ in self.install.steam_selected], ["cod4mp"])
+        self.assertEqual(self.install.cod4_client, "cod4r")
+        self.assertIs(self.stack.currentWidget(), self.install)
 
     def test_choices_survive_rescan_and_rebuild(self):
         self.setup.steam_installed = {"t4mp": self.game("World at War - Multiplayer")}

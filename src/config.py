@@ -572,31 +572,6 @@ def get_dxvk_frame_cap() -> bool:
     return bool(load().get("dxvk_frame_cap", True))
 
 
-def get_cod4mp_profile_type(default: str = "other") -> str:
-    """
-    Return the controller profile type for the CoD4 MP shortcut based on
-    the client the user selected during setup.
-
-    CoD4R has native controller support, so it uses the standard gamepad
-    layout. CoD4x has no native controller support and needs the KB+M
-    "other" layout driven by Steam Input.
-
-    Returns `default` if setup state is unavailable or the client is
-    unrecognized. Single source of truth for this policy; previously the
-    same check was copy-pasted at five call sites across
-    controller_profiles.py and shortcut.py.
-    """
-    try:
-        client = get_setup_games().get("cod4mp", {}).get("client")
-    except Exception:
-        return default
-    if client == "cod4r":
-        return "standard"
-    if client == "cod4x":
-        return "other"
-    return default
-
-
 def get_iw_pad(game_key: str) -> dict:
     return load().get("iw_pad", {}).get(game_key) or {}
 

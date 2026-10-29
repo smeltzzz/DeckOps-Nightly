@@ -157,7 +157,9 @@ def _heroic_mirror_path(compatdata_dest):
     a prefix-AppData path — install-dir destinations have no Heroic mirror).
     """
     marker = os.path.join("AppData", "Local") + os.sep
-    idx = compatdata_dest.find(marker)
+    # The prefix itself can live under an AppData/Local directory (notably
+    # Windows test/user paths), so use the last occurrence in its pfx tree.
+    idx = compatdata_dest.rfind(marker)
     if idx == -1:
         return None
     tail = compatdata_dest[idx + len(marker):]
@@ -1074,4 +1076,86 @@ def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
                     _log.debug("cod4 appdata profiles not read", exc_info=True)
 
     prog(f"{fps} FPS / {fov} FOV: {changed} config file(s) updated.")
+    return changed
+
+
+# ── Controller stick deadzone ──────────────────────────────────────────────────
+# Only these text configs are read by game modes that use these cvars. In
+# particular, MW1 does not ship these dvars, MW2/MW3's vanilla SP configs
+# ignore them, and BO2 SP stores settings in binary .cgp/.chp profiles.
+DEFAULT_DEADZONE_MIN = 0.05
+DEFAULT_DEADZONE_MAX = 0.00
+DEADZONE_KEYS = ("iw4mp", "iw5mp", "iw5mp_ds", "t4sp", "t4mp",
+                 "t5sp", "t5mp", "t6mp", "t6zm")
+
+
+def set_deadzone(steam_root, installed_games,
+                 deadzone_min=DEFAULT_DEADZONE_MIN,
+                 deadzone_max=DEFAULT_DEADZONE_MAX, on_progress=None):
+    """Patch existing supported game configs in place; return files changed.
+
+    Like set_fps_fov, this visits only set-up games, including own-copy
+    prefixes, LCD's Heroic mirror and offline Plutonium mirrors. It does not
+    create missing files or write unsupported SP/binary profiles. Fresh
+    installs and refreshes get these defaults from the shipped cfg assets.
+    """
+    import config as cfg
+
+    prog = on_progress or (lambda *a: None)
+    keys = [key for key in DEADZONE_KEYS if key in cfg.get_setup_games()]
+    if not keys:
+        prog("No supported games set up yet.")
+        return 0
+
+    values = {"gpad_stick_deadzone_min": f"{float(deadzone_min):.2f}",
+              "gpad_stick_deadzone_max": f"{float(deadzone_max):.2f}"}
+    installed_games = installed_games or {}
+    config_map = _build_config_map(steam_root, installed_games)
+    player_name = cfg.get_player_name()
+    changed = 0
+    visited = set()
+
+    def patch(path, key):
+        nonlocal changed
+        if path in visited:
+            return
+        visited.add(path)
+        try:
+            if _patch_dvars(path, values):
+                changed += 1
+                prog(f"  + {key}: {os.path.basename(path)}")
+        except OSError as ex:
+            prog(f"  ! {key}: could not update {path}: {ex}")
+
+    for key in keys:
+        game = installed_games.get(key, {})
+        install_dir = game.get("install_dir", "")
+        own_pfx = _own_compatdata(key, game)
+        for asset_subpath, fixed_dest in config_map[key]:
+            if not asset_subpath.lower().endswith(".cfg"):
+                continue  # e.g. BO2 MP's hardware_mp.chp is binary
+            name = os.path.basename(asset_subpath)
+            if fixed_dest:
+                dest_dir = _own_pfx_dest(fixed_dest, own_pfx)
+            elif install_dir:
+                dest_dir = _dest_from_install(key, install_dir, player_name=player_name)
+            else:
+                continue
+            if not dest_dir:
+                continue
+
+            patch(os.path.join(dest_dir, name), key)
+            if fixed_dest:
+                if cfg.is_lcd():
+                    heroic = _heroic_mirror_path(dest_dir)
+                    if heroic:
+                        patch(os.path.join(heroic, name), key)
+                try:
+                    for offline_dir in _offline_mirror_paths(dest_dir, key):
+                        patch(os.path.join(offline_dir, name), key)
+                except Exception:
+                    _log.debug("offline mirror lookup failed for %s", key, exc_info=True)
+
+    prog(f"Stick deadzone {values['gpad_stick_deadzone_min']} / "
+         f"{values['gpad_stick_deadzone_max']}: {changed} config file(s) updated.")
     return changed

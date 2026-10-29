@@ -9,7 +9,7 @@ import html, os, subprocess, threading, time
 
 from qt import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLayout,
-    QLabel, QCheckBox, QProgressBar, QPushButton, QButtonGroup,
+    QLabel, QCheckBox, QProgressBar,
     QPlainTextEdit, QFileDialog, QMessageBox,
 )
 from qt import Qt, QTimer, QStorageInfo, QUrl
@@ -201,7 +201,6 @@ class SetupScreen(QWidget):
         self._extra_choices = {}
         self._extra_paths = []
         self._folder_found = {}
-        self._cod4_choice = "cod4r"
         self._iw4x_dlc_cb = None; self._iw4x_dlc_present = False
         self._zd_cb = None; self._lan_cb = None
 
@@ -345,9 +344,6 @@ class SetupScreen(QWidget):
                 self._checks[key] = (cb, gd, source)
             modes.addStretch()
             outer.addLayout(modes)
-            opts = QVBoxLayout(); opts.setContentsMargins(0, 0, 0, 0); opts.setSpacing(3)
-            self._row_options(opts, keys, all_installed)
-            outer.addLayout(opts)
             self._add_row(gd, cw)
 
         self._build_extras(all_installed)
@@ -418,40 +414,6 @@ class SetupScreen(QWidget):
             else:
                 self._zd_cb = tile("Zombies Declassified", zd_note, False, "t6zm", "tick BO2 Zombies")
         self._extras.setVisible(self._tiles.count() > 0)
-
-    def _row_options(self, lay, keys, all_installed):
-        """Per-game install choices shown under the row while that mode is ticked (replaces pop-ups)."""
-        def _bind(key, w):
-            cb = self._checks.get(key, (None,))[0]
-            w.setVisible(bool(cb and cb.isChecked()))
-            if cb: cb.toggled.connect(w.setVisible)
-
-        def _opt_box():
-            w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(4)
-            return w, v
-
-        if "cod4mp" in keys and "cod4mp" in all_installed:
-            notes = {
-                "cod4r": "Built for controllers: native controller support, server browser, bots and quality fixes.",
-                "cod4x": "Long-running community client with no native controller support, so you set up the controls yourself.",
-            }
-            w, v = _opt_box()
-            h = QHBoxLayout(); h.setSpacing(6)
-            h.addWidget(_lbl("MP client:", 11, C_DIM, wrap=False))
-            note = _lbl(notes[self._cod4_choice], 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-            grp = QButtonGroup(w)
-            for val, text in (("cod4r", "CoD4R (recommended)"), ("cod4x", "CoD4x")):
-                b = QPushButton(text); b.setCheckable(True); b.setFont(font(10, True)); b.setFixedHeight(34)
-                b.setStyleSheet(
-                    f"QPushButton{{background:{C_DARK_BTN};color:{C_TEXT};border:2px solid transparent;"
-                    "border-radius:6px;padding:0 12px;}"
-                    f"QPushButton:checked{{background:{C_IW};color:{C_BG};}}"
-                    f"QPushButton:focus{{border-color:{C_TEXT};}}")
-                grp.addButton(b); b.setChecked(self._cod4_choice == val)
-                b.toggled.connect(lambda on, v_=val: on and (setattr(self, "_cod4_choice", v_), note.setText(notes[v_])))
-                h.addWidget(b)
-            h.addStretch(); v.addLayout(h); v.addWidget(note)
-            lay.addWidget(w); _bind("cod4mp", w)
 
     def _add_mw3_free_row(self, gd):
         cw = QWidget(); row = QHBoxLayout(cw)
@@ -625,7 +587,7 @@ class SetupScreen(QWidget):
             s.install_iw4x_dlc = "keep"
         else:
             s.install_iw4x_dlc = "install" if self._iw4x_dlc_cb and self._iw4x_dlc_cb.isChecked() else ""
-        s.cod4_client = self._cod4_choice if "cod4mp" in sel else "cod4r"
+        s.cod4_client = "cod4r"
         s.zd_choice = bool(self._zd_cb and self._zd_cb.isChecked())
         s.offline_mode = self._lan_cb.isChecked() if self._lan_cb else None
         go_to(self.stack, "InstallScreen")
@@ -1447,7 +1409,6 @@ class _BaseInstallScreen(QWidget):
 
     def _run_inner(self):
         from wrapper import get_proton_path, find_compatdata, kill_steam, set_compat_tool
-        from cod4x import install_cod4x
         from cod4r import install_cod4r
         from iw4x import install_iw4x
         from iw3sp import install_iw3sp
@@ -1472,11 +1433,10 @@ class _BaseInstallScreen(QWidget):
         selected_keys = [key for key, _, _ in self.selected]
         logged_bases  = set()
         has_plut      = any(KEY_CLIENT.get(k) == "plutonium" for k in selected_keys)
-        has_cod4      = any(KEY_CLIENT.get(k) in ("cod4r", "cod4x", "iw3sp") for k in selected_keys)
+        has_cod4      = any(KEY_CLIENT.get(k) in ("cod4r", "iw3sp") for k in selected_keys)
         has_t6sp_mod  = any(KEY_CLIENT.get(k) == "t6sp_mod" for k in selected_keys)
         _sp_keys = [k for k in ("iw4sp", "iw5sp") if k in selected_keys]
 
-        _cod4_client = getattr(self, "cod4_client", "cod4r")
         _steam_killed = False
 
         # --- Progress plan, built from the phases this selection will run
@@ -1489,7 +1449,7 @@ class _BaseInstallScreen(QWidget):
             ("ge",        "Installing GE-Proton",         4),
             ("own",       "Preparing non-Steam games",    2 if has_own else 0),
             ("prefix",    "Creating Proton prefixes",     8),
-            ("cod4",      "Setting up CoD4",              6 * _nk("cod4r", "cod4x", "iw3sp")),
+            ("cod4",      "Setting up CoD4",              6 * _nk("cod4r", "iw3sp")),
             ("depot",     "Downgrading game files",       24 if _may_downgrade else 0),
             ("plutboot",  "Setting up Plutonium",         10 if has_plut else 0),
             ("plut",      "Installing Plutonium games",   7 * _nk("plutonium")),
@@ -1606,11 +1566,11 @@ class _BaseInstallScreen(QWidget):
         self._s.pulse_stop.emit()
         _log_to_file("[BREADCRUMB] prefix deps done")
 
-        # --- CoD4 (iw3sp + cod4r/cod4x) -- Steam still running
+        # --- CoD4 (IW3SP + CoD4R) -- Steam still running
         # Runs before the Plutonium bootstrapper and before Steam is closed.
         _log_to_file("[BREADCRUMB] starting cod4 install phase")
         if has_cod4:
-            cod4_selected = [(k, gd, g) for k, gd, g in self.selected if KEY_CLIENT.get(k) in ("cod4r", "cod4x", "iw3sp")]
+            cod4_selected = [(k, gd, g) for k, gd, g in self.selected if KEY_CLIENT.get(k) in ("cod4r", "iw3sp")]
             self._phase("cod4")
             _n_c4 = len(cod4_selected)
             for _i_c4, (key, gd, game) in enumerate(cod4_selected):
@@ -1620,9 +1580,9 @@ class _BaseInstallScreen(QWidget):
                     self._s.progress.emit(self._ppct(pct, _i, _n_c4), msg)
                 try:
                     source = "own" if key in own_selected else "steam"
+                    # Reinstalls migrate legacy CoD4x MP to CoD4R.
+                    # Only CoD4R is available for new installs or updates.
                     c = KEY_CLIENT.get(key, gd["client"])
-                    if key == "cod4mp":
-                        c = _cod4_client
                     if source == "own":
                         compat = game.get("compatdata_path", "")
                         cod4_appid = game.get("shortcut_appid", 7940)
@@ -1638,9 +1598,6 @@ class _BaseInstallScreen(QWidget):
                         if c == "cod4r":
                             install_cod4r(game, self.steam_root, proton, compat, op_cod4,
                                           appid=cod4_appid, source=source)
-                        elif c == "cod4x":
-                            install_cod4x(game, self.steam_root, proton, compat, op_cod4,
-                                          appid=cod4_appid)
                         elif c == "iw3sp":
                             install_iw3sp(game, self.steam_root, proton, compat, op_cod4, source=source)
 
@@ -2329,29 +2286,14 @@ class _BaseInstallScreen(QWidget):
         except Exception as ex:
             self._s.log.emit(f"  Game configs skipped: {ex}")
 
-        # --- Controller templates
-        self._s.progress.emit(self._ppct(30), "Installing controller templates...")
+        # --- One bundled Steam Deck layout (other controller types are untouched)
+        self._s.progress.emit(self._ppct(30), "Installing Steam Deck controller layout...")
         try:
-            from controller_profiles import install_controller_templates, assign_controller_profiles, assign_external_controller_profiles
-            install_controller_templates(
-                on_progress=lambda msg: self._s.log.emit(f"  {msg}")
-            )
-            gyro_mode = cfg.get_gyro_mode() or "on"
-            assign_controller_profiles(
-                gyro_mode,
-                on_progress=lambda msg: self._s.log.emit(f"  {msg}")
-            )
-            self._s.log.emit(f"✓  Neptune controller profiles assigned ({gyro_mode} mode)")
-            if cfg.uses_external_controller():
-                controller_type = cfg.get_external_controller() or "playstation"
-                assign_external_controller_profiles(
-                    controller_type,
-                    gyro_mode,
-                    on_progress=lambda msg: self._s.log.emit(f"  {msg}")
-                )
-                self._s.log.emit(f"✓  External controller profiles assigned ({controller_type})")
+            from controller_profiles import install_controller_templates, assign_controller_profiles
+            install_controller_templates(on_progress=self._s.log.emit)
+            assign_controller_profiles(on_progress=self._s.log.emit)
         except Exception as ex:
-            self._s.log.emit(f"  Templates skipped: {ex}")
+            self._s.log.emit(f"  Controller layout skipped: {ex}")
 
         try:
             from wrapper import set_steam_input_enabled
@@ -2412,7 +2354,7 @@ class _BaseInstallScreen(QWidget):
                 self._s.log.emit(f"  Steam shortcuts skipped: {ex}")
 
             # Set default launch option so Steam Deck skips the mode picker
-            has_cod4_steam = any(KEY_CLIENT.get(k) in ("cod4r", "cod4x", "iw3sp")
+            has_cod4_steam = any(KEY_CLIENT.get(k) in ("cod4r", "iw3sp")
                                 for k in steam_keys)
             has_waw_steam = any(k in ("t4sp", "t4mp") for k in steam_keys)
             defaults = {}

@@ -1,7 +1,7 @@
 """
 ui_setup.py — First-run setup flow for DeckOps
 
-Flow: [Autodetect Confirm] → OS → Device → Gyro → Name → [Controller] → [Play Mode / Resolution] → Done
+Flow: [Autodetect Confirm] → OS → Device → Name → [Play Mode / Resolution] → Done
 
 When both OS and device are detected from DMI and os-release, a confirm
 screen lets the user accept with one click or fall through to the manual
@@ -24,8 +24,9 @@ from ui_constants import (
 
 # ── Device definitions ────────────────────────────────────────────────────────
 #
-# Each device maps to: deck_model, other_device (resolution key),
-# other_device_type (controller template group), has_gyro.
+# Each device maps to a model and native resolution. The bundled Steam Input
+# layout targets Steam Deck controls only; device detection is still needed for
+# display, Proton and Plutonium setup.
 
 DEVICES = {
     "sd_lcd":       {"label": "Steam Deck LCD",       "deck_model": "lcd",   "other_device": None,              "other_device_type": None,         "has_gyro": True},
@@ -45,8 +46,8 @@ DEVICES = {
 
 
 # Texts used on more than one setup screen
-_INTRO = ("DeckOps sets up community clients, controller layouts and display settings for your "
-          "Call of Duty games, so they run well on your device.")
+_INTRO = ("DeckOps sets up community clients and display settings for your Call of Duty "
+          "games. On Steam Deck it also applies one bundled Steam Input layout.")
 _NOTES = [
     "⚠   DeckOps creates the Proton prefixes for your games. You don't need to launch each "
     "game through Steam first.",
@@ -55,14 +56,6 @@ _NOTES = [
     "⚠   Use a stable internet connection. If the install fails, don't re-run it again and "
     "again; ask for help on the Discord instead.",
 ]
-_CONTROLLER_TYPES = (
-    "PlayStation:  PS5 or PS4 (DualSense / DualShock). Includes gyro aiming.\n"
-    "Xbox:  Xbox 360, Xbox One or Xbox Elite. Standard layout, no gyro.\n"
-    "Steam Controller:  Steam Controller 2 (Triton). Two trackpads, gyro and 4 back buttons.\n"
-    "Other:  Generic or 8BitDo controller. Standard layout, no gyro."
-)
-
-
 class SetupFlowScreen(QWidget):
     """
     Unified first-run setup. One QWidget with show/hide sections
@@ -110,13 +103,9 @@ class SetupFlowScreen(QWidget):
             "_os_section": ("OPERATING SYSTEM", 10),
             "_model_section": ("DEVICE", 25),
             "_device_section": ("SELECT DEVICE", 30),
-            "_gyro_section": ("GYRO AIMING", 40),
-            "_gyro_mode_section": ("GYRO ACTIVATION", 50),
-            "_name_section": ("PLAYER NAME", 60),
-            "_primary_controller_section": ("CONTROLLER", 70),
+            "_name_section": ("PLAYER NAME", 50),
             "_play_section": ("PLAY MODE", 78),
             "_resolution_section": ("DISPLAY RESOLUTION", 85),
-            "_docked_controller_section": ("EXTERNAL CONTROLLER", 95),
         }
 
         # Only offer one-click confirmation when both values are genuinely known.
@@ -268,65 +257,17 @@ class SetupFlowScreen(QWidget):
         dvl.addSpacing(12)
         self._register_step("_device_section")
 
-        # ── 4. Gyro section ───────────────────────────────────────────────
-        self._gyro_section = QWidget(); self._gyro_section.setVisible(False)
-        gl = QVBoxLayout(self._gyro_section)
-        gl.setContentsMargins(28, 18, 28, 18); gl.setSpacing(16)
-        self._back_device_gyro_btn = _back_row(gl, self._back_to_device_from_gyro)
-        gl.addSpacing(12)
-        _title_block(gl, main_size=32)
-        gl.addWidget(_lbl("Do you want gyro aiming?", 15, C_TEXT))
-        gl.addSpacing(12)
-        grow = QHBoxLayout(); grow.setSpacing(20)
-        gyro_yes = _btn("Enable gyro aiming", C_IW, h=52)
-        gyro_no  = _btn("No gyro aiming",  C_DARK_BTN, h=52)
-        gyro_yes.clicked.connect(self._gyro_yes)
-        gyro_no.clicked.connect(lambda: self._pick_gyro("off"))
-        grow.addWidget(gyro_yes); grow.addWidget(gyro_no)
-        gl.addLayout(grow)
-        gl.addSpacing(12)
-        self._register_step("_gyro_section")
-
-        # ── 4b. Gyro mode section (shown after Yes) ───────────────────────
-        self._gyro_mode_section = QWidget(); self._gyro_mode_section.setVisible(False)
-        gml = QVBoxLayout(self._gyro_mode_section)
-        gml.setContentsMargins(28, 18, 28, 18); gml.setSpacing(16)
-        self._back_gyro_mode_btn = _back_row(gml, self._back_to_gyro_from_mode)
-        gml.addSpacing(12)
-        _title_block(gml, main_size=32)
-        gml.addWidget(_lbl("How should gyro activate?", 15, C_TEXT))
-        gml.addSpacing(4)
-        self._gyro_mode_desc_lbl = _lbl("", 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        gml.addWidget(self._gyro_mode_desc_lbl)
-        gml.addSpacing(12)
-        gmrow = QHBoxLayout(); gmrow.setSpacing(20)
-        gyro_ads    = _btn("ADS",    C_IW, h=56)
-        gyro_hold   = _btn("Hold",   C_IW, h=56)
-        gyro_toggle = _btn("Toggle", C_IW, h=56)
-        gyro_ads.setAccessibleName("Gyro while aiming down sights")
-        gyro_hold.setAccessibleName("Gyro while holding L5")
-        gyro_toggle.setAccessibleName("Toggle gyro with L5")
-        gyro_ads.clicked.connect(lambda: self._pick_gyro("on"))
-        gyro_hold.clicked.connect(lambda: self._pick_gyro("hold"))
-        gyro_toggle.clicked.connect(lambda: self._pick_gyro("toggle"))
-        gmrow.addWidget(gyro_ads); gmrow.addWidget(gyro_hold); gmrow.addWidget(gyro_toggle)
-        self._gyro_hold_btn   = gyro_hold
-        self._gyro_toggle_btn = gyro_toggle
-        gml.addLayout(gmrow)
-        gml.addSpacing(12)
-        self._register_step("_gyro_mode_section")
-
-        # ── 5. Player name section ────────────────────────────────────────
+        # ── 4. Player name section ────────────────────────────────────────
         self._name_section = QWidget(); self._name_section.setVisible(False)
         nl = QVBoxLayout(self._name_section)
         nl.setContentsMargins(28, 18, 28, 18); nl.setSpacing(16)
-        self._back_gyro_name_btn = _back_row(nl, self._back_to_gyro_from_name)
+        self._back_name_btn = _back_row(nl, self._back_to_device_from_name)
         nl.addSpacing(12)
         _title_block(nl, main_size=32)
         nl.addWidget(_lbl("What's your player name?", 15, C_TEXT))
         nl.addSpacing(4)
         nl.addWidget(_lbl(
-            "Your name in CoD4x, IW4x and Plutonium offline. "
+            "Your name in IW4x and Plutonium offline. "
             "Your Steam name is filled in; change it to anything you like.",
             13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         nl.addSpacing(12)
@@ -351,38 +292,7 @@ class SetupFlowScreen(QWidget):
         nl.addSpacing(12)
         self._register_step("_name_section")
 
-        # ── 6. Primary controller section (Bazzite + General PC) ──────────
-        # Bazzite doesn't have InputPlumber wired up yet, so Neptune templates
-        # won't work. User must pick their controller type for all modes.
-        # General PC users also need to pick their controller.
-        self._primary_controller_section = QWidget()
-        self._primary_controller_section.setVisible(False)
-        pcl = QVBoxLayout(self._primary_controller_section)
-        pcl.setContentsMargins(28, 18, 28, 18); pcl.setSpacing(16)
-        self._back_name_ctrl_btn = _back_row(pcl, self._back_to_name_from_ctrl)
-        pcl.addSpacing(12)
-        _title_block(pcl, main_size=32)
-        self._ctrl_title_lbl = _lbl("What controller do you use?", 15, C_TEXT)
-        pcl.addWidget(self._ctrl_title_lbl)
-        pcl.addSpacing(4)
-        self._ctrl_desc_lbl = _lbl(_CONTROLLER_TYPES, 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        pcl.addWidget(self._ctrl_desc_lbl)
-        pcl.addSpacing(12)
-        pcrow = QHBoxLayout(); pcrow.setSpacing(12)
-        for index, (ctrl_key, label) in enumerate([("playstation", "PlayStation"), ("xbox", "Xbox"),
-                                                   ("steamcontroller", "Steam Controller"), ("other", "Other")]):
-            if index == 2:
-                pcl.addLayout(pcrow)
-                pcrow = QHBoxLayout(); pcrow.setSpacing(12)
-            b = _btn(label, C_DARK_BTN, h=52)
-            b.setAccessibleName(f"{label} controller")
-            b.clicked.connect(lambda checked, k=ctrl_key: self._pick_primary_controller(k))
-            pcrow.addWidget(b)
-        pcl.addLayout(pcrow)
-        pcl.addSpacing(12)
-        self._register_step("_primary_controller_section")
-
-        # ── 7. Resolution section (General PC, or docked) ─────────────────
+        # ── 5. Resolution section (General PC, or docked) ─────────────────
         self._resolution_section = QWidget(); self._resolution_section.setVisible(False)
         rl = QVBoxLayout(self._resolution_section)
         rl.setContentsMargins(28, 18, 28, 18); rl.setSpacing(16)
@@ -450,41 +360,11 @@ class SetupFlowScreen(QWidget):
         pl.addSpacing(12)
         self._register_step("_play_section")
 
-        # ── 9. Docked external controller section ─────────────────────────
-        # Only shown for docked users on SteamOS/CachyOS who haven't already
-        # picked a controller (Bazzite/PC users already picked in step 6).
-        self._docked_controller_section = QWidget()
-        self._docked_controller_section.setVisible(False)
-        dcl = QVBoxLayout(self._docked_controller_section)
-        dcl.setContentsMargins(28, 18, 28, 18); dcl.setSpacing(16)
-        self._back_docked_ctrl_btn = _back_row(dcl, self._back_to_resolution_from_docked_ctrl)
-        dcl.addSpacing(12)
-        _title_block(dcl, main_size=32)
-        dcl.addWidget(_lbl("What external controller do you use?", 15, C_TEXT))
-        dcl.addSpacing(4)
-        dcl.addWidget(_lbl(_CONTROLLER_TYPES, 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
-        dcl.addSpacing(12)
-        dcrow = QHBoxLayout(); dcrow.setSpacing(12)
-        for index, (ctrl_key, label) in enumerate([("playstation", "PlayStation"), ("xbox", "Xbox"),
-                                                   ("steamcontroller", "Steam Controller"), ("other", "Other")]):
-            if index == 2:
-                dcl.addLayout(dcrow)
-                dcrow = QHBoxLayout(); dcrow.setSpacing(12)
-            b = _btn(label, C_DARK_BTN, h=52)
-            b.setAccessibleName(f"{label} external controller")
-            b.clicked.connect(lambda checked, k=ctrl_key: self._pick_docked_controller(k))
-            dcrow.addWidget(b)
-        dcl.addLayout(dcrow)
-        dcl.addSpacing(12)
-        self._register_step("_docked_controller_section")
-
         # Keep the legacy back-button references for callers, but use the
         # persistent footer instead of repeating Back inside every scroll area.
         for back_button in (
-            self._back_os_btn, self._back_model_btn, self._back_device_gyro_btn,
-            self._back_gyro_mode_btn, self._back_gyro_name_btn,
-            self._back_name_ctrl_btn, self._back_res_btn, self._back_play_btn,
-            self._back_docked_ctrl_btn,
+            self._back_os_btn, self._back_model_btn, self._back_name_btn,
+            self._back_res_btn, self._back_play_btn,
         ):
             back_button.hide()
 
@@ -534,13 +414,9 @@ class SetupFlowScreen(QWidget):
         back = {
             "_model_section": self._back_to_os,
             "_device_section": self._back_to_model,
-            "_gyro_section": self._back_to_device_from_gyro,
-            "_gyro_mode_section": self._back_to_gyro_from_mode,
-            "_name_section": self._back_to_gyro_from_name,
-            "_primary_controller_section": self._back_to_name_from_ctrl,
+            "_name_section": self._back_to_device_from_name,
             "_play_section": self._back_to_prev_from_play,
             "_resolution_section": self._back_to_prev_from_res,
-            "_docked_controller_section": self._back_to_resolution_from_docked_ctrl,
         }
         if self._current_section in back:
             back[self._current_section]()
@@ -611,14 +487,10 @@ class SetupFlowScreen(QWidget):
         # resolution if the user navigated Back and chose the same model again.
         if not same_device or dev["other_device"] is not None:
             cfg.set_other_device(dev["other_device"])
-        cfg.set_other_device_type(dev["other_device_type"])
 
-        # Next: gyro (if device has it) or name
-        if dev["has_gyro"]:
-            self._show_gyro_section(dev_key)
-        else:
-            cfg.set_gyro_mode("off")
-            self._show_name_section()
+        # Steam Deck's single bundled layout is assigned during install.
+        # There is no controller or gyro setup question.
+        self._show_name_section()
 
     def _show_device_picker(self):
         self._show("_device_section")
@@ -626,63 +498,13 @@ class SetupFlowScreen(QWidget):
     def _back_to_model(self):
         self._show("_model_section")
 
-    def _show_gyro_section(self, dev_key):
-        """Show the Yes/No gyro question."""
-        self._show("_gyro_section")
-
-    def _back_to_device_from_gyro(self):
+    def _back_to_device_from_name(self):
         if self._autodetected:
             self._show("_confirm_section")
             return
         dev = DEVICES.get(self._selected_device, {})
-        if dev.get("deck_model") in ("lcd", "oled", "steam_machine"):
-            self._show("_model_section")
-        else:
-            self._show("_device_section")
-
-    def _gyro_yes(self):
-        """User wants gyro — show the mode picker.
-
-        Steam Deck LCD/OLED and Steam Machine: 3 options (ADS, Hold, Toggle)
-        All other devices:   skip mode picker, apply 'on' (ADS) directly
-        """
-        has_full_modes = self._selected_device in ("sd_lcd", "sd_oled", "steam_machine")
-        if not has_full_modes:
-            # Non-SD/SM devices only support ADS mode
-            self._pick_gyro("on")
-            return
-        # SD/SM: show mode picker with Hold/Toggle visible
-        self._gyro_hold_btn.setVisible(True)
-        self._gyro_toggle_btn.setVisible(True)
-        self._gyro_mode_desc_lbl.setText(
-            "ADS:  gyro turns on when you aim down sights (left trigger).\n"
-            "Hold:  gyro is on while you hold L5.\n"
-            "Toggle:  press L5 to turn gyro on and off."
-        )
-        self._show("_gyro_mode_section")
-
-    def _back_to_gyro_from_mode(self):
-        self._show("_gyro_section")
-
-    def _pick_gyro(self, mode):
-        cfg.set_gyro_mode(mode)
-        self._show_name_section()
-
-    def _back_to_gyro_from_name(self):
-        dev = DEVICES.get(self._selected_device, {})
-        if not dev.get("has_gyro"):
-            # No gyro section to go back to, go to device
-            self._back_to_device_from_gyro()
-            return
-        # If the user picked a mode (ADS/Hold/Toggle) they came through
-        # the mode picker — go back there. If they picked "off" (No) they
-        # skipped it — go back to the Yes/No screen.
-        gyro = cfg.get_gyro_mode()
-        has_full_modes = self._selected_device in ("sd_lcd", "sd_oled", "steam_machine")
-        if gyro != "off" and has_full_modes:
-            self._show("_gyro_mode_section")
-        else:
-            self._show("_gyro_section")
+        self._show("_model_section" if dev.get("deck_model") in ("lcd", "oled", "steam_machine")
+                   else "_device_section")
 
     def _show_name_section(self):
         """Show the player name input, pre-filled with Steam display name."""
@@ -703,42 +525,17 @@ class SetupFlowScreen(QWidget):
         self._name_input.setText(name)
         cfg.set_player_name(name)
         cfg.set_game_source("both")
-        if self._needs_primary_controller():
-            self._show("_primary_controller_section")
-        elif self._is_steam_machine:
+        if self._is_steam_machine:
             self._res_title_lbl.setText("What resolution is your display?")
             self._show("_resolution_section")
         elif self._is_general_pc or self._selected_device == "other_handheld":
+            if self._is_general_pc:
+                cfg.set_play_mode("docked")
             self._choosing_native_resolution = self._selected_device == "other_handheld"
             self._res_title_lbl.setText("What resolution is your handheld screen?" if self._choosing_native_resolution
                                          else "What resolution is your display?")
             self._show("_resolution_section")
         else:
-            self._show("_play_section")
-
-    def _needs_primary_controller(self):
-        """Bazzite and General PC users need to pick their controller type."""
-        return self._selected_os == "bazzite" or self._is_general_pc
-
-    def _back_to_name_from_ctrl(self):
-        self._show("_name_section")
-
-    def _pick_primary_controller(self, ctrl_type):
-        cfg.set_external_controller(ctrl_type)
-        if self._is_general_pc:
-            # A PC always plays "docked": external controller and display.
-            # Recorded so the controller is applied (and a stale handheld
-            # play mode from an earlier setup doesn't hide it).
-            cfg.set_play_mode("docked")
-            # PC: need resolution
-            self._res_title_lbl.setText("What resolution is your display?")
-            self._show("_resolution_section")
-        elif self._selected_device == "other_handheld":
-            self._choosing_native_resolution = True
-            self._res_title_lbl.setText("What resolution is your handheld screen?")
-            self._show("_resolution_section")
-        else:
-            # Bazzite handheld: play mode
             self._show("_play_section")
 
     def _back_to_prev_from_play(self):
@@ -747,8 +544,6 @@ class SetupFlowScreen(QWidget):
             self._choosing_native_resolution = True
             self._res_title_lbl.setText("What resolution is your handheld screen?")
             self._show("_resolution_section")
-        elif self._needs_primary_controller():
-            self._show("_primary_controller_section")
         else:
             self._show("_name_section")
 
@@ -765,15 +560,11 @@ class SetupFlowScreen(QWidget):
 
     def _back_to_prev_from_res(self):
         if self._choosing_native_resolution:
-            if self._needs_primary_controller():
-                self._show("_primary_controller_section")
-            else:
-                self._show("_name_section")
+            self._show("_name_section")
         elif self._is_steam_machine:
             self._show("_name_section")
         elif self._is_general_pc:
-            # PC: back to controller
-            self._show("_primary_controller_section")
+            self._show("_name_section")
         else:
             # Docked: back to play mode
             self._show("_play_section")
@@ -789,23 +580,6 @@ class SetupFlowScreen(QWidget):
             self._finish()
             return
         cfg.set_docked_resolution(resolution)
-        if self._is_general_pc:
-            # PC already picked controller — done
-            self._finish()
-        elif not self._needs_primary_controller():
-            # Docked SteamOS/CachyOS: need external controller
-            self._show("_docked_controller_section")
-        else:
-            # Bazzite docked: already picked controller
-            self._finish()
-
-    # ── Docked external controller (SteamOS/CachyOS only) ────────────────
-
-    def _back_to_resolution_from_docked_ctrl(self):
-        self._show("_resolution_section")
-
-    def _pick_docked_controller(self, ctrl_type):
-        cfg.set_external_controller(ctrl_type)
         self._finish()
 
     # ── Finish ────────────────────────────────────────────────────────────

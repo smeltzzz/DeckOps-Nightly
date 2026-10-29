@@ -312,6 +312,7 @@ class ManagementUITests(unittest.TestCase):
                  "cod4mp": {"client": "cod4x"}}), \
              patch.object(ui_manage.cfg, "unmark_game_setup") as unmark, \
              patch("preflight.check", return_value=[object()]), \
+             patch.object(ui_manage.QMessageBox, "question", return_value=ui_manage.QMessageBox.StandardButton.Yes), \
              patch.object(ui_manage, "_show_preflight", return_value=False):
             self.screen._reinstall(gd)
         unmark.assert_not_called()
@@ -330,11 +331,12 @@ class ManagementUITests(unittest.TestCase):
                  "cod4mp": {"client": "cod4x"}}), \
              patch.object(ui_manage.cfg, "unmark_game_setup") as unmark, \
              patch("preflight.check", return_value=[]), \
+             patch.object(ui_manage.QMessageBox, "question", return_value=ui_manage.QMessageBox.StandardButton.Yes), \
              patch.object(ui_manage, "_show_preflight", return_value=True):
             self.screen._reinstall(gd)
         unmark.assert_called_once_with(["cod4mp", "cod4sp"])
         install = ui_manage.get_screen(self.stack, "InstallScreen")
-        self.assertEqual(install.cod4_client, "cod4x")
+        self.assertEqual(install.cod4_client, "cod4r")
         self.assertEqual([k for k, _, _ in install.steam_selected],
                          ["cod4mp", "cod4sp"])
 
@@ -584,6 +586,15 @@ class ManagementUITests(unittest.TestCase):
             # Options on a partially configured card must not add a new mode.
             self.assertEqual([key for key, _, _ in ui_manage._update_candidates(
                 installed, ["cod4mp", "cod4sp"])], ["cod4sp"])
+
+    def test_legacy_cod4x_is_not_an_update_candidate(self):
+        installed = {"cod4mp": {"source": "steam"},
+                     "cod4sp": {"source": "steam"}}
+        configured = {"cod4mp": {"client": "cod4x", "source": "steam"},
+                      "cod4sp": {"client": "iw3sp", "source": "steam"}}
+        with patch.object(ui_manage.cfg, "get_setup_games", return_value=configured):
+            keys = [key for key, _, _ in ui_manage._update_candidates(installed)]
+        self.assertEqual(keys, ["cod4sp"])
 
     def test_card_update_confirms_plutonium_siblings_before_running(self):
         installed = {"t4sp": {"source": "steam", "install_dir": "/waw"},

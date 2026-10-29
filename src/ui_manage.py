@@ -57,7 +57,7 @@ def _update_candidates(installed, keys=None):
             if not game or not entry or entry.get("source", "steam") != game.get("source", "steam"):
                 continue
             client = entry.get("client") or KEY_CLIENT.get(key, "")
-            if client and client != "steam":
+            if client and client not in ("steam", "cod4x"):
                 selected.append((key, gd, game))
     return selected
 
@@ -306,6 +306,7 @@ class ManagementCard(QFrame):
             f"QPushButton:disabled{{background:{color};color:{C_BG};}}"
         )
         self._client_badge.adjustSize()
+        self._client_badge.setMaximumWidth(_LIBRARY_CARD_W - 10)
         self._client_badge.raise_()
 
         self._img_container = img_container
@@ -565,6 +566,23 @@ class ManagementScreen(QWidget):
         if ok:
             self.installed = self._scanned
             self._rebuild()
+            # Bring existing installs up to the shipped deadzone defaults too.
+            # Idempotent and limited to configured games and existing text configs.
+            if cfg.get_setup_games() and not getattr(self, "_deadzone_running", False):
+                self._deadzone_running = True
+                installed = dict(self.installed)
+                def _defaults():
+                    try:
+                        from game_config import set_deadzone
+                        sr = cfg.load().get("steam_root", "") or find_steam_root()
+                        if sr:
+                            set_deadzone(sr, installed,
+                                         on_progress=lambda msg: _log.info("deadzone: %s", msg.strip()))
+                    except Exception:
+                        _log.warning("could not update existing deadzones", exc_info=True)
+                    finally:
+                        self._deadzone_running = False
+                threading.Thread(target=_defaults, daemon=True).start()
         else:
             self._status.setText("Game scan failed. Return to Game Library to try again.")
 
@@ -800,7 +818,7 @@ class ManagementScreen(QWidget):
         s._return_to_management = True
         s.install_iw4x_dlc = dlc
         s.force_downgrade_ids = set(force_downgrade_ids or ())
-        s.cod4_client = cod4_client or self._current_cod4_client()
+        s.cod4_client = "cod4r"  # Legacy CoD4x may only migrate; never install it again.
         self._status.setText("")
         go_to(self.stack, "InstallScreen")
         return True
@@ -1063,8 +1081,16 @@ class ManagementScreen(QWidget):
         if not keys:
             self._status.setText("Game files not found. Use Add Games to find them.")
             return
-        cod4_client = self._current_cod4_client()
-        self._setup(gd, cod4_client=cod4_client,
+        if "cod4mp" in keys and self._current_cod4_client() == "cod4x":
+            if QMessageBox.question(
+                self, "Switch to CoD4R",
+                "CoD4x is no longer offered. Reinstalling MW1 Multiplayer will replace "
+                "the existing CoD4x setup with CoD4R and remove its DeckOps shortcut. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+        self._setup(gd, cod4_client="cod4r",
                     keys_to_setup=keys, clear_setup_keys=keys)
 
     def _depot_downgrade(self, game_id, gd, installed_keys):
@@ -1532,23 +1558,9 @@ class ConfigureScreen(QWidget):
 
         # ── Left: Controller Profiles ─────────────────────────────────────
         _head(left, "Controller Profiles")
-        _desc(left, "Pick how gyro aiming works, then press Re-apply Templates to write the "
-                    "controller layout for all your games. Closes Steam.")
-        gr = QHBoxLayout(); gr.setSpacing(8)
-        gr.addWidget(_lbl("Gyro:", 12, C_DIM, wrap=False))
-        self._gyro_btns = {}
-        # SD LCD/OLED and Steam Machine get 4 modes; others get 2.
-        # Hold/toggle hidden dynamically in showEvent.
-        for mode in ("on", "hold", "toggle", "off"):
-            labels = {"on": "ADS", "hold": "Hold", "toggle": "Toggle", "off": "Off"}
-            b = _btn(labels[mode], C_DARK_BTN, size=11, h=40)
-            b.setFixedWidth(96)
-            b.clicked.connect(lambda checked, m=mode: self._set_gyro(m))
-            gr.addWidget(b)
-            self._gyro_btns[mode] = b
-        gr.addStretch()
-        left.addLayout(gr)
-        ctrl_btn = _btn("Re-apply Templates", C_DARK_BTN, size=12, h=40)
+        _desc(left, "Steam Deck: applies the bundled 'Call of Duty with controller support' "
+                    "layout to DeckOps games. Other controller types keep their Steam layouts. Closes Steam.")
+        ctrl_btn = _btn("Re-apply Layout", C_DARK_BTN, size=12, h=40)
         ctrl_btn.setFixedWidth(220)
         ctrl_btn.clicked.connect(self._apply_controller_profiles)
         left.addWidget(ctrl_btn)
@@ -1579,7 +1591,7 @@ class ConfigureScreen(QWidget):
 
         # ── Left: Player Name ─────────────────────────────────────────────
         _head(left, "Player Name")
-        self._name_note = _desc(left, "Your name in CoD4x, IW4x and Plutonium offline.")
+        self._name_note = _desc(left, "Your name in IW4x and Plutonium offline.")
         nr = QHBoxLayout(); nr.setSpacing(12)
         self._name_input = QLineEdit()
         self._name_input.setPlaceholderText("Enter player name...")
@@ -1596,6 +1608,14 @@ class ConfigureScreen(QWidget):
         save_btn.clicked.connect(self._save_name)
         nr.addWidget(self._name_input, stretch=1); nr.addWidget(save_btn)
         left.addLayout(nr)
+
+        # ── Left: Controller stick deadzone ─────────────────────────────
+        _head(left, "Controller Deadzone")
+        _desc(left, "Automatically sets supported games to 0.05 minimum and 0.00 maximum "
+                    "when the library opens. Re-apply to existing configs without replacing other settings.")
+        deadzone_btn = _btn("Re-apply Deadzone", C_DARK_BTN, size=12, h=40)
+        deadzone_btn.setFixedWidth(220); deadzone_btn.clicked.connect(self._apply_deadzone)
+        left.addWidget(deadzone_btn)
 
         # ── Left: FPS and FOV ─────────────────────────────────────────────
         _head(left, "FPS and FOV")
@@ -1728,21 +1748,6 @@ class ConfigureScreen(QWidget):
         player = cfg.get_player_name() or "Player"
         self._name_input.setText(player if player != "Player" else "")
 
-        # Show hold/toggle only for Steam Deck LCD/OLED and Steam Machine
-        has_full_modes = model in ("lcd", "oled", "steam_machine")
-        self._gyro_btns["hold"].setVisible(has_full_modes)
-        self._gyro_btns["toggle"].setVisible(has_full_modes)
-        # Relabel ADS button for non-SD/SM devices
-        self._gyro_btns["on"].setText("ADS" if has_full_modes else "Gyro On")
-
-        # Gyro highlight
-        gyro = cfg.get_gyro_mode() or "on"
-        # If non-SD/SM device has hold/toggle saved, treat as "on" for highlight
-        if not has_full_modes and gyro in ("hold", "toggle"):
-            gyro = "on"
-        for mode, btn in self._gyro_btns.items():
-            btn.setStyleSheet(_button_style(C_IW if mode == gyro else C_DARK_BTN))
-
         # LCD-only shader cache section
         is_lcd = (model == "lcd")
         self._shader_row.setVisible(is_lcd)
@@ -1805,13 +1810,6 @@ class ConfigureScreen(QWidget):
         self._vol_label.setText(f"{val}%")
         _set_audio_volume(val / 100.0)
 
-    def _set_gyro(self, mode):
-        cfg.set_gyro_mode(mode)
-        # Update button highlights
-        for m, btn in self._gyro_btns.items():
-            btn.setStyleSheet(_button_style(C_IW if m == mode else C_DARK_BTN))
-        self.status.setText(f"Gyro mode set to {mode.upper()}. Press Re-apply Templates to use it.")
-
     def _settings_task(self, s):
         """
         Start of a Settings action (Re-apply Templates, Repair Shortcuts, Save
@@ -1835,29 +1833,20 @@ class ConfigureScreen(QWidget):
         self.status.setText("Re-applying controller profiles...")
         s.log.connect(lambda msg: self.status.setText(msg))
         s.done.connect(lambda ok: self.status.setText(
-            "✓  Controller profiles applied." if ok else "✗  Failed — check that Steam is closed."
+            "✓  Steam Deck layout applied." if ok else "✗  Could not apply Steam Deck layout; see log."
         ))
         def _run():
             try:
-                from controller_profiles import install_controller_templates, assign_controller_profiles, assign_external_controller_profiles
+                from controller_profiles import install_controller_templates, assign_controller_profiles
                 from wrapper import kill_steam, set_steam_input_enabled
+                if cfg.get_deck_model() not in ("lcd", "oled"):
+                    s.log.emit("This bundled layout supports Steam Deck controls only.")
+                    s.done.emit(False)
+                    return
                 s.log.emit("Closing Steam...")
                 kill_steam(on_progress=lambda msg: s.log.emit(f"  {msg}"))
-                install_controller_templates(
-                    on_progress=lambda msg: s.log.emit(msg)
-                )
-                gyro_mode = cfg.get_gyro_mode() or "on"
-                assign_controller_profiles(
-                    gyro_mode,
-                    on_progress=lambda msg: s.log.emit(msg)
-                )
-                if cfg.uses_external_controller():
-                    controller_type = cfg.get_external_controller() or "playstation"
-                    assign_external_controller_profiles(
-                        controller_type,
-                        gyro_mode,
-                        on_progress=lambda msg: s.log.emit(msg)
-                    )
+                install_controller_templates(on_progress=s.log.emit)
+                assign_controller_profiles(on_progress=s.log.emit)
                 sr = cfg.load().get("steam_root", "")
                 if sr:
                     set_steam_input_enabled(sr)
@@ -1984,6 +1973,30 @@ class ConfigureScreen(QWidget):
                                 "FPS limit restored to its previous setting.")
         s.done.connect(_finish)
         self._start_shortcut_repair(s, errors, verify_cap=True)
+
+    def _apply_deadzone(self):
+        s = _Sigs()
+        if not self._settings_task(s):
+            return
+        self.status.setText("Applying controller stick deadzones...")
+        s.log.connect(lambda msg: self.status.setText(msg))
+        def _run():
+            try:
+                from game_config import set_deadzone
+                steam_root = cfg.load().get("steam_root", "") or find_steam_root()
+                if not steam_root:
+                    raise RuntimeError("Steam library not found")
+                installed = find_all_games()
+                count = set_deadzone(steam_root, installed,
+                                     on_progress=lambda msg: _log.info("deadzone: %s", msg.strip()))
+                s.log.emit(f"✓  Deadzones set in {count} config file(s). "
+                           "Games without supported text configs are not affected.")
+            except Exception as ex:
+                _log.error("deadzone update failed", exc_info=True)
+                s.log.emit(f"✗  Failed: {ex}")
+            finally:
+                s.done.emit(True)
+        threading.Thread(target=_run, daemon=True).start()
 
     def _apply_fps_fov(self):
         s = _Sigs()
@@ -2784,7 +2797,6 @@ class UpdateScreen(QWidget):
         from wrapper import get_proton_path, find_compatdata, kill_steam, set_compat_tool
         from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
         from iw4x import install_iw4x
-        from cod4x import install_cod4x
         from cod4r import install_cod4r
         from iw3sp import install_iw3sp
         from t6sp_mod import install_t6sp_mod
@@ -3022,7 +3034,7 @@ class UpdateScreen(QWidget):
                 # in its shortcut's prefix, not Steam CoD4's (7940) -- the same
                 # appid InstallScreen passes (enrich_own_games' shortcut_appid).
                 cod4_appid = gd["appid"]
-                if source == "own" and c in ("cod4r", "cod4x", "iw3sp"):
+                if source == "own" and c in ("cod4r", "iw3sp"):
                     from shortcut import own_shortcut_appid
                     from steam_common import nvme_compatdata
                     cod4_appid = game.get("shortcut_appid") or own_shortcut_appid(key, game)
@@ -3031,9 +3043,6 @@ class UpdateScreen(QWidget):
                 if c == "cod4r":
                     install_cod4r(game, self.steam_root, proton, compat, op,
                                   appid=cod4_appid, source=source)
-                elif c == "cod4x":
-                    install_cod4x(game, self.steam_root, proton, compat, op,
-                                  appid=cod4_appid)
                 elif c == "iw3sp":
                     install_iw3sp(game, self.steam_root, proton, compat, op,
                                   source=source)

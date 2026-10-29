@@ -13,7 +13,8 @@ def how_to_start_text(setup: dict, lcd: bool) -> str:
         if steam("cod4mp") and setup["cod4mp"].get("client") == "cod4r":
             line += (" The Multiplayer button in its main menu starts CoD4R. To go back to the "
                      "campaign, quit and press Play again.")
-        elif "cod4mp" in setup:
+        elif steam("cod4mp") and setup["cod4mp"].get("client") == "cod4x":
+            # Existing CoD4x setups still use their separate shortcut.
             line += " Multiplayer (CoD4x) is the separate DeckOps entry in your Steam library."
         lines.append(line)
     if steam("iw4mp"):

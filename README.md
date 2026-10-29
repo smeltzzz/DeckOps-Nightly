@@ -16,16 +16,16 @@
 
 ## Supported Games
 
-| Game | Mode | Client | Online | Aim Assist | Gyro |
-|---|---|---|---|---|---|
-| Modern Warfare | SP/MP | [IW3SP-MOD](https://gitea.com/JerryALT/iw3sp_mod) + [CoD4R](https://iw3x.com/) | ✅ | ✅ | ✅ |
-| Modern Warfare 2 | SP/MP | [IW-Pad](https://github.com/GalvarinoDev/IW-Pad) + [iw4x](https://iw4x.io) | ✅ | ✅ | ✅ |
-| Modern Warfare 3 | SP/MP | [IW-Pad](https://github.com/GalvarinoDev/IW-Pad) + [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
-| World at War | SP/ZM/MP | [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
-| Black Ops | SP/ZM/MP | [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
-| Black Ops II | SP/ZM/MP | [T6SP-Mod](https://github.com/Rattpak/T6SP-Mod-Release) + [Plutonium](https://plutonium.pw) | ✅ | ✅ | ✅ |
+| Game | Mode | Client | Online | Aim Assist |
+|---|---|---|---|---|
+| Modern Warfare | SP/MP | [IW3SP-MOD](https://gitea.com/JerryALT/iw3sp_mod) + [CoD4R](https://iw3x.com/) | ✅ | ✅ |
+| Modern Warfare 2 | SP/MP | [IW-Pad](https://github.com/GalvarinoDev/IW-Pad) + [iw4x](https://iw4x.io) | ✅ | ✅ |
+| Modern Warfare 3 | SP/MP | [IW-Pad](https://github.com/GalvarinoDev/IW-Pad) + [Plutonium](https://plutonium.pw) | ✅ | ✅ |
+| World at War | SP/ZM/MP | [Plutonium](https://plutonium.pw) | ✅ | ✅ |
+| Black Ops | SP/ZM/MP | [Plutonium](https://plutonium.pw) | ✅ | ✅ |
+| Black Ops II | SP/ZM/MP | [T6SP-Mod](https://github.com/Rattpak/T6SP-Mod-Release) + [Plutonium](https://plutonium.pw) | ✅ | ✅ |
 
-All titles use controller and gyro through Steam Input. You choose your gyro mode during setup (ADS, Hold, or Toggle). IW-Pad adds controller support and aim assist to MW2 SP and MW3 SP. CoD4x is available as an alternative MW1 MP client during setup.
+DeckOps bundles the Steam Deck Steam Input layout **Call of Duty with controller support** for its managed games. It does not assign a layout to external controllers or other handhelds; configure those in Steam Input yourself. IW-Pad adds controller support and aim assist to MW2 SP and MW3 SP. New MW1 MP setups install CoD4R only; CoD4x is not a setup or update option. Existing CoD4x installations remain recognized for shortcut repair and uninstall; reinstalling MW1 MP (after confirmation) migrates to CoD4R.
 
 IW-Pad and AlterWare do not repair the remote code execution (RCE) vulnerabilities in MW2 SP and MW3 SP. We do not recommend that you play Special Ops in MW2 or MW3. If you play Special Ops, you do so at your own risk.
 
@@ -80,7 +80,7 @@ Click Continue when installation finishes. DeckOps reopens Steam automatically. 
 
 If Steam asks about cloud saves, choose **Keep Local**. If asked about safe mode or hardware changes, choose **No**.
 
-- **MW1.** With CoD4R, SP and MP are both on the main entry. Play starts SP; use the Multiplayer button in the main menu for MP. To return to SP, quit and press Play again. (CoD4x MP still has its own DeckOps shortcut.) Select the "Player" profile on first SP launch. During install, DeckOps opens the CoD4R launcher. Wait for it to finish downloading and updating. Close the launcher when it is done, then press Continue in DeckOps.
+- **MW1.** New MP setups use CoD4R: SP and MP are both on the main entry. Play starts SP; use the Multiplayer button in the main menu for MP. To return to SP, quit and press Play again. Existing CoD4x MP setups keep their separate DeckOps shortcut until migrated to CoD4R. Select the "Player" profile on first SP launch. During install, DeckOps opens the CoD4R launcher. Wait for it to finish downloading and updating. Close the launcher when it is done, then press Continue in DeckOps.
 - **MW1 MP.** Launch MW1 MP twice on first install. The first launch fails. Relaunch and it works.
 - **WaW.** On OLED and other non-LCD devices, SP/ZM and MP are both on the main entry. The launch menu shows **Campaign & Zombies** and **Multiplayer**; Steam's own WaW entries are hidden from the menu. DeckOps removes the old WaW MP shortcut.
 - **BO1 and BO2.** On OLED and other non-LCD devices, the SP entry's launch menu also has the Plutonium Multiplayer (and BO2 Zombies) entries. Run **Repair Shortcuts** to add them. The separate MP and ZM entries stay in your library; hide them in Steam if you don't want them.
@@ -99,16 +99,11 @@ If something fails, the result screen shows what needs attention and offers **Re
 
 ---
 
-## Gyro Controls
+## Controller Layout and Deadzones
 
-DeckOps installs a controller profile for every game. Choose your gyro mode during setup, or change it in **Settings > Controller Profiles > Re-apply Templates**. R5 is push-to-talk in all modes.
+DeckOps bundles **Call of Duty with controller support** for Steam Deck LCD/OLED controls and assigns it to supported games and DeckOps shortcuts while Steam is closed. Its controls are defined by that layout, which does not explicitly bind gyro; add gyro in Steam Input yourself if you want it. DeckOps no longer offers gyro mode or external-controller presets. For other controllers, pick a layout in Steam Input manually.
 
-| Mode | How it works | Devices |
-|---|---|---|
-| **ADS** | Gyro activates when you aim down sights | Deck / Steam Controller |
-| **Hold** | Gyro activates while L5 is held | Deck / Steam Controller |
-| **Toggle** | L5 press on / L5 press off | Deck / Steam Controller |
-| **On / Off** | Simple toggle | Legion Go, ROG Ally, MSI Claw 8, PC |
+Supported game modes receive `gpad_stick_deadzone_min "0.05"` and `gpad_stick_deadzone_max "0.00"` on install and when you open My Games. You can also re-apply the values from Settings. MW1 and BO2 campaign do not use these text-config settings; MW2/MW3 campaigns ignore their text configs.
 
 ---
 
@@ -117,11 +112,12 @@ DeckOps installs a controller profile for every game. Choose your gyro mode duri
 | Option | What it does |
 |---|---|
 | Background Music | Plays music inside DeckOps. Turn it on or off and set the volume. |
-| Controller Profiles | Pick the gyro mode, then **Re-apply Templates** writes the controller layout for all your games. Closes Steam. |
+| Controller Profiles | **Re-apply Layout** assigns the bundled Steam Deck layout to DeckOps games and shortcuts. Closes Steam; other controller types are untouched. |
+| Controller Deadzone | Automatically sets supported game configs to 0.05 minimum and 0.00 maximum. **Re-apply Deadzone** patches existing configs without replacing other settings. |
 | Shortcuts | **Repair Shortcuts** re-adds any missing DeckOps shortcuts and repairs the launch menus and launch options of your games. Closes Steam. |
 | Save Backup | Copies your saves, stats and Plutonium mods to a folder that survives an uninstall. Steam can stay open. |
-| Check My Setup | Checks each game's folder, mod files, Steam launch option, Proton prefix, and that Steam runs it with the GE-Proton DeckOps set up. Also checks the DeckOps shortcuts (CoD4x MP, your own copies, Plutonium Offline). It changes nothing; **Fix** runs that game's Update, or **Repair Shortcuts** for the shortcuts. |
-| Player Name | Your name in CoD4x, IW4x, and Plutonium offline. |
+| Check My Setup | Checks each game's folder, mod files, Steam launch option, Proton prefix, and that Steam runs it with the GE-Proton DeckOps set up. Also checks DeckOps shortcuts (legacy CoD4x MP, your own copies, Plutonium Offline). It changes nothing; **Fix** runs that game's Update, or **Repair Shortcuts** for the shortcuts. |
+| Player Name | Your name in existing CoD4x setups, IW4x, and Plutonium offline. |
 | FPS and FOV | **Apply 90 FPS / 90 FOV** writes both into the game configs of MW1 (campaign and multiplayer), MW2 and MW3 multiplayer, WaW, BO1, and BO2 (every mode); nothing else in those files changes. The MW2 and MW3 campaigns (64-bit Steam builds) ignore their config files, so that button does nothing for them. Their FOV is set to 90 automatically every time you start the game (`fovwatch.py`). Their FPS is set by the **MW2/MW3 FPS Limit** button, which limits the frame rate to 90 with DXVK in the launch option (it closes Steam when you change it). |
 | Shader Cache (LCD only) | Clears the shader cache of every game you have set up. |
 | Updates & Logs | **Check for Updates** looks for a new DeckOps version. **Copy Log** and **View Log** show what DeckOps has done, for bug reports. |
@@ -145,7 +141,7 @@ The interface uses [Atkinson Hyperlegible](https://brailleinstitute.org/freefont
 
 **[CoD4R](https://iw3x.com/)** - MW1 MP client (Call of Duty 4: Revived) by [k/divity](https://github.com/Divity). Native controller support, aim assist, server browser, and bot support. [Website](https://iw3x.com/) | [Discord](https://discord.com/invite/uWAuFzru34) | 💰 [Ko-fi](https://ko-fi.com/divity)
 
-**[CoD4x](https://cod4x.ovh)** - MW1 MP alternative client. [GitHub](https://github.com/callofduty4x)
+**[CoD4x](https://cod4x.ovh)** - Legacy MW1 MP client still supported for existing installations, not offered for new setups. [GitHub](https://github.com/callofduty4x)
 
 **[IW3SP-MOD](https://gitea.com/JerryALT/iw3sp_mod)** - MW1 SP client by [JerryALT](https://gitea.com/JerryALT).
 

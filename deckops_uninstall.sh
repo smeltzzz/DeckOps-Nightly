@@ -2922,6 +2922,7 @@ info "Removing DeckOps controller templates..."
 
 TEMPLATE_DIR="$HOME/.steam/steam/controller_base/templates"
 for f in \
+    "controller_neptune_deckops_cod.vdf" \
     "controller_neptune_deckops_hold.vdf" \
     "controller_neptune_deckops_toggle.vdf" \
     "controller_neptune_deckops_ads.vdf" \
@@ -2976,6 +2977,11 @@ for f in \
     "controller_triton_deckops_other_off.vdf" \
     "controller_triton_deckops_other_hold.vdf" \
     "controller_triton_deckops_other_toggle.vdf"; do
+    # Stable and Nightly share old template filenames. Only the new bundled
+    # Steam Deck layout belongs exclusively to this build.
+    if [ -d "$OTHER_DIR" ] && [ "$f" != "controller_neptune_deckops_cod.vdf" ]; then
+        continue
+    fi
     target="$TEMPLATE_DIR/$f"
     if [ -f "$target" ]; then
         rm -f "$target" && success "Removed $f" || warn "Failed to remove $f"
@@ -2992,7 +2998,7 @@ info "Removing per-game controller configs..."
 # If you change APPID_NAMED_KEYS or MANAGED_STEAM_APPIDS in the source
 # files, update the copies here too or uninstall will miss entries.
 python3 - << 'PYEOF'
-import os, shutil, re, binascii, glob
+import os, shutil, re, binascii, glob, hashlib
 
 import deckops_vdf
 
@@ -3097,18 +3103,24 @@ def calc_shortcut_appid(exe_path, name):
     return str((crc | 0x80000000) & 0xFFFFFFFF)
 
 def clean_configset(configset_path, keys_to_remove):
-    """Remove all matching keys from a configset file."""
+    """Remove only entries still pointing at DeckOps templates.
+
+    A player may have selected another layout since setup; never erase it.
+    """
     if not os.path.exists(configset_path):
         return False
-    
+
     with open(configset_path, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
-    
+
     original = content
     for key in keys_to_remove:
         pattern = rf'\t"{re.escape(key)}"\n\t\{{[^\}}]*\}}\n?'
-        content = re.sub(pattern, "", content, flags=re.MULTILINE)
-    
+        content = re.sub(pattern,
+                         lambda m: "" if re.search(r'"template"\s+"controller_[^"\n]*_deckops[^"\n]*\.vdf"',
+                                                   m.group(0), re.IGNORECASE) else m.group(0),
+                         content, flags=re.MULTILINE)
+
     if content != original:
         with open(configset_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -3224,15 +3236,20 @@ for uid in os.listdir(USERDATA):
     if not uid.isdigit() or int(uid) < 10000:
         continue
     
-    # Path 1: userdata/<uid>/241100/remote/controller_config/<appid>/
+    # Never remove an entire appid directory: it may contain the player's
+    # personal layouts (including ones saved before DeckOps was installed).
     configs_root = os.path.join(USERDATA, uid, "241100", "remote", "controller_config")
     if os.path.isdir(configs_root):
         for appid in all_appids:
             appid_dir = os.path.join(configs_root, appid)
-            if os.path.isdir(appid_dir):
-                shutil.rmtree(appid_dir)
-                print(f"  uid {uid}: removed controller_config for appid {appid}")
-    
+            if not os.path.isdir(appid_dir):
+                continue
+            for name in os.listdir(appid_dir):
+                if re.fullmatch(r'controller_[a-z0-9_]+_deckops[a-z0-9_]*\.vdf', name):
+                    os.remove(os.path.join(appid_dir, name))
+            if not os.listdir(appid_dir):
+                os.rmdir(appid_dir)
+
     # Path 2: Steam Controller Configs/<uid>/config/<appid>/ (used by shortcut.py)
     steam_cfg_root = os.path.join(
         STEAM_DIR, "steamapps", "common",
@@ -3241,10 +3258,46 @@ for uid in os.listdir(USERDATA):
     if os.path.isdir(steam_cfg_root):
         for appid in all_appids:
             appid_dir = os.path.join(steam_cfg_root, appid)
-            if os.path.isdir(appid_dir):
-                shutil.rmtree(appid_dir)
-                print(f"  uid {uid}: removed Steam Controller Config for appid {appid}")
-        
+            if not os.path.isdir(appid_dir):
+                continue
+            for name in os.listdir(appid_dir):
+                path = os.path.join(appid_dir, name)
+                if re.fullmatch(r'controller_[a-z0-9_]+_deckops[a-z0-9_]*\.vdf', name):
+                    os.remove(path)
+                    continue
+                # Canonical controller_<type>.vdf is a Steam layout fallback.
+                # Only restore/delete it if it still matches what DeckOps put
+                # there. Do not remove a layout edited since the last apply.
+                if not re.fullmatch(r'controller_[a-z0-9_]+\.vdf', name):
+                    continue
+                old = path + ".deckops-original"
+                marker = path + ".deckops-owned"
+                if os.path.isfile(marker):
+                    with open(marker, "r", encoding="ascii") as f:
+                        expected = f.read().strip()
+                    with open(path, "rb") as f:
+                        actual = hashlib.sha256(f.read()).hexdigest()
+                    if expected == actual:
+                        if os.path.isfile(old):
+                            os.replace(old, path)
+                        else:
+                            os.remove(path)
+                    os.remove(marker)
+                elif os.path.isfile(old):
+                    # Legacy build: this backup predates the owned-file marker.
+                    # Keep both rather than guess which one is the player's.
+                    print(f"  uid {uid}: kept {path} and its original backup")
+                else:
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as f:
+                            header = f.read(2048)
+                        if '"title"' in header and '"DeckOps -' in header:
+                            os.remove(path)
+                    except OSError:
+                        pass
+            if not os.listdir(appid_dir):
+                os.rmdir(appid_dir)
+
         # Clean configset files (neptune + serial-specific + all external types)
         configsets_to_clean = [
             "configset_controller_neptune.vdf",

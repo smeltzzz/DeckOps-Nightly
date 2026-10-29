@@ -18,6 +18,7 @@ Called at the end of InstallScreen._run() after client installation completes.
 Must be called while Steam is closed.
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -628,31 +629,9 @@ def _download_artwork(grid_dir: str, appid: int, shortcut_def: dict, prog,
 # ── Controller template assignment ────────────────────────────────────────────
 
 def _get_template_filename(template_type: str, gyro_mode: str) -> str:
-    """Return the primary controller template filename for a profile type
-    and gyro mode.
-
-    Delegates to controller_profiles._profile_filename so shortcut
-    creation and profile re-application always resolve the same file,
-    including device variants (Legion Go, Legion Go 2, 2btn, Steam
-    Machine triton) and all four gyro modes. The import is lazy to keep
-    this module importable standalone, mirroring controller_profiles'
-    own lazy imports of shortcut.py; there is no module-level cycle.
-
-    Falls back to the standard Neptune mapping if delegation fails.
-    """
-    try:
-        from controller_profiles import _profile_filename
-        filenames = _profile_filename(template_type, gyro_mode)
-        if filenames:
-            return filenames[0]
-    except Exception:
-        _log.debug("profile filename delegation failed", exc_info=True)
-    _SUFFIX_MAP = {"on": "ads", "hold": "hold", "toggle": "toggle"}
-    suffix = _SUFFIX_MAP.get(gyro_mode, "off")
-    if template_type == "other":
-        return f"controller_neptune_deckops_other_{suffix}.vdf"
-    else:
-        return f"controller_neptune_deckops_{suffix}.vdf"
+    """The only bundled layout is for Steam Deck controls, regardless of mode."""
+    from controller_profiles import TEMPLATE
+    return TEMPLATE
 
 
 def _assign_controller_config(uid: str, appid: int, shortcut_def: dict,
@@ -669,8 +648,14 @@ def _assign_controller_config(uid: str, appid: int, shortcut_def: dict,
     ours through Steam Cloud. This mirrors controller_profiles.py for
     regular Steam games.
     """
-    template_type = shortcut_def["template_type"]
-    template_filename = _get_template_filename(template_type, gyro_mode)
+    from controller_profiles import _is_steam_deck
+    if not _is_steam_deck():
+        return  # A Neptune layout cannot be used by another controller type.
+    if (title or shortcut_def.get("name")) == "Call of Duty 4: Modern Warfare - Multiplayer":
+        import config as _cfg_ctrl
+        if _cfg_ctrl.get_setup_games().get("cod4mp", {}).get("client") == "cod4x":
+            return  # Existing CoD4x needs KB+M; do not force the gamepad layout.
+    template_filename = _get_template_filename(shortcut_def.get("template_type", "standard"), gyro_mode)
     
     src_template = os.path.join(ASSETS_DIR, template_filename)
     if not os.path.exists(src_template):
@@ -694,7 +679,13 @@ def _assign_controller_config(uid: str, appid: int, shortcut_def: dict,
 
     cfg_dir = os.path.join(steam_cfg_root, appid_str)
     os.makedirs(cfg_dir, exist_ok=True)
-    shutil.copy2(src_template, os.path.join(cfg_dir, canonical_vdf))
+    canonical_path = os.path.join(cfg_dir, canonical_vdf)
+    if not os.path.exists(canonical_path + ".deckops-owned"):
+        _keep_original(canonical_path)
+    shutil.copy2(src_template, canonical_path)
+    with open(src_template, "rb") as layout, \
+         open(canonical_path + ".deckops-owned", "w", encoding="ascii") as marker:
+        marker.write(hashlib.sha256(layout.read()).hexdigest())
     
     # Patch the primary configset
     configset_path = os.path.join(steam_cfg_root, configset_name)
@@ -1377,14 +1368,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
 
             _download_artwork(grid_dir, shortcut_appid, shortcut_def, prog,
                               force=True, clean_stale=True)
-            # CoD4R has native controller support -- use standard gamepad layout
-            _ctrl_def = shortcut_def
-            if key == "cod4mp":
-                import config as _cfg_ctrl
-                _ctrl_def = dict(shortcut_def)
-                _ctrl_def["template_type"] = _cfg_ctrl.get_cod4mp_profile_type(
-                    shortcut_def["template_type"])
-            _assign_controller_config(uid, shortcut_appid, _ctrl_def, gyro_mode, prog, name)
+            _assign_controller_config(uid, shortcut_appid, shortcut_def, gyro_mode, prog, name)
         
         if new_entries:
             try:
@@ -1755,14 +1739,7 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
                               force=True, clean_stale=True)
 
             # Assign controller config
-            # CoD4R has native controller support -- use standard gamepad layout
-            _ctrl_def = shortcut_def
-            if key == "cod4mp":
-                import config as _cfg_ctrl
-                _ctrl_def = dict(shortcut_def)
-                _ctrl_def["template_type"] = _cfg_ctrl.get_cod4mp_profile_type(
-                    shortcut_def["template_type"])
-            _assign_controller_config(uid, shortcut_appid, _ctrl_def, gyro_mode, prog, name)
+            _assign_controller_config(uid, shortcut_appid, shortcut_def, gyro_mode, prog, name)
 
             # Set GE-Proton compat tool
             try:
