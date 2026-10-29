@@ -77,7 +77,7 @@ def _update_selection(installed, keys=None):
 
 
 def _confirm_game_update(parent, selected, extras=()):
-    """Make the effective scope, Steam interruption and optional download explicit."""
+    """Make the effective scope and Steam interruption explicit."""
     groups = {}
     for key, gd, game in selected:
         groups.setdefault(gd['base'], []).append(
@@ -91,12 +91,7 @@ def _confirm_game_update(parent, selected, extras=()):
                 "\n\nYour saves will be backed up first. Steam will close during the update.")
     msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
     msg.setDefaultButton(QMessageBox.StandardButton.No)
-    zd_cb = None
-    if cfg.is_zd_installed() and any(k == "t6zm" for k, _, _ in selected):
-        zd_cb = QCheckBox("Also check Zombies Declassified (may download up to ~9 GB)")
-        msg.setCheckBox(zd_cb)
-    confirmed = msg.exec() == QMessageBox.StandardButton.Yes
-    return confirmed, bool(confirmed and zd_cb and zd_cb.isChecked())
+    return msg.exec() == QMessageBox.StandardButton.Yes
 
 
 # Library cards are wider than the old five-column portrait tiles, while
@@ -666,13 +661,9 @@ class ManagementScreen(QWidget):
         if not selected:
             self._status.setText("No configured mod-client modes found for the installed game sources.")
             return
-        confirmed, update_zd = _confirm_game_update(self, selected, extras)
-        if not confirmed:
+        if not _confirm_game_update(self, selected, extras):
             return
         us = get_screen(self.stack, "UpdateScreen")
-        us.update_zd = update_zd
-        us._zd_retry_game = None
-        us._zd_only_retry = False
         us.selected = selected
         us.all_plut_games = {k: g for k, _, g in selected}
         us.steam_root = find_steam_root()
@@ -865,17 +856,6 @@ class ManagementScreen(QWidget):
             if has_depot_dg:
                 break
 
-        # Zombies Declassified: available when t6zm is installed via Plutonium
-        # and user has all BO2 Zombies DLC
-        has_zd = False
-        if ("t6zm" in installed_keys
-                and KEY_CLIENT.get("t6zm") == "plutonium"
-                and cfg.is_game_setup("t6zm")):
-            _bo2 = self.installed.get("t6zm", {}).get("install_dir", "")
-            if _bo2:
-                from zombies_declassified import has_bo2_zm_dlc
-                has_zd = has_bo2_zm_dlc(_bo2)
-
         # MW3 SP: old in-place downgrades left a 32-bit iw5sp.exe that
         # won't launch through Steam until a Verify restores it
         sp_verify = False
@@ -907,8 +887,6 @@ class ManagementScreen(QWidget):
 
         if has_mods_support:
             add_action("Open Mod Folders", "Open the game's mod or custom map folder.", "mods")
-        if has_zd:
-            add_action("Zombies Declassified", "Manage optional BO2 Zombies maps.", "zd")
         if has_mod_client:
             add_action("Update Client", "Check and repair this game's mod client.", "update")
         if sp_verify:
@@ -931,8 +909,6 @@ class ManagementScreen(QWidget):
         selected = choice[0] if choice else None
         if selected == "mods":
             self._mods(gd, installed_keys)
-        elif selected == "zd":
-            self._zombies_declassified(gd, installed_keys)
         elif selected == "update":
             self._update(gd, installed_keys)
         elif selected == "downgrade":
@@ -950,130 +926,13 @@ class ManagementScreen(QWidget):
         if not selected:
             self._status.setText("No configured modes found for this game's installed source.")
             return
-        confirmed, update_zd = _confirm_game_update(self, selected, extras)
-        if not confirmed:
+        if not _confirm_game_update(self, selected, extras):
             return
         s = get_screen(self.stack, "UpdateScreen")
-        s.update_zd = update_zd
-        s._zd_retry_game = None
-        s._zd_only_retry = False
         s.selected = selected
         s.all_plut_games = {k: g for k, _, g in selected}
         s.steam_root = find_steam_root()
         go_to(self.stack, "UpdateScreen")
-
-    def _zombies_declassified(self, gd, installed_keys):
-        """Install, update, or uninstall Zombies Declassified DLC5 for BO2 ZM."""
-
-        # One at a time: the progress dialog wasn't modal, so the card's
-        # Options -> ZD could start a second worker on the same storage folder
-        if getattr(self, "_zd_running", False):
-            self._status.setText("Zombies Declassified is already running -- wait for it to finish.")
-            return
-
-        from zombies_declassified import resolve_zd_storage
-        plut_storage_t6 = resolve_zd_storage(self.installed.get("t6zm"))
-
-        if not plut_storage_t6 or not os.path.isdir(plut_storage_t6):
-            self._status.setText("Could not find Plutonium storage/t6 directory.")
-            return
-
-        from zombies_declassified import is_zd_installed as _zd_present
-
-        is_installed = _zd_present(plut_storage_t6)
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Zombies Declassified")
-        if is_installed:
-            info = cfg.get_zd_info()
-            tag = info.get("release_tag", "unknown")
-            msg.setText(f"Zombies Declassified {tag} is installed.\nWhat do you want to do?")
-            upd_btn = msg.addButton("Check and Repair", QMessageBox.ButtonRole.AcceptRole)
-            rm_btn  = msg.addButton("Uninstall", QMessageBox.ButtonRole.DestructiveRole)
-        else:
-            msg.setText(
-                "Zombies Declassified adds 10 classic Zombies maps to BO2 through Plutonium. "
-                "It's an optional ~9 GB download.\n\n"
-                "Install it now?"
-            )
-            upd_btn = msg.addButton("Install", QMessageBox.ButtonRole.AcceptRole)
-            rm_btn  = None
-        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-
-        clicked = msg.clickedButton()
-        if clicked == upd_btn:
-            action = "update" if is_installed else "install"
-        elif clicked == rm_btn:
-            action = "uninstall"
-        else:
-            return
-
-        # Run on background thread with a simple progress dialog. Modal, and
-        # sleep blocked for the ~9 GB download (neither was done before, so the
-        # Deck could suspend mid-download). Escape can still hide the dialog;
-        # it comes back with the result when the worker ends.
-        from qt import QProgressDialog
-        self._zd_running = True
-        inhibit.start({"install": "DeckOps is downloading Zombies Declassified",
-                       "update": "DeckOps is updating Zombies Declassified",
-                       "uninstall": "DeckOps is removing Zombies Declassified"}[action])
-        pd = QProgressDialog("Starting...", None, 0, 100, self)
-        pd.setWindowTitle("Zombies Declassified")
-        pd.setWindowModality(Qt.WindowModality.WindowModal)
-        pd.setMinimumDuration(0); pd.setAutoClose(False); pd.setAutoReset(False)
-        pd.setCancelButton(None); pd.show()
-
-        _st6 = plut_storage_t6
-
-        class _ZDSigs(QObject):
-            progress = pyqtSignal(int, str)
-            done     = pyqtSignal(str)
-        sigs = _ZDSigs()
-        sigs.progress.connect(lambda p, m: (pd.setValue(p), pd.setLabelText(m)))
-
-        def _on_done(result_msg):
-            self._zd_running = False
-            inhibit.stop()
-            pd.setValue(100); pd.setLabelText(result_msg)
-            pd.setCancelButtonText("OK")
-            pd.canceled.connect(pd.close)
-            pd.show()       # if Escape hid it while the worker ran
-            if action == "install" and result_msg == "Zombies Declassified installed!":
-                from zombies_declassified import get_zd_info as _get_info
-                info = _get_info(_st6)
-                if info.get("manifest_hash"):
-                    cfg.mark_zd_installed(info["manifest_hash"])
-            elif action == "uninstall" and result_msg == "Zombies Declassified removed.":
-                cfg.unmark_zd_installed()
-        sigs.done.connect(_on_done)
-
-        def _worker():
-            try:
-                from zombies_declassified import install_zd, update_zd, uninstall_zd
-                if action == "install":
-                    errors = install_zd(_st6, lambda p, m: sigs.progress.emit(p, m))
-                    if errors:
-                        sigs.done.emit(f"Installed with {len(errors)} error(s). Check log.")
-                    else:
-                        sigs.done.emit("Zombies Declassified installed!")
-                elif action == "update":
-                    updated = update_zd(_st6, lambda p, m: sigs.progress.emit(p, m))
-                    if updated:
-                        from zombies_declassified import get_zd_info as _get_info
-                        info = _get_info(_st6)
-                        if info.get("manifest_hash"):
-                            cfg.mark_zd_installed(info["manifest_hash"])
-                        sigs.done.emit("Zombies Declassified checked and repaired!")
-                    else:
-                        sigs.done.emit("Files checked; no changes needed.")
-                elif action == "uninstall":
-                    uninstall_zd(_st6, lambda p, m: sigs.progress.emit(p, m))
-                    sigs.done.emit("Zombies Declassified removed.")
-            except Exception as ex:
-                _log.error("Zombies Declassified %s failed", action, exc_info=True)
-                sigs.done.emit(f"Error: {ex}")
-        threading.Thread(target=_worker, daemon=True).start()
 
     def _reinstall(self, gd):
         """Run a clean install of detected modes after preflight approval."""
@@ -2281,7 +2140,6 @@ class ConfigureScreen(QWidget):
         self._update_status.setText("Downloading update...")
         self._update_status.setStyleSheet(f"color:{C_DIM};")
 
-        # Same popup as the Zombies Declassified download
         from qt import QProgressDialog
         pd = self._update_pd = QProgressDialog("Checking files...", None, 0, 100, self)
         pd.setWindowTitle("Update DeckOps")
@@ -2444,12 +2302,9 @@ class UpdateScreen(QWidget):
 
     def __init__(self, stack):
         super().__init__(); self.stack = stack; self.screen_name = "UpdateScreen"
-        self.update_zd = False
         self.selected   = []
         self.steam_root = ""
         self.all_plut_games = {}
-        self._zd_only_retry = False
-        self._zd_retry_game = None
         self._stop_requested = threading.Event()
         self._did_work = False
         # (title, fn(sigs)) run in place of the game updates, e.g. adding Offline Mode
@@ -2457,8 +2312,6 @@ class UpdateScreen(QWidget):
         self._steam_closed = threading.Event()
         self._failed_games = []
         self._pending_games = []
-        self._failed_zd = False
-        self._zd_missing = False
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         hdr, hl = _header_bar()
@@ -2641,8 +2494,6 @@ class UpdateScreen(QWidget):
         self._did_work = False
         self._failed_games = []
         self._pending_games = []
-        self._failed_zd = False
-        self._zd_missing = False
         self._cancelled = False
         self._steam_closed.clear()
         inhibit.start("DeckOps is updating")
@@ -2662,39 +2513,25 @@ class UpdateScreen(QWidget):
             return
         self.bar.setFormat("%p% reached")
         self.cur.setStyleSheet(f"color:{C_TREY};background:transparent;")
-        self.retry_btn.setVisible(bool(self._failed_games or self._failed_zd))
+        self.retry_btn.setVisible(bool(self._failed_games))
         if self._cancelled:
             if not self._did_work:
                 self.cur.setText("Update cancelled before changing game files or settings.")
-            elif self._failed_games or self._failed_zd:
+            elif self._failed_games:
                 self.cur.setText("Stopped after the current step. Completed changes were kept; retry remaining work.")
             else:
                 self.cur.setText("Stopped after the current step. Completed changes were kept.")
         elif self._failed_games:
             names = ", ".join(dict.fromkeys(gd["base"] for _, gd, _ in self._failed_games))
-            self.cur.setText(f"Update incomplete: {names}. Retry failed modes or check the log." +
-                             (" Zombies Declassified is missing; reinstall it from BO2 Options."
-                              if self._zd_missing else
-                              " Zombies Declassified also failed; retry it with the failed modes."
-                              if self._failed_zd else ""))
-        elif self._zd_missing:
-            self.cur.setText("Zombies Declassified is missing. Reinstall it from BO2 Options.")
-        elif self._failed_zd:
-            self.cur.setText("Zombies Declassified update failed. Retry it or check the log.")
+            self.cur.setText(f"Update incomplete: {names}. Retry failed modes or check the log.")
         else:
             self.cur.setText("Update failed. Check the log, then return to My Games to try again.")
 
     def _retry_failed(self):
         retry_games = list(self._failed_games)
-        retry_zd = self._failed_zd and not self._zd_missing
-        self._zd_retry_game = next((item for item in self.selected if item[0] == "t6zm"), None) if retry_zd else None
-        self._zd_only_retry = bool(retry_zd and not retry_games)
-        if self._zd_only_retry:
-            retry_games = [item for item in self.selected if item[0] == "t6zm"]
         if not retry_games:
             return
         self.selected = retry_games
-        self.update_zd = retry_zd
         self._start_update()
 
     def _go_back(self):
@@ -2771,8 +2608,6 @@ class UpdateScreen(QWidget):
 
     def _run_steps(self):
         self._lo_snapshot = None
-        do_zd, self.update_zd = self.update_zd, False
-        zd_only, self._zd_only_retry = self._zd_only_retry, False
         task, self.task = self.task, None
         if task:
             try:
@@ -2789,10 +2624,6 @@ class UpdateScreen(QWidget):
         if self._stop_requested.is_set():
             self._cancelled = True
             self._s.done.emit(False)
-            return
-        if zd_only:
-            self._update_zd(do_zd)
-            self._s.done.emit(not (self._failed_zd or self._zd_missing))
             return
         from wrapper import get_proton_path, find_compatdata, kill_steam, set_compat_tool
         from ge_proton import install_ge_proton, resolve_ge_version, MANAGED_APPIDS
@@ -3149,38 +2980,6 @@ class UpdateScreen(QWidget):
             except Exception as ex:
                 self._s.log.emit(f"  WaW launch picker reset skipped: {ex}")
 
-        # The optional pack has its own result and retry; a failed BO2 client
-        # must not be reported as a successful pack update.
-        if self._stop_requested.is_set():
-            self._cancelled = True
-            self._failed_zd = bool(do_zd)
-            self._s.done.emit(False)
-            return
-        if do_zd and any(k == "t6zm" for k, _, _ in self._failed_games):
-            self._failed_zd = True
-            self._s.log.emit("  Skipped Zombies Declassified until the BO2 Zombies client is repaired.")
-        else:
-            self._update_zd(do_zd)
-
-        if self._stop_requested.is_set():
-            self._cancelled = True
-            self._s.done.emit(False)
-            return
-
-        # Clean up ZD files leaked into non-t6zm prefixes by older versions
-        if has_plut and not is_lcd:
-            try:
-                from plutonium import cleanup_zd_from_other_prefixes
-                n = cleanup_zd_from_other_prefixes(
-                    {k: g for k, _, g in self.selected if g},
-                    self.steam_root,
-                    on_progress=lambda msg: self._s.log.emit(msg),
-                )
-                if n:
-                    self._s.log.emit(f"✓  Cleaned ZD files from {n} prefix(es)")
-            except Exception as ex:
-                self._s.log.emit(f"  ZD cleanup skipped: {ex}")
-
         if self._stop_requested.is_set():
             self._cancelled = True
             self._s.done.emit(False)
@@ -3199,41 +2998,6 @@ class UpdateScreen(QWidget):
             except Exception as ex:
                 self._s.log.emit(f"  Plutonium cleanup skipped: {ex}")
 
-        failed = len(self._failed_games) + int(self._failed_zd or self._zd_missing)
+        failed = len(self._failed_games)
         self._s.progress.emit(98, "Finishing update..." if not failed else "Update incomplete; see log.")
         self._s.done.emit(not failed)
-
-    def _update_zd(self, enabled):
-        """Update the optional pack separately from the BO2 client result."""
-        zd_game = self._zd_retry_game or next((item for item in self.selected if item[0] == "t6zm"), None)
-        self._zd_retry_game = None
-        if not enabled:
-            return
-        if not zd_game or not cfg.is_zd_installed():
-            self._zd_missing = True
-            self._s.log.emit("✗  Zombies Declassified is not installed; reinstall it from BO2 Options.")
-            return
-        self._s.progress.emit(91, "Checking Zombies Declassified...")
-        try:
-            from zombies_declassified import resolve_zd_storage, is_zd_installed, update_zd, get_zd_info
-            storage = resolve_zd_storage(zd_game[2])
-            if not storage or not is_zd_installed(storage):
-                self._zd_missing = True
-                self._s.log.emit("✗  Zombies Declassified is missing; reinstall it from BO2 Options.")
-                return
-            self._did_work = True
-            self._s.log.emit("Checking Zombies Declassified for updates...")
-            def zd_progress(percent, message):
-                self._s.progress.emit(91 + int(max(0, min(100, percent)) * 0.06), message)
-                self._s.log.emit(f"  ZD: {message}")
-            updated = update_zd(storage, zd_progress)
-            if updated:
-                info = get_zd_info(storage)
-                if info.get("manifest_hash"):
-                    cfg.mark_zd_installed(info["manifest_hash"])
-                self._s.log.emit("✓  Zombies Declassified updated")
-            else:
-                self._s.log.emit("✓  Zombies Declassified is up to date")
-        except Exception as ex:
-            self._failed_zd = True
-            self._s.log.emit(f"✗  Zombies Declassified update failed: {ex}")

@@ -141,8 +141,7 @@ def _find_all_compatdata_dirs(steam_root: str) -> list:
 
 # Only these parts of Plutonium storage/<game>/ are user data. Everything
 # else (zone/, map .iwd files, video/, ...) is Plutonium's and comes back
-# on reinstall. usermaps/ contains custom maps, but for T6 it also contains
-# the optional, re-downloadable multi-GB Zombies Declassified maps.
+# on reinstall.
 _PLUT_USER_PARTS = ("players", "mods", "usermaps")
 
 
@@ -276,24 +275,6 @@ def _copytree_safe(src: str, dst: str, group: str, prog):
         prog(f"  ⚠ {group}: copy failed: {ex}")
         return False
 
-
-def _plut_skips(plut_store: str, storage: str) -> dict:
-    """Exclude the known ZD pack, and its map folders only when identifiable.
-
-    ZD's mods/dlc5 and named map folders are excluded only when its
-    deckops_zd.json marker identifies the pack in this prefix. Other map
-    folders, including zm_* custom maps, are kept. Without the marker we
-    cannot identify ZD data, so all mods and usermaps are kept;
-    this may require substantial free space. Custom edits inside mods/dlc5
-    or one of ZD's named map folders cannot be distinguished without a file
-    manifest and must be saved separately. ZD raw/ scripts are not backed up.
-    """
-    if plut_store != "t6":
-        return {}
-    from zombies_declassified import _ZD_USERMAPS, is_zd_installed
-    if not is_zd_installed(storage):
-        return {}
-    return {"mods": ("dlc5",), "usermaps": tuple(_ZD_USERMAPS)}
 
 # Room left free on the drive after a backup
 _SPACE_MARGIN = 200 << 20
@@ -491,22 +472,17 @@ def backup_saves(steam_root: str = None, on_progress=None,
             if not parts:
                 _log.debug("save backup: %s — no players/, mods/ or usermaps/ found", group_name)
                 continue
-            skips = {tag: _plut_skips(group["plut_store"], path)
-                     for tag, path in storages.items()}
-            need = sum(_tree_size(s, skips[tag].get(p, ())) for (tag, p), s in parts.items())
+            need = sum(_tree_size(s) for s in parts.values())
             if not _has_room(need, group_name, on_progress):
                 failed.append(group_name)
                 continue
             stage = _staging(group_name)
-            ok = [_copy_part(s, os.path.join(stage, tag, p), group_name, on_progress,
-                             skips[tag].get(p, ())) for (tag, p), s in parts.items()]
+            ok = [_copy_part(s, os.path.join(stage, tag, p), group_name, on_progress)
+                  for (tag, p), s in parts.items()]
             if _finish_group(stage, dst, group_name, ok, on_progress):
                 backed_up[group_name] = dst
                 on_progress(f"  ✓ {group_name}: backed up players/, mods/ and usermaps/ "
-                            f"from {len(storages)} prefix(es); re-downloadable content skipped")
-                if any(skips[tag].get("usermaps") for tag in storages):
-                    on_progress("  Note: ZD map folders were skipped; custom edits inside those "
-                                "folders are not backed up")
+                            f"from {len(storages)} prefix(es)")
                 _log.info("save backup: %s -> %s (%s)", group_name, dst, sorted(storages))
             else:
                 failed.append(group_name)

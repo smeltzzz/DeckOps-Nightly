@@ -354,8 +354,7 @@ def _copy_plut_to_prefix(src_plut_dir: str, dest_plut_dir: str,
     bin/, launcher/, and games/ are symlinked to the master copy in the
     dedicated prefix. Only the relevant storage/
     subdirectory for game_key is copied as real files, so large mods
-    (e.g. Zombies Declassified ~9GB in storage/t6/) don't leak into
-    unrelated prefixes.
+    don't leak into unrelated prefixes.
     """
 
     def prog(msg):
@@ -376,11 +375,9 @@ def _copy_plut_to_prefix(src_plut_dir: str, dest_plut_dir: str,
 
 
 # storage/<game>/ parts that belong to the user, not to Plutonium.
-# usermaps/ holds custom maps and Zombies Declassified (~9 GB).
 _PLUT_USER_PARTS = ("players", "mods", "usermaps")
 
-# Never copied from one prefix to another: each prefix keeps its own, and
-# copying them is how ZD ended up in every BO2 prefix.
+# Never copied from one prefix to another: each prefix keeps its own.
 _PLUT_NO_COPY = ("mods", "usermaps")
 
 
@@ -1071,45 +1068,6 @@ def _write_metadata(install_dir: str, data: dict):
     path = os.path.join(install_dir, METADATA_FILE)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
-
-
-def cleanup_zd_from_other_prefixes(installed_games: dict, steam_root: str,
-                                    on_progress=None):
-    """
-    Remove Zombies Declassified from every storage/t6 except the t6zm
-    prefix's. Older versions left copies in the MP prefix, the master and
-    the launcher prefix. Nothing is removed unless the t6zm prefix has ZD,
-    so the only copy is never lost.
-
-    Returns the number of places cleaned.
-    """
-    from zombies_declassified import (resolve_zd_storage, is_zd_installed, t6_storage,
-                                      uninstall_zd, _ZD_PARTS)
-    from shortcut import get_launcher_plut_dir
-
-    def prog(msg):
-        if on_progress:
-            on_progress(msg)
-
-    keep = resolve_zd_storage(installed_games.get("t6zm"))
-    if not keep or not is_zd_installed(keep):
-        return 0
-
-    places = {
-        "MP prefix": t6_storage("t6mp", installed_games.get("t6mp")),
-        "Plutonium master": os.path.join(get_dedicated_plut_dir(), "storage", "t6"),
-        "launcher prefix": os.path.join(get_launcher_plut_dir(), "storage", "t6"),
-    }
-    cleaned = 0
-    for label, t6 in places.items():
-        if not t6 or os.path.realpath(t6) == os.path.realpath(keep):
-            continue
-        if not any(os.path.lexists(os.path.join(t6, p)) for p in _ZD_PARTS):
-            continue
-        uninstall_zd(t6)
-        cleaned += 1
-        prog(f"  ✓ Removed Zombies Declassified copy from {label}")
-    return cleaned
 
 
 def cleanup_plut_from_non_plut_prefixes(steam_root: str, on_progress=None):

@@ -6,7 +6,7 @@ Steam had already been killed and the install was underway. These run
 first, while backing out is still free.
 
 Only sizes the codebase already knows are checked: the depot downgrade
-headroom, the IW4x DLC pack and the Zombies Declassified pack. There is
+headroom and the IW4x DLC pack. There is
 deliberately no estimate for the clients themselves. Guessing a number
 and then refusing to install based on it is worse than not checking.
 """
@@ -81,7 +81,7 @@ def _online() -> bool:
         return False
 
 
-def check(selected, iw4x_dlc=False, zd=False, downgrade_keys=()):
+def check(selected, iw4x_dlc=False, downgrade_keys=()):
     """
     Run the pre-install checks.
 
@@ -92,7 +92,6 @@ def check(selected, iw4x_dlc=False, zd=False, downgrade_keys=()):
     from depot_downgrade import estimate_space_gb
     from steam_common import STEAM_ROOT
     from iw4x import DLC_SIZE_GB
-    from zombies_declassified import PACK_SIZE_GB
 
     need = {}   # device -> [gb wanted, representative path]
 
@@ -116,8 +115,6 @@ def check(selected, iw4x_dlc=False, zd=False, downgrade_keys=()):
                 add(install_dir, estimate_space_gb(game_id, STEAM_ROOT))
         if client == "iw4x" and iw4x_dlc:
             add(install_dir, DLC_SIZE_GB)
-    if zd:
-        add(os.path.expanduser("~"), PACK_SIZE_GB)
 
     out = []
     for want, path in sorted(need.values(), key=lambda e: e[1]):

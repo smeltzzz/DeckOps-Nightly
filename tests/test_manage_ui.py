@@ -602,49 +602,24 @@ class ManagementUITests(unittest.TestCase):
         configured = {key: {"client": "plutonium", "source": "steam"} for key in installed}
         self.screen.set_installed(installed)
         shown = []
-        update = SimpleNamespace(selected=[], steam_root="", update_zd=True, all_plut_games={})
+        update = SimpleNamespace(selected=[], steam_root="", all_plut_games={})
 
         def confirm(dialog):
             shown.append((dialog.text(), dialog.standardButton(dialog.defaultButton())))
             return ui_manage.QMessageBox.StandardButton.Yes
 
         with patch.object(ui_manage.cfg, "get_setup_games", return_value=configured), \
-             patch.object(ui_manage.cfg, "is_zd_installed", return_value=False), \
              patch.object(ui_manage.QMessageBox, "exec", confirm), \
              patch.object(ui_manage, "get_screen", return_value=update), \
              patch.object(ui_manage, "go_to") as go:
             self.screen._update(next(g for g in ui_manage.ALL_GAMES if "t4sp" in g["keys"]), ["t4sp"])
         self.assertEqual([key for key, _, _ in update.selected], ["t4sp", "t6zm"])
-        self.assertFalse(update.update_zd)
         self.assertIn("Additional Plutonium modes", shown[0][0])
         self.assertIn("Steam will close", shown[0][0])
         self.assertEqual(shown[0][1], ui_manage.QMessageBox.StandardButton.No)
         go.assert_called_once()
 
-    def test_update_retry_keeps_failed_bo2_client_separate_from_optional_pack(self):
-        gd = next(g for g in ui_manage.ALL_GAMES if "t6zm" in g["keys"])
-        zm = ("t6zm", gd, {"source": "steam"})
-        update = ui_manage.UpdateScreen(None)
-        update.selected = [zm]
-        update._failed_games = [zm]
-        update._zd_missing = True
-        update._failed_zd = True
-        with patch.object(update, "_start_update") as start:
-            update._retry_failed()
-        self.assertEqual(update.selected, [zm])
-        self.assertFalse(update.update_zd)
-        self.assertFalse(update._zd_only_retry)
-        start.assert_called_once()
-
-        update._failed_games = []
-        update._zd_missing = False
-        update._failed_zd = True
-        with patch.object(update, "_start_update"):
-            update._retry_failed()
-        self.assertTrue(update._zd_only_retry)
-        self.assertTrue(update.update_zd)
-
-    def test_retry_optional_pack_after_unrelated_client_failure(self):
+    def test_update_retry_reruns_only_failed_modes(self):
         gd = next(g for g in ui_manage.ALL_GAMES if "t6zm" in g["keys"])
         zm = ("t6zm", gd, {"source": "steam", "install_dir": "/bo2"})
         other = ("iw4mp", next(g for g in ui_manage.ALL_GAMES if "iw4mp" in g["keys"]),
@@ -652,23 +627,17 @@ class ManagementUITests(unittest.TestCase):
         update = ui_manage.UpdateScreen(None)
         update.selected = [zm, other]
         update._failed_games = [other]
-        update._failed_zd = True
-        with patch.object(update, "_start_update"):
+        with patch.object(update, "_start_update") as start:
             update._retry_failed()
         self.assertEqual(update.selected, [other])
-        self.assertEqual(update._zd_retry_game, zm)
-        update._failed_zd = False  # _start_update clears the prior result
-        with patch.object(ui_manage.cfg, "is_zd_installed", return_value=True), \
-             patch("zombies_declassified.resolve_zd_storage", return_value="/zd") as storage, \
-             patch("zombies_declassified.is_zd_installed", return_value=True), \
-             patch("zombies_declassified.update_zd", return_value=False):
-            update._update_zd(True)
-        storage.assert_called_once_with(zm[2])
-        self.assertIsNone(update._zd_retry_game)
-        self.assertFalse(update._failed_zd)
-        self.assertFalse(update._zd_missing)
+        start.assert_called_once()
 
-    def test_update_progress_stop_and_opt_in_are_not_stale(self):
+        update._failed_games = []
+        with patch.object(update, "_start_update") as start:
+            update._retry_failed()
+        start.assert_not_called()
+
+    def test_update_progress_and_stop_are_not_stale(self):
         update = ui_manage.UpdateScreen(None)
         with patch.object(ui_manage.QTimer, "singleShot"), \
              patch.object(ui_manage.inhibit, "start"), \
@@ -685,10 +654,8 @@ class ManagementUITests(unittest.TestCase):
             update._on_done(False)
             self.assertEqual(update.bar.value(), 75)
             self.assertIn("cancelled before changing", update.cur.text())
-            update.update_zd = True
             with patch.object(update, "_backup_first", return_value=False):
                 update._run_steps()
-            self.assertFalse(update.update_zd)
 
     def test_update_progress_log_and_result_fit_both_sizes(self):
         from ui_constants import _app_style, _load_font
@@ -744,7 +711,6 @@ class ManagementUITests(unittest.TestCase):
                     stack.grab().save(os.path.join(output, f"update_result_{width}.png"))
                 update._failed_games = [(k, game, {}) for game in ui_manage.ALL_GAMES[:6]
                                         for k in game["keys"][:1]]
-                update._zd_missing = True
                 update._on_done(False)
                 _APP.processEvents()
                 self.assertGreaterEqual(update.log.height(), 100)
@@ -754,7 +720,6 @@ class ManagementUITests(unittest.TestCase):
                                 update.bar.mapTo(update, update.bar.rect().topLeft()).y())
                 self.assertLess(update._footer.mapTo(update,
                                 update._footer.rect().bottomLeft()).y(), update.height())
-                self.assertIn("BO2 Options", update.cur.text())
                 update.task = ("REPAIR OFFLINE LAUNCHER", lambda sigs: None)
                 update._start_update(); _APP.processEvents()
                 self.assertEqual(update.title.text(), "REPAIR OFFLINE LAUNCHER")

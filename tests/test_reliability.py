@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import depot_downgrade as depot
 import update_manifest
-import zombies_declassified as zd
 
 _QAPP = []
 
@@ -645,56 +644,6 @@ class DepotLoginTests(unittest.TestCase):
                 self.assertEqual(depot.cleanup_depotdownloader(), 1)
             self.assertFalse(private.exists())
             self.assertEqual(other.read_text(), "keep")
-
-
-class ZombiesRepairTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = self.tmp.name
-        self.relpath = "mods/dlc5/test.ff"
-        self.file = Path(self.root, self.relpath)
-        self.file.parent.mkdir(parents=True)
-        self.file.write_bytes(b"good")
-        zd._write_metadata(self.root, [self.relpath])
-        self.etag = hashlib.md5(b"good").hexdigest()
-
-    def test_unchanged_missing_and_same_size_corruption(self):
-        downloads = []
-
-        def download(url, dest, **kwargs):
-            downloads.append(url)
-            Path(dest).write_bytes(b"good")
-
-        with patch.object(zd, "fetch_manifest", return_value=[self.relpath]), \
-             patch.object(zd, "_remote_info", return_value=(4, self.etag)), \
-             patch.object(zd, "_download", side_effect=download):
-            self.assertFalse(zd.update_zd(self.root))
-            self.assertEqual(downloads, [])
-            self.file.write_bytes(b"baad")
-            self.assertTrue(zd.update_zd(self.root))
-            self.assertEqual(self.file.read_bytes(), b"good")
-            self.file.unlink()
-            self.assertTrue(zd.update_zd(self.root))
-            self.assertEqual(len(downloads), 2)
-
-    def test_failed_repair_does_not_claim_success(self):
-        self.file.unlink()
-        with patch.object(zd, "fetch_manifest", return_value=[self.relpath]), \
-             patch.object(zd, "_remote_info", return_value=(4, self.etag)), \
-             patch.object(zd, "_download", side_effect=OSError("offline")):
-            with self.assertRaisesRegex(RuntimeError, "could not be repaired"):
-                zd.update_zd(self.root)
-        self.assertTrue(zd.get_zd_info(self.root)["manifest_hash"].startswith("incomplete-"))
-
-    def test_unverifiable_file_is_kept_but_not_called_current(self):
-        with patch.object(zd, "fetch_manifest", return_value=[self.relpath]), \
-             patch.object(zd, "_remote_info", return_value=(None, None)), \
-             patch.object(zd, "_download") as download:
-            with self.assertRaisesRegex(RuntimeError, "Could not verify"):
-                zd.update_zd(self.root)
-            download.assert_not_called()
-        self.assertEqual(self.file.read_bytes(), b"good")
 
 
 class PlutoniumLeakCleanupTests(unittest.TestCase):

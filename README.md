@@ -31,8 +31,6 @@ IW-Pad and AlterWare do not repair the remote code execution (RCE) vulnerabiliti
 
 Supports Steam Deck (LCD and OLED), Steam Machine, Legion Go / Go S / Go 2, ROG Ally / Ally X, MSI Claw 8, and PC. SteamOS, Bazzite, and CachyOS supported.
 
-DeckOps can also install [Zombies Declassified](https://github.com/Logo-2K/zombies-declassified). This mod adds 10 Zombies maps to BO2 Zombies. You must have all the BO2 Zombies DLC.
-
 Call of Duty: Ghosts, Advanced Warfare, and Black Ops III are no longer supported. If you set them up with an earlier version, Full Uninstall still removes their DeckOps files.
 
 ---
@@ -91,7 +89,7 @@ If Steam asks about cloud saves, choose **Keep Local**. If asked about safe mode
 
 ### Updating games
 
-In **My Games**, choose **Update Games** to check and repair the mod-client modes you have already set up, or **Game Options → Update Client** for one game's configured modes. Review the mode list before continuing: other Plutonium modes may be included because they share client files. DeckOps backs up saves first and closes Steam before changing its settings. Checking the optional Zombies Declassified maps is a separate, unchecked choice and may download up to ~9 GB.
+In **My Games**, choose **Update Games** to check and repair the mod-client modes you have already set up, or **Game Options → Update Client** for one game's configured modes. Review the mode list before continuing: other Plutonium modes may be included because they share client files. DeckOps backs up saves first and closes Steam before changing its settings.
 
 Each update also installs the latest GE-Proton. DeckOps then removes GE-Proton versions it installed earlier, keeping the current one and the one before it. It never removes a version that a game, shortcut or the other DeckOps build still uses, or one you installed yourself.
 
@@ -156,8 +154,6 @@ The interface uses [Atkinson Hyperlegible](https://brailleinstitute.org/freefont
 **[Bot Warfare](https://github.com/ineedbots)** - Bots for Plutonium Offline in WaW, BO1, BO2, and MW3 by [ineedbots](https://github.com/ineedbots).
 
 **[T6ServerConfigs](https://github.com/xerxes-at/T6ServerConfigs)** - BO2 game mode settings for Plutonium Offline by [xerxes-at](https://github.com/xerxes-at).
-
-**[Zombies Declassified](https://github.com/Logo-2K/zombies-declassified)** - DLC5 map pack for BO2 Zombies (10 classic maps) by [Logo2K](https://github.com/Logo-2K). Files packaged and hosted by **[Littlegods](https://github.com/andr3xcl/littlegods-dlc-installer)**.
 
 **[DepotDownloader](https://github.com/SteamRE/DepotDownloader)** - Steam depot downloader by [SteamRE](https://github.com/SteamRE). Used to download the correct game files for MW3.
 

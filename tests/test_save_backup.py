@@ -76,26 +76,16 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual((self.backup / "backup_info.json").read_bytes(), before)
         self.assertTrue(any("previous backup is kept" in msg for msg in messages))
 
-    def test_custom_usermaps_round_trip_without_zd_pack(self):
-        from zombies_declassified import _ZD_USERMAPS, ZD_METADATA
+    def test_custom_usermaps_and_mods_round_trip(self):
         custom = self.storage / "usermaps" / "zm_my_custom_map" / "map.ff"
         custom.parent.mkdir(parents=True)
         custom.write_text("my map")
-        zd_map = self.storage / "usermaps" / _ZD_USERMAPS[0] / "large.ff"
-        zd_map.parent.mkdir(parents=True)
-        zd_map.write_text("redownloadable ZD map")
         (self.storage / "mods" / "dlc5").mkdir()
-        (self.storage / "mods" / "dlc5" / ZD_METADATA).write_text(json.dumps({"manifest_hash": "abc"}))
-        (self.storage / "mods" / "dlc5" / "large.ff").write_text("redownloadable ZD mod")
-        # A second prefix without ZD's marker may contain a custom map whose
-        # name coincides with a ZD map. Its data must not be excluded.
+        (self.storage / "mods" / "dlc5" / "mine.gsc").write_text("custom mod")
         second = self.root / "second_storage"
-        coincident = second / "usermaps" / _ZD_USERMAPS[0] / "mine.ff"
-        coincident.parent.mkdir(parents=True)
-        coincident.write_text("not ZD")
-        custom_dlc5 = second / "mods" / "dlc5" / "mine.gsc"
-        custom_dlc5.parent.mkdir(parents=True)
-        custom_dlc5.write_text("custom mod with colliding folder name")
+        other = second / "usermaps" / "zm_other_map" / "mine.ff"
+        other.parent.mkdir(parents=True)
+        other.write_text("other map")
         with patch.object(sb, "_find_plutonium_storages", return_value={
                 "212910": str(self.storage), "202990": str(second)}):
             result, failures, messages = self._backup()
@@ -103,19 +93,14 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual(list(result), ["t6"])
         saved = self.backup / "t6"
         self.assertEqual((saved / "212910" / "usermaps" / "zm_my_custom_map" / "map.ff").read_text(), "my map")
-        self.assertFalse((saved / "212910" / "usermaps" / _ZD_USERMAPS[0]).exists())
-        self.assertFalse((saved / "212910" / "mods" / "dlc5").exists())
-        self.assertEqual((saved / "202990" / "usermaps" / _ZD_USERMAPS[0] / "mine.ff").read_text(), "not ZD")
-        self.assertEqual((saved / "202990" / "mods" / "dlc5" / "mine.gsc").read_text(),
-                         "custom mod with colliding folder name")
-        self.assertTrue(any("custom edits inside" in msg for msg in messages))
+        self.assertEqual((saved / "212910" / "mods" / "dlc5" / "mine.gsc").read_text(), "custom mod")
+        self.assertEqual((saved / "202990" / "usermaps" / "zm_other_map" / "mine.ff").read_text(), "other map")
         target = self.root / "restored_storage"
         with patch.object(sb, "_plut_restore_dst", return_value=str(target)):
             self.assertEqual(list(sb.restore_saves(steam_root=str(self.root))), ["t6"])
         self.assertEqual((target / "usermaps" / "zm_my_custom_map" / "map.ff").read_text(), "my map")
-        self.assertEqual((target / "usermaps" / _ZD_USERMAPS[0] / "mine.ff").read_text(), "not ZD")
-        self.assertEqual((target / "mods" / "dlc5" / "mine.gsc").read_text(),
-                         "custom mod with colliding folder name")
+        self.assertEqual((target / "usermaps" / "zm_other_map" / "mine.ff").read_text(), "other map")
+        self.assertEqual((target / "mods" / "dlc5" / "mine.gsc").read_text(), "custom mod")
 
     def test_unrecorded_backup_is_reported_as_a_failure(self):
         with patch.object(sb, "_write_meta", side_effect=OSError("read-only")):

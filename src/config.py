@@ -52,7 +52,6 @@ DEFAULTS = {
     "music_volume":  0.4,        # 0.0 to 1.0
     "player_name": None,         # in-game player name for configs and LCD Plutonium
     "iw_pad": {},                # sp_mod.py: { game key: { "tag", "digest" } } of the installed IW-Pad release
-    "zd_installed": None,        # Zombies Declassified: { "manifest_hash": ..., "installed_at": ... } or None
     "offline_mode": None,        # Offline Mode (opt-in): offline launcher, Steam menu Offline entries,
                                  #   WaW/BO1/BO2/MW3 MP bot matches. None = not chosen yet (older installs)
     "manifest_mods": {},         # manifest_mods.py: { mod_id: { "option" (component mods: "a+b"), "games_root", "option_hash", "complete", "installed_at" } }
@@ -579,30 +578,6 @@ def get_iw_pad(game_key: str) -> dict:
 def set_iw_pad(game_key: str, info: dict):
     config = load()
     config.setdefault("iw_pad", {})[game_key] = info
-    save(config)
-
-
-def mark_zd_installed(manifest_hash: str = ""):
-    """Record that Zombies Declassified has been installed."""
-    config = load()
-    config["zd_installed"] = {
-        "manifest_hash": manifest_hash,
-        "installed_at": datetime.now().isoformat(),
-    }
-    save(config)
-
-
-def is_zd_installed() -> bool:
-    return load().get("zd_installed") is not None
-
-
-def get_zd_info() -> dict:
-    return load().get("zd_installed") or {}
-
-
-def unmark_zd_installed():
-    config = load()
-    config["zd_installed"] = None
     save(config)
 
 

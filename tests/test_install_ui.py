@@ -41,8 +41,6 @@ class Settings:
     def get_offline_mode(self):
         return False
 
-    def is_zd_installed(self):
-        return False
 
 
 _APP = None
@@ -364,7 +362,7 @@ class InstallUITests(unittest.TestCase):
         self.install._phase("finalize")
         self.assertIn("Finishing up", self.install.stat.text())
 
-    def test_retry_keeps_addon_choice_and_only_incomplete_modes(self):
+    def test_retry_keeps_offline_choice_and_only_incomplete_modes(self):
         gd = next(g for g in ui_install.ALL_GAMES if "t6zm" in g["keys"])
         self.install.steam_selected = [
             ("t6zm", gd, self.game("Black Ops II")),
@@ -375,13 +373,11 @@ class InstallUITests(unittest.TestCase):
             {"key": "t6zm", "status": "skipped"},
             {"key": "t6mp", "status": "ok"},
         ]
-        self.install._last_zd_choice = True
         self.install._last_offline_mode = True
         with patch.object(self.install, "_reset_and_run") as restart:
             self.install._retry_failed()
         restart.assert_called_once()
         self.assertEqual([k for k, _, _ in self.install.steam_selected], ["t6zm"])
-        self.assertTrue(self.install.zd_choice)
         self.assertTrue(self.install.offline_mode)
 
     def test_first_run_only_completed_when_all_selected_modes_ready(self):

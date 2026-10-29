@@ -202,7 +202,7 @@ class SetupScreen(QWidget):
         self._extra_paths = []
         self._folder_found = {}
         self._iw4x_dlc_cb = None; self._iw4x_dlc_present = False
-        self._zd_cb = None; self._lan_cb = None
+        self._lan_cb = None
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
 
@@ -290,7 +290,7 @@ class SetupScreen(QWidget):
             if item.widget(): item.widget().deleteLater()
         self._checks.clear()
         self._iw4x_dlc_cb = None; self._iw4x_dlc_present = False
-        self._zd_cb = None; self._lan_cb = None
+        self._lan_cb = None
 
         all_installed = {**self.steam_installed, **self.own_installed}
 
@@ -400,19 +400,6 @@ class SetupScreen(QWidget):
             cb = (tile("IW4x DLC maps", "Free MW2 DLC maps") if self._iw4x_dlc_present else
                   tile("IW4x DLC maps", "Free MW2 DLC maps, ~3 GB, recommended", True, "iw4mp", "tick MW2 Multiplayer"))
             if cb: self._iw4x_dlc_cb = cb
-        if "t6zm" in active:
-            from zombies_declassified import has_bo2_zm_dlc
-            zd_note = "10 classic maps for BO2 Zombies, ~9 GB"
-            bdir = all_installed["t6zm"].get("install_dir", "") if "t6zm" in shown else ""
-            if cfg.is_zd_installed():
-                tile("Zombies Declassified", "10 classic maps for BO2 Zombies")
-            elif not bdir:
-                tile("Zombies Declassified", zd_note, missing="needs BO2 Zombies with all its DLC")
-            elif not has_bo2_zm_dlc(bdir):
-                tile("Zombies Declassified", zd_note,
-                     missing="needs all BO2 Zombies DLC: install it in Steam or verify the game files")
-            else:
-                self._zd_cb = tile("Zombies Declassified", zd_note, False, "t6zm", "tick BO2 Zombies")
         self._extras.setVisible(self._tiles.count() > 0)
 
     def _add_mw3_free_row(self, gd):
@@ -516,7 +503,6 @@ class SetupScreen(QWidget):
             checks = preflight.check(
                 rows,
                 iw4x_dlc=bool(self._iw4x_dlc_cb and self._iw4x_dlc_cb.isEnabled() and self._iw4x_dlc_cb.isChecked()),
-                zd=bool(self._zd_cb and self._zd_cb.isEnabled() and self._zd_cb.isChecked()),
                 downgrade_keys=[k for k, _gd, _g in steam_selected])  # own copies are already 32-bit
         except Exception as ex:
             _log_to_file(f"[SetupScreen] preflight failed: {ex}")
@@ -536,8 +522,6 @@ class SetupScreen(QWidget):
         extras = []
         if self._iw4x_dlc_cb and self._iw4x_dlc_cb.isEnabled() and self._iw4x_dlc_cb.isChecked():
             extras.append("IW4x DLC maps (~3 GB)")
-        if self._zd_cb and self._zd_cb.isEnabled() and self._zd_cb.isChecked():
-            extras.append("Zombies Declassified (~9 GB)")
         if self._lan_cb:
             extras.append("Plutonium Offline: " + ("on" if self._lan_cb.isChecked() else "off"))
         msg.setText("<b>Set up these games and modes?</b><br><br>" + games +
@@ -588,7 +572,6 @@ class SetupScreen(QWidget):
         else:
             s.install_iw4x_dlc = "install" if self._iw4x_dlc_cb and self._iw4x_dlc_cb.isChecked() else ""
         s.cod4_client = "cod4r"
-        s.zd_choice = bool(self._zd_cb and self._zd_cb.isChecked())
         s.offline_mode = self._lan_cb.isChecked() if self._lan_cb else None
         go_to(self.stack, "InstallScreen")
 
@@ -614,13 +597,10 @@ class _BaseInstallScreen(QWidget):
         self._manual_dl_ok = False
         self._retry_dl_event = threading.Event()
         self._retry_dl_choice = ""
-        self._zd_event = threading.Event()
-        self._zd_accept = False
         self._return_to_management = False
         self._from_manage = False
         self._selection_entry = False
         self._from_setup_selection = False
-        self.zd_choice = None
         self.offline_mode = None
         self._results = []
         self._plan = []; self._bands = {}
@@ -700,26 +680,6 @@ class _BaseInstallScreen(QWidget):
         self.manual_step.setVisible(False)
         clay.addWidget(self.manual_step)
 
-        self.zd_info = _lbl(
-            "Zombies Declassified adds 10 classic Zombies maps to BO2 through Plutonium.\n"
-            "It's an optional ~9 GB download. You can install it later from Manage.",
-            12, C_TEXT, align=Qt.AlignmentFlag.AlignCenter,
-        )
-        self.zd_info.setStyleSheet(
-            f"color:{C_TEXT};background:{C_SURFACE};border:1px solid {C_LINE};"
-            "border-radius:8px;padding:10px 16px;"
-        )
-        self.zd_info.setVisible(False)
-        clay.addWidget(self.zd_info)
-        self.zd_yes = _btn("Install Zombies Declassified (~9 GB)", C_IW, size=13, h=52)
-        self.zd_yes.setVisible(False)
-        self.zd_yes.clicked.connect(lambda: self._confirm_zd(True))
-        self.zd_skip = _btn("Skip", C_DARK_BTN, size=13, h=52)
-        self.zd_skip.setVisible(False)
-        self.zd_skip.clicked.connect(lambda: self._confirm_zd(False))
-        zw = QHBoxLayout(); zw.addStretch(); zw.addWidget(self.zd_yes); zw.addSpacing(12); zw.addWidget(self.zd_skip); zw.addStretch()
-        clay.addLayout(zw)
-
         self.summary = _lbl("", 12, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
         self.summary.setTextFormat(Qt.TextFormat.RichText)
         self.summary.setStyleSheet(
@@ -760,8 +720,6 @@ class _BaseInstallScreen(QWidget):
         self._s.pulse_stop.connect(self._stop_pulse)
         self._s.manual_dl.connect(self._show_manual_dl_dialog)
         self._s.retry_dl.connect(self._show_retry_dl_dialog)
-        self._s.zd_ask.connect(self._show_zd_ask)
-        self._s.zd_go.connect(self._hide_zd_ask)
 
         self._tick = QTimer()
         self._tick.timeout.connect(self._update_stat)
@@ -856,20 +814,6 @@ class _BaseInstallScreen(QWidget):
 
     def _confirm_iw5_dg(self):
         self._iw5_dg_event.set()
-
-    def _show_zd_ask(self):
-        self.zd_info.setVisible(True)
-        self.zd_yes.setVisible(True)
-        self.zd_skip.setVisible(True)
-
-    def _hide_zd_ask(self):
-        self.zd_info.setVisible(False)
-        self.zd_yes.setVisible(False)
-        self.zd_skip.setVisible(False)
-
-    def _confirm_zd(self, accepted):
-        self._zd_accept = accepted
-        self._zd_event.set()
 
     def _show_iw5_qr(self, qr_text):
         from depot_downgrade import qr_text_to_pixmap
@@ -1180,7 +1124,6 @@ class _BaseInstallScreen(QWidget):
         # Entry flags were consumed by the first run; preserve them for a retry.
         self._return_to_management = self._from_manage
         self._selection_entry = self._from_setup_selection
-        self.zd_choice = self._last_zd_choice
         self.offline_mode = self._last_offline_mode
         self._reset_and_run()
 
@@ -1282,7 +1225,6 @@ class _BaseInstallScreen(QWidget):
         inhibit.stop()
         el = int(time.time() - self._t0)
         self.stat.setText(f"Finished in {el // 60}:{el % 60:02d}")
-        self.zd_choice = None
         self.offline_mode = None
         incomplete = self._retryable()
         complete = ok and bool(self._results) and not incomplete
@@ -1344,14 +1286,11 @@ class _BaseInstallScreen(QWidget):
         self.iw5_dg_btn.setVisible(False)
         self.manual_step.setVisible(False)
         self.iw5_qr_box.setVisible(False)
-        self.zd_info.setVisible(False); self.zd_yes.setVisible(False); self.zd_skip.setVisible(False)
-        self._zd_event.clear(); self._zd_accept = False
         self.summary_scroll.setVisible(False); self.retry_btn.setVisible(False)
         self._results = []
         self._plan = []; self._bands = {}
         self._phase_i = -1; self._phase_id = None
         self._last_pct = 0; self._t0 = time.time()
-        self._last_zd_choice = self.zd_choice
         self._last_offline_mode = self.offline_mode
         self._tick.start(1000)
         inhibit.start("DeckOps is installing")
@@ -1456,7 +1395,6 @@ class _BaseInstallScreen(QWidget):
             ("t6sp",      "Installing T6SP-MOD",          4 if has_t6sp_mod else 0),
             ("iw4x",      "Installing IW4x",              12 * _nk("iw4x")),
             ("spmod",     "Installing IW-Pad",            4 * len(_sp_keys)),
-            ("zd",        "Zombies Declassified",         8 if has_plut and "t6zm" in selected_keys else 0),
             ("finalize",  "Finishing up",                 8),
         ])
 
@@ -2161,84 +2099,6 @@ class _BaseInstallScreen(QWidget):
                     _g["_own_launch_options"] = ""
                     self._s.log.emit(f"✗  IW-Pad install failed ({_sp_key}): {ex}")
                     self._mark(_sp_key, "failed", f"IW-Pad: {ex}")
-
-        # --- Zombies Declassified (optional DLC5 for BO2 Zombies via Plutonium)
-        if plut_ok and "t6zm" in selected_keys:
-            self._phase("zd")
-            _zd_requested = self.zd_choice is True
-
-            def _zd_incomplete(reason, status="skipped"):
-                if _zd_requested and any(r["key"] == "t6zm" and r["status"] == "ok"
-                                         for r in self._results):
-                    self._mark("t6zm", status, f"Zombies Declassified: {reason}")
-
-            try:
-                # Check BO2 Zombies DLC prerequisite
-                _bo2_dir = None
-                for _k, _gd, _g in self.selected:
-                    if _k == "t6zm" and _g:
-                        _bo2_dir = _g.get("install_dir", "")
-                        break
-
-                from zombies_declassified import has_bo2_zm_dlc
-                if not _bo2_dir or not has_bo2_zm_dlc(_bo2_dir):
-                    self._s.log.emit("Zombies Declassified skipped (requires all BO2 Zombies DLC)")
-                    _zd_incomplete("requires all BO2 Zombies DLC")
-                else:
-                    from zombies_declassified import resolve_zd_storage
-                    _zd_storage = resolve_zd_storage({k: g for k, gd, g in self.selected}.get("t6zm"))
-
-                    if _zd_storage and os.path.isdir(_zd_storage):
-                        # Choice comes from the game-selection row; None means ask now (~9 GB)
-                        _zd_yes = self.zd_choice
-                        if _zd_yes is None:
-                            self._s.progress.emit(self._ppct(0), "Zombies Declassified available")
-                            self._s.log.emit("Zombies Declassified (DLC5) is available for BO2 Zombies.")
-                            self._zd_event.clear()
-                            self._zd_accept = False
-                            self._s.zd_ask.emit()
-                            self._zd_event.wait()
-                            self._s.zd_go.emit()
-                            _zd_yes = self._zd_accept
-                        _zd_requested = bool(_zd_yes)
-
-                        if _zd_yes:
-                            self._s.progress.emit(self._ppct(5), "Installing Zombies Declassified...")
-                            self._s.log.emit("Installing Zombies Declassified (DLC5 map pack)...")
-                            from zombies_declassified import install_zd
-                            def op_zd(pct, msg): self._s.progress.emit(self._ppct(pct), msg)
-                            errors = install_zd(_zd_storage, op_zd)
-                            from zombies_declassified import get_zd_info as _zd_info
-                            info = _zd_info(_zd_storage)
-                            if info.get("manifest_hash"):
-                                cfg.mark_zd_installed(info["manifest_hash"])
-                            if errors:
-                                self._s.log.emit(f"⚠  Zombies Declassified installed with {len(errors)} error(s)")
-                                _zd_incomplete(f"{len(errors)} install error(s)", "failed")
-                            else:
-                                self._s.log.emit("✓  Zombies Declassified installed")
-                        else:
-                            self._s.log.emit("Zombies Declassified skipped (can install later from Manage)")
-                    else:
-                        self._s.log.emit("⚠  Zombies Declassified skipped (paths not resolved)")
-                        _zd_incomplete("game paths not resolved")
-            except Exception as ex:
-                self._s.log.emit(f"⚠  Zombies Declassified skipped: {ex}")
-                _zd_incomplete(str(ex), "failed")
-
-        # --- Clean up ZD files leaked into non-t6zm prefixes
-        if has_plut and not cfg.is_lcd():
-            try:
-                from plutonium import cleanup_zd_from_other_prefixes
-                n = cleanup_zd_from_other_prefixes(
-                    {k: g for k, gd, g in self.selected if g},
-                    self.steam_root,
-                    on_progress=lambda msg: self._s.log.emit(msg),
-                )
-                if n:
-                    self._s.log.emit(f"✓  Cleaned ZD files from {n} prefix(es)")
-            except Exception as ex:
-                self._s.log.emit(f"  ZD cleanup skipped: {ex}")
 
         # --- Clean up Plutonium dirs leaked into non-Plutonium prefixes
         if has_plut and not cfg.is_lcd():
