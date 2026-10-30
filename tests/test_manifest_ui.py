@@ -14,16 +14,23 @@ try:
     import ui_manifest
     import ui_theme
 except ImportError:
+    # No usable PyQt: the tests below skip. The names still have to exist,
+    # because the class below is built at import time (a NameError here made
+    # the whole suite fail to collect instead of skipping these tests).
     QApplication = None
+    QWidget = None
 
 
 _APP = None
 
 
-class Destination(QWidget):
-    def __init__(self, name):
-        super().__init__()
-        self.screen_name = name
+if QWidget is not None:
+    class Destination(QWidget):
+        def __init__(self, name):
+            super().__init__()
+            self.screen_name = name
+else:
+    Destination = None
 
 
 @unittest.skipIf(QApplication is None, "PyQt is not installed")

@@ -352,6 +352,20 @@ class GeProtonFallbackTests(unittest.TestCase):
 
 class PrelaunchHelperFallbackTests(unittest.TestCase):
     def test_helper_startup_failure_runs_game_but_other_failures_do_not_duplicate_it(self):
+        """prelaunch.sh runs fovwatch.py as the game's parent, so the game must
+        start exactly once whether or not the helper could start it:
+
+          * helper cannot start the game at all (126/127) -> prelaunch.sh
+            starts it, and DeckOps reports success;
+          * helper starts the game and the game returns s -> s is passed on and
+            prelaunch.sh must not start the game a second time.
+
+        The previous version of this test used a fake python that failed the
+        helper's import check with the same status it was meant to return for
+        the game, so it asserted that a broken helper must NOT start the game.
+        That contradicts prelaunch.sh's contract ("the game always starts") and
+        tests/test_prelaunch_shell.py, and it failed on a clean checkout.
+        """
         if not shutil.which("bash"):
             self.skipTest("bash unavailable")
         try:
@@ -371,14 +385,25 @@ class PrelaunchHelperFallbackTests(unittest.TestCase):
             game.chmod(0o755)
             marker = root / "launched"
             for status in (127, 1):
-                python.write_text(f"#!/bin/sh\nexit {status}\n")
+                # prelaunch.sh calls python three times: the silent prelaunch.py
+                # update, the `python -c 'import fovwatch'` import check, then
+                # the helper itself. The first two succeed, so the helper is
+                # used. On the helper run: 127 = it never got the game started,
+                # any other status = the game ran and returned that status.
+                python.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$*\" in *prelaunch.py*|*\"import fovwatch\"*) exit 0 ;; esac\n"
+                    + ("exit 127\n" if status == 127 else "")
+                    + f'"{game}" "{marker}"\n'
+                    + f"exit {status}\n"
+                )
                 python.chmod(0o755)
                 result = subprocess.run(["bash", str(root / "prelaunch.sh"), "iw4sp",
                                          str(game), str(marker)], capture_output=True)
                 self.assertEqual(result.returncode, 0 if status == 127 else 1)
-                self.assertEqual(marker.read_text().count("launched") if marker.exists() else 0,
-                                 1 if status == 127 else 0)
+                self.assertEqual(marker.read_text().count("launched") if marker.exists() else 0, 1)
                 marker.unlink(missing_ok=True)
+
 
 
 class ShellSyntaxTests(unittest.TestCase):
@@ -1187,7 +1212,13 @@ class SetupCheckTests(unittest.TestCase):
         SP exe swap on 7940. Update must rebuild the combined option, or
         Check My Setup flags both modes again after every Fix."""
         from types import SimpleNamespace
-        import ui_manage
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            import ui_manage
+        except ImportError:
+            # Same rule as the other UI tests in this file: a host without a
+            # usable PyQt skips them instead of erroring the whole run.
+            self.skipTest("PyQt is not available")
         from iw3sp import _build_iw3sp_launch_option
         cod4 = Path(self.tmp.name, "games", "CoD4"); cod4.mkdir()
         for marker in ("deckops_cod4r.json", "deckops_iw3sp.json"):
