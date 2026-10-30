@@ -405,6 +405,80 @@ class PrelaunchHelperFallbackTests(unittest.TestCase):
                 marker.unlink(missing_ok=True)
 
 
+class PrefixFinalizeTests(unittest.TestCase):
+    """`proton run cmd /c exit` is the step that turns a bare directory into a
+    Wine prefix. Its exit status used to be ignored, so a prefix that was never
+    created was reported as "✓ Prefix finalized by Proton", counted as ready,
+    and the game then failed on first launch instead of setup saying so."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        # A minimal GE-Proton: default_pfx with the DLL folders the copy step reads.
+        self.tool = self.root / "GE-Proton10-30"
+        for d in ("system32", "syswow64"):
+            (self.tool / "files" / "share" / "default_pfx" / "drive_c" / "windows" / d).mkdir(parents=True)
+        (self.tool / "files" / "share" / "default_pfx" / "drive_c" / "windows" / "system32" / "d3dx9_43.dll").write_bytes(b"dll")
+        (self.tool / "proton").write_text("")
+        (self.tool / "compatibilitytool.vdf").write_text("")
+
+    def _fake_proton(self, body: str) -> str:
+        """A proton script that runs `body` when asked to finalize a prefix."""
+        path = self.root / "proton"
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+        return str(path)
+
+    def _deps(self, proton):
+        import ge_proton
+        prefix = self.root / "compatdata" / "10090"
+        with patch.object(ge_proton, "COMPAT_DIR", str(self.root)), \
+             patch.object(ge_proton, "_find_default_pfx",
+                          return_value=str(self.tool / "files" / "share" / "default_pfx")):
+            return ge_proton.ensure_prefix_deps(
+                "GE-Proton10-30", str(prefix), on_progress=lambda m: None,
+                proton_path=proton, steam_root=str(self.root))
+
+    def test_failed_proton_run_is_not_reported_as_finalized(self):
+        # Exits non-zero and creates nothing, like a missing steamclient.so
+        ok = self._deps(self._fake_proton("exit 1"))
+        self.assertIs(ok, False)
+
+    def test_successful_proton_run_is_finalized(self):
+        # Wine boot order: drive_c plus the registry it writes on first boot
+        proton = self._fake_proton(
+            'mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx/drive_c"\n'
+            ': > "$STEAM_COMPAT_DATA_PATH/pfx/system.reg"')
+        self.assertIs(self._deps(proton), True)
+
+    def test_zero_exit_without_a_prefix_does_not_count(self):
+        # Exits 0 but never boots wine -- a launcher that silently does nothing
+        ok = self._deps(self._fake_proton("exit 0"))
+        self.assertIs(ok, False)
+
+    def test_a_failed_finalize_is_retried_on_the_next_run(self):
+        """The DLL copy creates drive_c before Proton runs, so a prefix whose
+        finalize failed used to look initialized forever: every later run said
+        "already initialized — skipped Proton run" and never retried."""
+        self.assertIs(self._deps(self._fake_proton("exit 1")), False)
+        proton = self._fake_proton(
+            'mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx/drive_c"\n'
+            ': > "$STEAM_COMPAT_DATA_PATH/pfx/system.reg"')
+        self.assertIs(self._deps(proton), True)
+
+    def test_finalized_helper_checks_the_disk_not_only_the_status(self):
+        import ge_proton
+        pfx = self.root / "pfx"
+        # A drive_c made by the DLL copy does not mean wine ever ran
+        (pfx / "drive_c" / "windows" / "system32").mkdir(parents=True)
+        self.assertFalse(ge_proton._prefix_ready(str(pfx)))
+        self.assertFalse(ge_proton._finalized(0, str(pfx)))
+        (pfx / "system.reg").write_text("WINE REGISTRY Version 2\n")
+        self.assertTrue(ge_proton._prefix_ready(str(pfx)))
+        self.assertTrue(ge_proton._finalized(0, str(pfx)))
+        self.assertFalse(ge_proton._finalized(1, str(pfx)))       # failed even though it booted
+
 
 class ShellSyntaxTests(unittest.TestCase):
     """The updater refuses any .sh file that fails `bash -n`, so a syntax error
