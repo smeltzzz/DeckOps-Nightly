@@ -265,9 +265,24 @@ HEROIC_PLUT_GAMES = {
 # becomes corrupt. Safe to nuke entirely — Steam recreates the directory
 # on next launch.
 
-SHADERCACHE_DIR = os.path.expanduser(
-    "~/.local/share/Steam/steamapps/shadercache"
-)
+
+def _steam_paths() -> tuple:
+    """(shadercache dir, compatibilitytools.d dir) for the Steam in use.
+
+    These were module constants pointing at ~/.local/share/Steam, evaluated
+    at import; on a Flatpak or moved Steam the shader-cache cleanup silently
+    did nothing and Heroic's Proton path did not exist.
+    """
+    from steam_common import default_steam_root
+    root = default_steam_root()
+    return (os.path.join(root, "steamapps", "shadercache"),
+            os.path.join(root, "compatibilitytools.d"))
+
+
+def _proton_dir(ge_proton_version: str) -> str:
+    """compatibilitytools.d/<version> under the Steam in use."""
+    return os.path.join(_steam_paths()[1], ge_proton_version)
+
 
 def _nuke_shader_cache(game_key: str, source: str, on_progress=None):
     """
@@ -285,7 +300,7 @@ def _nuke_shader_cache(game_key: str, source: str, on_progress=None):
     steam_appid = PLUT_GAME_EXES.get(game_key)
     if steam_appid:
         appid_str = str(steam_appid[0])
-        cache_dir = os.path.join(SHADERCACHE_DIR, appid_str)
+        cache_dir = os.path.join(_steam_paths()[0], appid_str)
         if os.path.isdir(cache_dir):
             try:
                 shutil.rmtree(cache_dir)
@@ -298,7 +313,7 @@ def _nuke_shader_cache(game_key: str, source: str, on_progress=None):
         title = HEROIC_PLUT_GAMES[game_key]["title"]
         appid_exe = '"/usr/bin/flatpak"'
         shortcut_appid = str(_calc_shortcut_appid(appid_exe, title))
-        cache_dir = os.path.join(SHADERCACHE_DIR, shortcut_appid)
+        cache_dir = os.path.join(_steam_paths()[0], shortcut_appid)
         if os.path.isdir(cache_dir):
             try:
                 shutil.rmtree(cache_dir)
@@ -423,11 +438,16 @@ def _grant_heroic_filesystem_access(paths: list, on_progress=None):
         except (FileNotFoundError, subprocess.TimeoutExpired):
             prog(f"  Warning: could not grant HGL access to {path}")
 
-    # Always grant access to the DeckOps data dir and Steam compatibilitytools
+    # Always grant access to the DeckOps data dir and Steam compatibilitytools.
+    # The Steam root comes from the resolved one: Heroic's Proton lives under
+    # whichever Steam is installed, and a hardcoded path here left the flatpak
+    # unable to read its own prefix on a Flatpak/moved Steam.
+    from steam_common import default_steam_root
+    _root = default_steam_root()
     _always_grant = [
         os.path.expanduser("~/.local/share/deckops"),
-        os.path.expanduser("~/.local/share/Steam/compatibilitytools.d"),
-        os.path.expanduser("~/.local/share/Steam"),
+        os.path.join(_root, "compatibilitytools.d"),
+        _root,
         "/run/media",  # SD card access
     ]
     for path in _always_grant:
@@ -565,9 +585,7 @@ def _write_heroic_game_config(game_key: str, ge_proton_version: str,
     os.makedirs(HEROIC_GAMES_CONFIG_DIR, exist_ok=True)
 
     # Resolve the GE-Proton binary path
-    proton_dir = os.path.expanduser(
-        f"~/.local/share/Steam/compatibilitytools.d/{ge_proton_version}"
-    )
+    proton_dir = _proton_dir(ge_proton_version)
     proton_bin = os.path.join(proton_dir, "proton")
 
     # Shape A: every Plutonium game points at Heroic's shared default prefix.
@@ -866,9 +884,7 @@ def _ensure_bootstrap_sideload_entry(plutonium_exe: str,
     config_path = os.path.join(HEROIC_GAMES_CONFIG_DIR,
                                 f"{BOOTSTRAP_APP_NAME}.json")
 
-    proton_dir = os.path.expanduser(
-        f"~/.local/share/Steam/compatibilitytools.d/{ge_proton_version}"
-    )
+    proton_dir = _proton_dir(ge_proton_version)
     proton_bin = os.path.join(proton_dir, "proton")
 
     config = {

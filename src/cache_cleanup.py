@@ -42,9 +42,16 @@ _log = get_logger("cache_cleanup")
 
 HEROIC_FLATPAK_ID = "com.heroicgameslauncher.hgl"
 
-SHADERCACHE_DIR = os.path.expanduser(
-    "~/.local/share/Steam/steamapps/shadercache"
-)
+
+def _shadercache_dir() -> str:
+    """Steam's shadercache under the Steam actually in use.
+
+    A module constant fixed to ~/.local/share/Steam meant the cleanup did
+    nothing at all on a Flatpak or moved install -- this file runs as a
+    standalone script in the game's environment, so it has no cached root.
+    """
+    from steam_common import default_steam_root
+    return os.path.join(default_steam_root(), "steamapps", "shadercache")
 
 # Map game key to Steam appid. Used to find the shadercache folder for
 # Steam-owned games (whose cache is keyed on the Steam appid, not the
@@ -94,7 +101,7 @@ def _nuke_shader_cache_dir(appid_str: str):
     on next launch, and the game's real shader work happens inside
     Heroic's Proton runtime which stores its cache elsewhere.
     """
-    cache_dir = os.path.join(SHADERCACHE_DIR, appid_str)
+    cache_dir = os.path.join(_shadercache_dir(), appid_str)
     if os.path.isdir(cache_dir):
         try:
             shutil.rmtree(cache_dir)

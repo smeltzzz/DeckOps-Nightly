@@ -87,6 +87,18 @@ fi
                     self.assertEqual(out, "")
         self.assertFalse(list(self.root.glob(".lan_intent.*")))
 
+    def test_null_config_values_are_reported_as_missing(self):
+        """`null` used to print as the string "None", which is not empty, so
+        the config check passed and the launcher died with "Proton not found
+        at None/compatibilitytools.d/..." instead of naming what was missing."""
+        (self.root / "deckops.json").write_text(json.dumps(
+            {"steam_root": None, "ge_proton_version": None}))
+        proc = subprocess.run(["bash", str(self.script)], env=self.env,
+                              capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("Could not read ge_proton_version or steam_root", proc.stderr)
+        self.assertNotIn("None/compatibilitytools.d", proc.stderr)
+
     def test_overlapping_windows_keep_their_own_intents(self):
         wait_one = str(Path(self.tmp.name) / "release-one")
         wait_two = str(Path(self.tmp.name) / "release-two")

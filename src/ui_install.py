@@ -991,6 +991,7 @@ class _BaseInstallScreen(QWidget):
                         f".deckops_{game_id}_staging",
                     )
                     for depot in depots:
+                        depot_id = depot["depot"]
                         depot_num += 1
                         _dp = int(5 + 80 * (depot_num - 1) / max(total_depots, 1))
                         self._s.progress.emit(
@@ -1006,7 +1007,7 @@ class _BaseInstallScreen(QWidget):
                             username=captured_user,
                         )
                         if result is None:
-                            self._s.log.emit(f"✗  Depot {depot['depot']} download failed.")
+                            self._s.log.emit(f"✗  Depot {depot_id} download failed.")
                             failed = True
                             break
                         captured_user = result
@@ -1014,7 +1015,9 @@ class _BaseInstallScreen(QWidget):
                     self._s.iw5_qr_hide.emit()
 
                     if failed:
-                        failed_ids[game_id] = f"depot {depot['depot']} download failed"
+                        # depot_id, not depot: the loop variable is only
+                        # meaningful inside the loop that broke out of.
+                        failed_ids[game_id] = f"depot {depot_id} download failed"
                         continue
                     if not os.path.isdir(staging):
                         self._s.log.emit(f"✗  No depot files were downloaded for {game_name}.")

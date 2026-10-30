@@ -5,9 +5,12 @@ import io
 import json
 import os
 import shutil
+import stat
+import struct
 import subprocess
 import tarfile
 import time
+import zipfile
 from pathlib import Path
 import sys
 import tempfile
@@ -911,6 +914,221 @@ class DepotLoginTests(unittest.TestCase):
                 self.assertEqual(depot.cleanup_depotdownloader(), 1)
             self.assertFalse(private.exists())
             self.assertEqual(other.read_text(), "keep")
+
+
+class AppInfoWriteTests(unittest.TestCase):
+    """Editing appinfo.vdf must leave the file as Steam had it, plus the edit.
+
+    mkstemp makes the replacement 0600, so one menu edit turned appinfo.vdf
+    from 0644 into owner-only; and the .bak "original" was rewritten on every
+    edit with the already-edited file, so it stopped being the version Steam
+    shipped exactly when someone would restore it.
+    """
+
+    APPID = 202990
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "appcache").mkdir()
+        self.path = self.root / "appcache" / "appinfo.vdf"
+        self.original = self._build()
+        self.path.write_bytes(self.original)
+        os.chmod(self.path, 0o644)
+
+    def _build(self) -> bytes:
+        """A v28 appinfo.vdf with one app whose appinfo/config/launch dict has
+        a stock entry -- the shape _edit_launch looks for."""
+        import steam_appinfo as a
+        launch = [[a._T_DICT, "0", [
+            [a._T_STR, "executable", b"t6sp.exe"],
+            [a._T_DICT, "config", [[a._T_STR, "oslist", b"windows"]]]]]]
+        root = [[a._T_DICT, "appinfo", [
+            [a._T_DICT, "config", [[a._T_DICT, "launch", launch]]]]]]
+        ai = a._AppInfo.__new__(a._AppInfo)  # encode without a real file
+        ai.v29, ai.strings, ai._index, ai._added = False, [], {}, []
+        body = a._HDR.pack(2, 0, 0, b"\0" * 20, 1, b"\0" * 20) + a._AppInfo.encode_kv(ai, root)
+        return (struct.pack("<II", a.APPINFO_V28, 1) +
+                struct.pack("<II", self.APPID, len(body)) + body +
+                struct.pack("<II", 0, 0))
+
+    def _add(self, description):
+        import steam_appinfo as a
+        return a.add_launch_entries(str(self.root), self.APPID,
+                                    [{"executable": "deckops_x.exe",
+                                      "description": description}], record=False)
+
+    def test_the_edit_keeps_the_permissions_steam_set(self):
+        self.assertTrue(self._add("first"))
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o644)
+
+    def test_the_backup_stays_the_file_steam_shipped(self):
+        self.assertTrue(self._add("first"))
+        backup = Path(str(self.path) + ".bak")
+        self.assertTrue(backup.exists())
+        self.assertEqual(backup.read_bytes(), self.original)
+
+        self.assertTrue(self._add("second"))
+        self.assertEqual(backup.read_bytes(), self.original,
+                         "the second edit overwrote .bak with an edited file")
+
+    def test_no_temp_files_are_left_behind(self):
+        self._add("first")
+        self.assertEqual([p.name for p in self.path.parent.iterdir()
+                          if p.name.endswith(".tmp")], [])
+
+
+class ArchiveSafetyTests(unittest.TestCase):
+    """The DepotDownloader zip is the one download with no digest to check, so
+    its member names have to be validated like GE-Proton's tarball."""
+
+    def _zip(self, entries):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data in entries:
+                zf.writestr(name, data)
+        buf.seek(0)
+        return zipfile.ZipFile(buf)
+
+    def test_normal_archive_extracts(self):
+        import depot_downgrade as depot
+        with tempfile.TemporaryDirectory() as tmp:
+            depot._safe_extractall_zip(self._zip([("DepotDownloader", b"bin"),
+                                                  ("lib/x.dll", b"dll")]), tmp)
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "DepotDownloader")))
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "lib", "x.dll")))
+
+    def test_paths_outside_the_directory_are_refused(self):
+        import depot_downgrade as depot
+        for name in ("../escape.txt", "/etc/abs.txt", "a/../../b.txt"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(RuntimeError):
+                    depot._safe_extractall_zip(self._zip([(name, b"x")]), tmp)
+                self.assertEqual(os.listdir(tmp), [])
+
+    def test_symlinks_pointing_outside_are_refused(self):
+        import depot_downgrade as depot
+        for target in ("/etc/passwd", "../../../outside"):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                info = zipfile.ZipInfo("evil")
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                zf.writestr(info, target)
+            buf.seek(0)
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(RuntimeError):
+                    depot._safe_extractall_zip(zipfile.ZipFile(buf), tmp)
+
+
+class FovWatchSpawnTests(unittest.TestCase):
+    """A helper that cannot spawn the game must say so with 126/127 so
+    prelaunch.sh starts the game itself. Exiting 1 meant it never started."""
+
+    def test_unspawnable_command_returns_the_helper_sentinel(self):
+        import fovwatch
+        # argv: <exe> <settings...> -- <command...>, as prelaunch.sh calls it
+        rc = fovwatch.main(["iw4sp.exe", "cg_fov=90", "--", "/nonexistent/deckops-game"])
+        self.assertEqual(rc, 127)
+
+    def test_prelaunch_starts_the_game_when_the_helper_reports_127(self):
+        """End to end: fovwatch cannot spawn it, prelaunch.sh runs it once."""
+        if not shutil.which("bash"):
+            self.skipTest("bash unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".venv" / "bin").mkdir(parents=True)
+            (root / "src").mkdir()
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "prelaunch.sh", root / "prelaunch.sh")
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "src" / "fovwatch.py",
+                            root / "src" / "fovwatch.py")
+            python = root / ".venv" / "bin" / "python3"
+            python.symlink_to(sys.executable)
+            marker = root / "launched"
+            game = root / "game.sh"
+            game.write_text('#!/bin/sh\necho launched >> "$1"\n')
+            game.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(root / "prelaunch.sh"), "iw4sp", str(game), str(marker)],
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, "DECKOPS_MENU": ""})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(marker.read_text().count("launched"), 1)
+
+
+class ConfigCacheTests(unittest.TestCase):
+    """Two saves inside one timestamp tick must not leave a stale cache."""
+
+    def setUp(self):
+        import config
+        self.config = config
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "deckops.json"
+        p = patch.object(config, "CONFIG_PATH", str(self.path))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_same_mtime_change_is_seen(self):
+        self.path.write_text(json.dumps({"player_name": "first"}))
+        self.assertEqual(self.config.load()["player_name"], "first")
+        st = os.stat(self.path)
+        # Same length is not required -- what matters is that mtime alone is
+        # not the key: write a longer value and put the timestamp back.
+        self.path.write_text(json.dumps({"player_name": "second-longer"}))
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(os.stat(self.path).st_mtime_ns, st.st_mtime_ns)
+        self.assertEqual(self.config.load()["player_name"], "second-longer")
+
+
+class SteamRootResolutionTests(unittest.TestCase):
+    """A Flatpak or moved Steam must be found, and callers with no root must
+    not fall back to a hardcoded path that does not exist."""
+
+    def _roots(self, *names):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        paths = []
+        for name in names:
+            p = Path(tmp.name) / name
+            (p / "steamapps").mkdir(parents=True)
+            paths.append(str(p))
+        return tmp.name, paths
+
+    def test_flatpak_steam_is_in_the_detection_list(self):
+        import detect_games
+        self.assertTrue(any("com.valvesoftware.Steam" in p for p in detect_games.STEAM_PATHS))
+
+    def test_find_steam_root_picks_a_flatpak_install(self):
+        """The classic path is tried first; a Flatpak-only machine must still
+        get a root instead of None."""
+        import detect_games
+        _, paths = self._roots("flatpak")           # one install, in the list
+        with patch.object(detect_games, "STEAM_PATHS", ["/nonexistent/classic"] + paths):
+            self.assertEqual(detect_games.find_steam_root(), paths[0])
+
+    def test_default_steam_root_uses_the_configured_one(self):
+        import steam_common
+        with patch("config.load", return_value={"steam_root": "/custom/steam"}):
+            self.assertEqual(steam_common.default_steam_root(), "/custom/steam")
+
+    def test_default_steam_root_falls_back_to_the_installed_one(self):
+        import steam_common
+        with patch("config.load", return_value={}), \
+             patch("detect_games.find_steam_root", return_value="/found/steam"):
+            self.assertEqual(steam_common.default_steam_root(), "/found/steam")
+
+    def test_default_steam_root_last_resort_is_a_real_path(self):
+        import steam_common
+        with patch("config.load", return_value={}), \
+             patch("detect_games.find_steam_root", return_value=None):
+            self.assertEqual(steam_common.default_steam_root(), steam_common.STEAM_ROOT)
+
+    def test_shader_cache_follows_the_resolved_root(self):
+        import cache_cleanup
+        with patch("steam_common.default_steam_root", return_value="/flatpak/Steam"):
+            self.assertEqual(cache_cleanup._shadercache_dir(),
+                             os.path.join("/flatpak/Steam", "steamapps", "shadercache"))
 
 
 class DepotMergeSafetyTests(unittest.TestCase):

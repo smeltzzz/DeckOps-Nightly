@@ -90,7 +90,11 @@ def check(selected, iw4x_dlc=False, downgrade_keys=()):
     Returns a list of Check(level, title, detail); empty means nothing to say.
     """
     from depot_downgrade import estimate_space_gb
-    from steam_common import STEAM_ROOT
+    from steam_common import default_steam_root
+    # Resolved here rather than taken from the classic-path constant: on a
+    # Flatpak or moved install the old value measured space for a Steam that
+    # is not where the depots will actually be written.
+    steam_root = default_steam_root()
     from iw4x import DLC_SIZE_GB
 
     need = {}   # device -> [gb wanted, representative path]
@@ -112,7 +116,7 @@ def check(selected, iw4x_dlc=False, downgrade_keys=()):
             game_id = DOWNGRADE_GAME.get(key)
             if game_id not in dg_games:
                 dg_games.add(game_id)
-                add(install_dir, estimate_space_gb(game_id, STEAM_ROOT))
+                add(install_dir, estimate_space_gb(game_id, steam_root))
         if client == "iw4x" and iw4x_dlc:
             add(install_dir, DLC_SIZE_GB)
 

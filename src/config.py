@@ -68,7 +68,12 @@ DEFAULTS = {
 
 _lock = threading.Lock()
 _cache = None        # cached merged dict, or None if invalidated
-_cache_mtime = 0.0   # mtime of CONFIG_PATH when _cache was populated
+# (mtime_ns, size) of CONFIG_PATH when _cache was populated. The size is part
+# of the key because mtime alone is not enough: two saves inside one timestamp
+# tick, or any filesystem with coarse timestamps (an SD card, a network share),
+# leave it unchanged and the reader keeps the settings from before the write.
+# prelaunch/cache_cleanup run beside the UI and read the same file.
+_cache_key = None
 
 
 def load() -> dict:
@@ -81,18 +86,19 @@ def load() -> dict:
 
     Returns defaults if the file doesn't exist or is corrupt.
     """
-    global _cache, _cache_mtime
+    global _cache, _cache_key
 
     with _lock:
         # Check if file exists
         try:
-            current_mtime = os.path.getmtime(CONFIG_PATH)
+            st = os.stat(CONFIG_PATH)
         except OSError:
             # File doesn't exist or can't be stat'd — return defaults
             return copy.deepcopy(DEFAULTS)
+        current_key = (st.st_mtime_ns, st.st_size)
 
         # Return cached copy if file hasn't changed
-        if _cache is not None and current_mtime == _cache_mtime:
+        if _cache is not None and current_key == _cache_key:
             return copy.deepcopy(_cache)
 
         # Cache miss or stale — re-read from disk
@@ -113,7 +119,7 @@ def load() -> dict:
         merged = copy.deepcopy(DEFAULTS)
         merged.update(data)
         _cache = merged
-        _cache_mtime = current_mtime
+        _cache_key = current_key
         return copy.deepcopy(_cache)
 
 
@@ -139,13 +145,13 @@ def save(config: dict):
     Write config to disk and invalidate the cache.
     Creates the directory if needed.
     """
-    global _cache, _cache_mtime
+    global _cache, _cache_key
 
     with _lock:
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         write_json(CONFIG_PATH, config)
         _cache = None
-        _cache_mtime = 0.0
+        _cache_key = None
 
 
 def _set(key: str, value):
@@ -457,10 +463,12 @@ def get_steam_display_name(steam_root: str | None = None) -> str | None:
     Falls back to the first account if MostRecent is not set.
     Returns None if the file can't be read or parsed.
 
-    steam_root -- path to Steam root. Defaults to ~/.local/share/Steam
+    steam_root -- path to Steam root. Defaults to the root setup recorded,
+                 else the first installation found on disk.
     """
     if not steam_root:
-        steam_root = os.path.expanduser("~/.local/share/Steam")
+        from steam_common import default_steam_root
+        steam_root = default_steam_root()
     vdf_path = os.path.join(steam_root, "config", "loginusers.vdf")
     if not os.path.exists(vdf_path):
         return None
@@ -595,10 +603,10 @@ def reset():
     """
     Wipe the config and start fresh. Useful for testing or reinstalling.
     """
-    global _cache, _cache_mtime
+    global _cache, _cache_key
 
     with _lock:
         if os.path.exists(CONFIG_PATH):
             os.remove(CONFIG_PATH)
         _cache = None
-        _cache_mtime = 0.0
+        _cache_key = None

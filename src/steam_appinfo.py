@@ -24,6 +24,7 @@ import copy
 import hashlib
 import os
 import shutil
+import stat
 import struct
 import tempfile
 
@@ -283,15 +284,31 @@ def _edit_launch(steam_root: str, appid: int, edit) -> bool:
         return True
 
     ai.replace_app(start, end, header, node)
+    backup = path + ".bak"
+    tmp = None
     try:
-        shutil.copy2(path, path + ".bak")
+        # Only the first edit saves the file as Steam made it: refreshing this
+        # copy on every edit left .bak holding an already-modified file,
+        # exactly when someone would reach for it.
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
         with os.fdopen(fd, "wb") as f:
             f.write(ai.data)
+        # mkstemp makes 0600. Leave appinfo.vdf with the permissions Steam gave
+        # it instead of making one file in appcache/ owner-only.
+        os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
         os.replace(tmp, path)
+        tmp = None
     except OSError as ex:
         _log.warning(f"appinfo.vdf write failed: {ex}")
         return False
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return True
 
 

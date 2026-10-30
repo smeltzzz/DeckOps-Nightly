@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import threading
@@ -550,6 +551,35 @@ def copy_to_clipboard(text: str):
 
 # --- DepotDownloader management
 
+
+def _safe_extractall_zip(zf: zipfile.ZipFile, dest: str):
+    """extractall that can't write outside dest.
+
+    The zip comes from a GitHub release and github_asset() returns no digest
+    for those assets yet, so it is the one download in this module that is
+    unverified. Same rule as ge_proton._safe_extractall: no absolute or ../../
+    member names, no links pointing outside dest.
+    """
+    root = os.path.realpath(dest)
+
+    def inside(path: str) -> bool:
+        real = os.path.realpath(path)
+        return real == root or real.startswith(root + os.sep)
+
+    for info in zf.infolist():
+        target = os.path.join(dest, info.filename)
+        parts = info.filename.replace("\\", "/").split("/")
+        if os.path.isabs(info.filename) or ".." in parts or not inside(target):
+            raise RuntimeError(f"unsafe path in DepotDownloader archive: {info.filename!r}")
+        # A Unix symlink's target is the payload; the type is in the mode bits
+        if stat.S_ISLNK(info.external_attr >> 16):
+            link = zf.read(info).decode("utf-8", "replace")
+            if os.path.isabs(link) or not inside(os.path.join(os.path.dirname(target), link)):
+                raise RuntimeError(
+                    f"unsafe link in DepotDownloader archive: {info.filename!r} -> {link!r}")
+    zf.extractall(dest)
+
+
 def ensure_depotdownloader(on_progress=None) -> str:
     def prog(msg):
         _log.info(msg)
@@ -579,14 +609,17 @@ def ensure_depotdownloader(on_progress=None) -> str:
 
     prog("Extracting DepotDownloader...")
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(DEPOTDOWNLOADER_DIR)
-    os.chmod(DEPOTDOWNLOADER_BIN, 0o755)
+        _safe_extractall_zip(zf, DEPOTDOWNLOADER_DIR)
 
+    # Check before chmod: a release that moves the binary into a subfolder used
+    # to fail with a bare FileNotFoundError from chmod, so the message below
+    # (which says where it looked) could never be shown.
     if not os.path.isfile(DEPOTDOWNLOADER_BIN):
         raise RuntimeError(
             f"DepotDownloader binary not found after extraction at "
             f"{DEPOTDOWNLOADER_BIN}"
         )
+    os.chmod(DEPOTDOWNLOADER_BIN, 0o755)
 
     prog("DepotDownloader ready.")
     return DEPOTDOWNLOADER_BIN

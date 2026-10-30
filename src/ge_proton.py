@@ -103,6 +103,21 @@ def _get_latest_release():
     return version, tarball_url, checksum_url, dir_name
 
 
+def _parse_sha512(body: bytes) -> str | None:
+    """`sha512:<hex>` from a .sha512sum file, or None if it isn't one.
+
+    An empty body (a truncated download) or an HTML error page used to reach
+    `split()[0]` and raise IndexError out of install_ge_proton, which is the
+    only place in this module that failed with a traceback instead of a
+    message; a page's first word would also have been passed on as a digest.
+    """
+    try:
+        first = body.decode("utf-8", "replace").split()[0]
+    except IndexError:
+        return None
+    return "sha512:" + first if re.fullmatch(r"[0-9a-fA-F]{128}", first) else None
+
+
 def _is_complete(tool_dir: str) -> bool:
     """True if tool_dir holds a usable GE-Proton: the proton script, the
     compatibilitytool.vdf Steam registers it by, and the default prefix
@@ -223,7 +238,9 @@ def install_ge_proton(on_progress=None, steam_root: str | None = None):
             # retries a mismatch instead of failing the install outright.
             req = urllib.request.Request(checksum_url, headers=_BROWSER_UA)
             with urllib.request.urlopen(req, timeout=15) as resp:
-                digest = "sha512:" + resp.read().decode().split()[0]
+                digest = _parse_sha512(resp.read())
+            if not digest:
+                _log.warning("%s checksum file unreadable, downloading unverified", dir_name)
         else:
             _log.warning("%s has no checksum file, downloading unverified", dir_name)
 

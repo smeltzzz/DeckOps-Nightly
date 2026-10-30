@@ -392,6 +392,9 @@ def _configured_steam_root():
 
 
 def _steam_root(steam_root=None):
+    # _configured_steam_root() reads the saved root and then searches for an
+    # installation (Flatpak included). The STEAM_CONFIG expression is only the
+    # last resort for a machine with no config and no Steam found at all.
     return os.path.expanduser(steam_root) if steam_root else (
         _configured_steam_root() or os.path.dirname(os.path.dirname(STEAM_CONFIG)))
 
@@ -623,7 +626,10 @@ def _reapply_launch_menus():
         c = _cfg.load()
         if c.get("launch_menus"):
             from steam_appinfo import reapply_all
-            reapply_all(c.get("steam_root") or os.path.expanduser("~/.local/share/Steam"))
+            # _steam_root() resolves the saved root, then a detected install
+            # (Flatpak included), so the menus are re-added to the appinfo.vdf
+            # of the Steam that is actually installed.
+            reapply_all(_steam_root())
     except Exception:
         _log.debug("launch menu reapply failed", exc_info=True)
 

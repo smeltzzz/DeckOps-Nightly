@@ -31,12 +31,15 @@ if [ ! -f "$DECKOPS_JSON" ]; then
     exit 1
 fi
 
-# Parse GE-Proton version and Steam root from deckops.json
+# Parse GE-Proton version and Steam root from deckops.json.
+# `or ''` matters: a null value printed as the string "None", which is not
+# empty, so the check below passed and the run died with "Proton not found at
+# None/compatibilitytools.d/..." instead of naming what was actually missing.
 GE_VERSION=$(python3 - "$DECKOPS_JSON" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
-        print(json.load(f).get('ge_proton_version', ''))
+        print(json.load(f).get('ge_proton_version') or '')
 except Exception:
     pass
 PY
@@ -46,7 +49,7 @@ STEAM_ROOT=$(python3 - "$DECKOPS_JSON" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
-        print(json.load(f).get('steam_root', ''))
+        print(json.load(f).get('steam_root') or '')
 except Exception:
     pass
 PY

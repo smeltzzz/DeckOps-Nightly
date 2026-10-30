@@ -32,8 +32,17 @@ _log = get_logger(__name__)
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 BACKUP_ROOT = os.path.expanduser("~/.local/share/deckops/save_backup")
-STEAM_ROOT_DEFAULT = os.path.expanduser("~/.local/share/Steam")
 HEROIC_PREFIX = os.path.expanduser("~/Games/Heroic/Prefixes/default")
+
+
+def STEAM_ROOT_DEFAULT() -> str:        # noqa: N802 - kept as the public name
+    """Steam root when the caller has none, resolved at call time.
+
+    This was a module constant fixed to ~/.local/share/Steam, so a Flatpak or
+    moved install backed up and restored nothing.
+    """
+    from steam_common import default_steam_root
+    return default_steam_root()
 
 
 # ── Save location map ────────────────────────────────────────────────────────
@@ -232,7 +241,7 @@ def _detected_games() -> tuple:
         try:
             from detect_games import (find_steam_root, parse_library_folders,
                                       find_installed_games, find_own_installed)
-            sr = find_steam_root() or STEAM_ROOT_DEFAULT
+            sr = find_steam_root() or STEAM_ROOT_DEFAULT()
             steam = find_installed_games(parse_library_folders(sr), sr)
             own = find_own_installed()
         except Exception:
@@ -412,7 +421,7 @@ def backup_saves(steam_root: str = None, on_progress=None,
                  installed_games: dict = None, failures: list = None) -> dict:
     """Back up save data for all installed games.
 
-    steam_root       — Steam root path (defaults to ~/.local/share/Steam)
+    steam_root       — Steam root path (defaults to the resolved Steam root)
     on_progress      — callback(message: str)
     installed_games  — optional dict of key -> game info (from install flow)
     failures         — optional list; groups with save data that could not be
@@ -423,7 +432,7 @@ def backup_saves(steam_root: str = None, on_progress=None,
     """
     failed = failures if failures is not None else []
     if steam_root is None:
-        steam_root = STEAM_ROOT_DEFAULT
+        steam_root = STEAM_ROOT_DEFAULT()
     if on_progress is None:
         on_progress = lambda msg: None
 
@@ -550,7 +559,7 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
     Returns a dict of {group_name: dest_path} for groups that were restored.
     """
     if steam_root is None:
-        steam_root = STEAM_ROOT_DEFAULT
+        steam_root = STEAM_ROOT_DEFAULT()
     if on_progress is None:
         on_progress = lambda msg: None
 
@@ -695,7 +704,7 @@ def clear_backups(on_progress=None):
 if __name__ == "__main__":
     import sys
     action = sys.argv[1] if len(sys.argv) > 1 else "backup"
-    steam = sys.argv[2] if len(sys.argv) > 2 else STEAM_ROOT_DEFAULT
+    steam = sys.argv[2] if len(sys.argv) > 2 else STEAM_ROOT_DEFAULT()
 
     def _print(msg):
         print(msg)

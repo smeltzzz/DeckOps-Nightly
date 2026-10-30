@@ -8,6 +8,10 @@ STEAM_PATHS = [
     os.path.expanduser("~/.steam/steam"),
     os.path.expanduser("~/.steam/root"),
     os.path.expanduser("~/.steam/debian-installation"),
+    # Steam from Flatpak. Nothing else looks here, so a Flatpak-only install
+    # was invisible: no games detected, no Steam root at all.
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/data/Steam"),
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
 ]
 
 # Known SD card mount point patterns on Steam Deck
