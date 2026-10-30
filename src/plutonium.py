@@ -1011,8 +1011,10 @@ def remove_retired_host_menus(steam_root: str, log=lambda m: None):
     must be closed."""
     from steam_appinfo import remove_launch_entries, forget_launch_entries
     for appid, exes in RETIRED_HOST_MENUS.items():
-        remove_launch_entries(steam_root, appid, exes)
-        log(f"  Removed old menu entries from {appid}: {', '.join(exes)}")
+        # Only claim a change when appinfo.vdf actually had the entries: the
+        # call returns False when the app is not cached or they are already gone.
+        if remove_launch_entries(steam_root, appid, exes):
+            log(f"  Removed old menu entries from {appid}: {', '.join(exes)}")
     forget_launch_entries(42680, ["iw5sp.exe"])
 
 
@@ -1422,13 +1424,16 @@ def _lan_prefixes(prog):
     with GE-Proton's default prefix like a first install of a game prefix."""
     import config as _cfg
     from ge_proton import ensure_prefix_deps
-    from steam_common import STEAM_ROOT
+    from steam_common import default_steam_root
     from wrapper import get_proton_path
+    # The resolved root, not the classic path: GE-Proton (and the prefix it
+    # builds from) lives under the Steam that is actually installed.
+    steam_root = default_steam_root()
     for p in (LAN_PREFIX, LAN_SERVER_PREFIX):
         if not os.path.isdir(os.path.join(p, "pfx", "drive_c", "windows")):
             os.makedirs(p, exist_ok=True)
             ensure_prefix_deps(_cfg.get_ge_proton_version(), p, prog,
-                               proton_path=get_proton_path(STEAM_ROOT), steam_root=STEAM_ROOT)
+                               proton_path=get_proton_path(steam_root), steam_root=steam_root)
 
 
 def lan_runtime() -> tuple:

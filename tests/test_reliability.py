@@ -5,8 +5,12 @@ import io
 import json
 import os
 import shutil
+import stat
+import struct
 import subprocess
 import tarfile
+import time
+import zipfile
 from pathlib import Path
 import sys
 import tempfile
@@ -352,6 +356,20 @@ class GeProtonFallbackTests(unittest.TestCase):
 
 class PrelaunchHelperFallbackTests(unittest.TestCase):
     def test_helper_startup_failure_runs_game_but_other_failures_do_not_duplicate_it(self):
+        """prelaunch.sh runs fovwatch.py as the game's parent, so the game must
+        start exactly once whether or not the helper could start it:
+
+          * helper cannot start the game at all (126/127) -> prelaunch.sh
+            starts it, and DeckOps reports success;
+          * helper starts the game and the game returns s -> s is passed on and
+            prelaunch.sh must not start the game a second time.
+
+        The previous version of this test used a fake python that failed the
+        helper's import check with the same status it was meant to return for
+        the game, so it asserted that a broken helper must NOT start the game.
+        That contradicts prelaunch.sh's contract ("the game always starts") and
+        tests/test_prelaunch_shell.py, and it failed on a clean checkout.
+        """
         if not shutil.which("bash"):
             self.skipTest("bash unavailable")
         try:
@@ -371,14 +389,99 @@ class PrelaunchHelperFallbackTests(unittest.TestCase):
             game.chmod(0o755)
             marker = root / "launched"
             for status in (127, 1):
-                python.write_text(f"#!/bin/sh\nexit {status}\n")
+                # prelaunch.sh calls python three times: the silent prelaunch.py
+                # update, the `python -c 'import fovwatch'` import check, then
+                # the helper itself. The first two succeed, so the helper is
+                # used. On the helper run: 127 = it never got the game started,
+                # any other status = the game ran and returned that status.
+                python.write_text(
+                    "#!/bin/sh\n"
+                    "case \"$*\" in *prelaunch.py*|*\"import fovwatch\"*) exit 0 ;; esac\n"
+                    + ("exit 127\n" if status == 127 else "")
+                    + f'"{game}" "{marker}"\n'
+                    + f"exit {status}\n"
+                )
                 python.chmod(0o755)
                 result = subprocess.run(["bash", str(root / "prelaunch.sh"), "iw4sp",
                                          str(game), str(marker)], capture_output=True)
                 self.assertEqual(result.returncode, 0 if status == 127 else 1)
-                self.assertEqual(marker.read_text().count("launched") if marker.exists() else 0,
-                                 1 if status == 127 else 0)
+                self.assertEqual(marker.read_text().count("launched") if marker.exists() else 0, 1)
                 marker.unlink(missing_ok=True)
+
+
+class PrefixFinalizeTests(unittest.TestCase):
+    """`proton run cmd /c exit` is the step that turns a bare directory into a
+    Wine prefix. Its exit status used to be ignored, so a prefix that was never
+    created was reported as "✓ Prefix finalized by Proton", counted as ready,
+    and the game then failed on first launch instead of setup saying so."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        # A minimal GE-Proton: default_pfx with the DLL folders the copy step reads.
+        self.tool = self.root / "GE-Proton10-30"
+        for d in ("system32", "syswow64"):
+            (self.tool / "files" / "share" / "default_pfx" / "drive_c" / "windows" / d).mkdir(parents=True)
+        (self.tool / "files" / "share" / "default_pfx" / "drive_c" / "windows" / "system32" / "d3dx9_43.dll").write_bytes(b"dll")
+        (self.tool / "proton").write_text("")
+        (self.tool / "compatibilitytool.vdf").write_text("")
+
+    def _fake_proton(self, body: str) -> str:
+        """A proton script that runs `body` when asked to finalize a prefix."""
+        path = self.root / "proton"
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+        return str(path)
+
+    def _deps(self, proton):
+        import ge_proton
+        prefix = self.root / "compatdata" / "10090"
+        with patch.object(ge_proton, "COMPAT_DIR", str(self.root)), \
+             patch.object(ge_proton, "_find_default_pfx",
+                          return_value=str(self.tool / "files" / "share" / "default_pfx")):
+            return ge_proton.ensure_prefix_deps(
+                "GE-Proton10-30", str(prefix), on_progress=lambda m: None,
+                proton_path=proton, steam_root=str(self.root))
+
+    def test_failed_proton_run_is_not_reported_as_finalized(self):
+        # Exits non-zero and creates nothing, like a missing steamclient.so
+        ok = self._deps(self._fake_proton("exit 1"))
+        self.assertIs(ok, False)
+
+    def test_successful_proton_run_is_finalized(self):
+        # Wine boot order: drive_c plus the registry it writes on first boot
+        proton = self._fake_proton(
+            'mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx/drive_c"\n'
+            ': > "$STEAM_COMPAT_DATA_PATH/pfx/system.reg"')
+        self.assertIs(self._deps(proton), True)
+
+    def test_zero_exit_without_a_prefix_does_not_count(self):
+        # Exits 0 but never boots wine -- a launcher that silently does nothing
+        ok = self._deps(self._fake_proton("exit 0"))
+        self.assertIs(ok, False)
+
+    def test_a_failed_finalize_is_retried_on_the_next_run(self):
+        """The DLL copy creates drive_c before Proton runs, so a prefix whose
+        finalize failed used to look initialized forever: every later run said
+        "already initialized — skipped Proton run" and never retried."""
+        self.assertIs(self._deps(self._fake_proton("exit 1")), False)
+        proton = self._fake_proton(
+            'mkdir -p "$STEAM_COMPAT_DATA_PATH/pfx/drive_c"\n'
+            ': > "$STEAM_COMPAT_DATA_PATH/pfx/system.reg"')
+        self.assertIs(self._deps(proton), True)
+
+    def test_finalized_helper_checks_the_disk_not_only_the_status(self):
+        import ge_proton
+        pfx = self.root / "pfx"
+        # A drive_c made by the DLL copy does not mean wine ever ran
+        (pfx / "drive_c" / "windows" / "system32").mkdir(parents=True)
+        self.assertFalse(ge_proton._prefix_ready(str(pfx)))
+        self.assertFalse(ge_proton._finalized(0, str(pfx)))
+        (pfx / "system.reg").write_text("WINE REGISTRY Version 2\n")
+        self.assertTrue(ge_proton._prefix_ready(str(pfx)))
+        self.assertTrue(ge_proton._finalized(0, str(pfx)))
+        self.assertFalse(ge_proton._finalized(1, str(pfx)))       # failed even though it booted
 
 
 class ShellSyntaxTests(unittest.TestCase):
@@ -813,6 +916,395 @@ class DepotLoginTests(unittest.TestCase):
             self.assertEqual(other.read_text(), "keep")
 
 
+class AppInfoWriteTests(unittest.TestCase):
+    """Editing appinfo.vdf must leave the file as Steam had it, plus the edit.
+
+    mkstemp makes the replacement 0600, so one menu edit turned appinfo.vdf
+    from 0644 into owner-only; and the .bak "original" was rewritten on every
+    edit with the already-edited file, so it stopped being the version Steam
+    shipped exactly when someone would restore it.
+    """
+
+    APPID = 202990
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "appcache").mkdir()
+        self.path = self.root / "appcache" / "appinfo.vdf"
+        self.original = self._build()
+        self.path.write_bytes(self.original)
+        os.chmod(self.path, 0o644)
+
+    def _build(self) -> bytes:
+        """A v28 appinfo.vdf with one app whose appinfo/config/launch dict has
+        a stock entry -- the shape _edit_launch looks for."""
+        import steam_appinfo as a
+        launch = [[a._T_DICT, "0", [
+            [a._T_STR, "executable", b"t6sp.exe"],
+            [a._T_DICT, "config", [[a._T_STR, "oslist", b"windows"]]]]]]
+        root = [[a._T_DICT, "appinfo", [
+            [a._T_DICT, "config", [[a._T_DICT, "launch", launch]]]]]]
+        ai = a._AppInfo.__new__(a._AppInfo)  # encode without a real file
+        ai.v29, ai.strings, ai._index, ai._added = False, [], {}, []
+        body = a._HDR.pack(2, 0, 0, b"\0" * 20, 1, b"\0" * 20) + a._AppInfo.encode_kv(ai, root)
+        return (struct.pack("<II", a.APPINFO_V28, 1) +
+                struct.pack("<II", self.APPID, len(body)) + body +
+                struct.pack("<II", 0, 0))
+
+    def _add(self, description):
+        import steam_appinfo as a
+        return a.add_launch_entries(str(self.root), self.APPID,
+                                    [{"executable": "deckops_x.exe",
+                                      "description": description}], record=False)
+
+    def test_the_edit_keeps_the_permissions_steam_set(self):
+        self.assertTrue(self._add("first"))
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o644)
+
+    def test_the_backup_stays_the_file_steam_shipped(self):
+        self.assertTrue(self._add("first"))
+        backup = Path(str(self.path) + ".bak")
+        self.assertTrue(backup.exists())
+        self.assertEqual(backup.read_bytes(), self.original)
+
+        self.assertTrue(self._add("second"))
+        self.assertEqual(backup.read_bytes(), self.original,
+                         "the second edit overwrote .bak with an edited file")
+
+    def test_no_temp_files_are_left_behind(self):
+        self._add("first")
+        self.assertEqual([p.name for p in self.path.parent.iterdir()
+                          if p.name.endswith(".tmp")], [])
+
+
+class ArchiveSafetyTests(unittest.TestCase):
+    """The DepotDownloader zip is the one download with no digest to check, so
+    its member names have to be validated like GE-Proton's tarball."""
+
+    def _zip(self, entries):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data in entries:
+                zf.writestr(name, data)
+        buf.seek(0)
+        return zipfile.ZipFile(buf)
+
+    def test_normal_archive_extracts(self):
+        import depot_downgrade as depot
+        with tempfile.TemporaryDirectory() as tmp:
+            depot._safe_extractall_zip(self._zip([("DepotDownloader", b"bin"),
+                                                  ("lib/x.dll", b"dll")]), tmp)
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "DepotDownloader")))
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "lib", "x.dll")))
+
+    def test_paths_outside_the_directory_are_refused(self):
+        import depot_downgrade as depot
+        for name in ("../escape.txt", "/etc/abs.txt", "a/../../b.txt"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(RuntimeError):
+                    depot._safe_extractall_zip(self._zip([(name, b"x")]), tmp)
+                self.assertEqual(os.listdir(tmp), [])
+
+    def test_symlinks_pointing_outside_are_refused(self):
+        import depot_downgrade as depot
+        for target in ("/etc/passwd", "../../../outside"):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                info = zipfile.ZipInfo("evil")
+                info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                zf.writestr(info, target)
+            buf.seek(0)
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(RuntimeError):
+                    depot._safe_extractall_zip(zipfile.ZipFile(buf), tmp)
+
+
+class FovWatchSpawnTests(unittest.TestCase):
+    """A helper that cannot spawn the game must say so with 126/127 so
+    prelaunch.sh starts the game itself. Exiting 1 meant it never started."""
+
+    def test_unspawnable_command_returns_the_helper_sentinel(self):
+        import fovwatch
+        # argv: <exe> <settings...> -- <command...>, as prelaunch.sh calls it
+        rc = fovwatch.main(["iw4sp.exe", "cg_fov=90", "--", "/nonexistent/deckops-game"])
+        self.assertEqual(rc, 127)
+
+    def test_prelaunch_starts_the_game_when_the_helper_reports_127(self):
+        """End to end: fovwatch cannot spawn it, prelaunch.sh runs it once."""
+        if not shutil.which("bash"):
+            self.skipTest("bash unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".venv" / "bin").mkdir(parents=True)
+            (root / "src").mkdir()
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "prelaunch.sh", root / "prelaunch.sh")
+            shutil.copyfile(Path(__file__).resolve().parents[1] / "src" / "fovwatch.py",
+                            root / "src" / "fovwatch.py")
+            python = root / ".venv" / "bin" / "python3"
+            python.symlink_to(sys.executable)
+            marker = root / "launched"
+            game = root / "game.sh"
+            game.write_text('#!/bin/sh\necho launched >> "$1"\n')
+            game.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(root / "prelaunch.sh"), "iw4sp", str(game), str(marker)],
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, "DECKOPS_MENU": ""})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(marker.read_text().count("launched"), 1)
+
+
+class ConfigCacheTests(unittest.TestCase):
+    """Two saves inside one timestamp tick must not leave a stale cache."""
+
+    def setUp(self):
+        import config
+        self.config = config
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "deckops.json"
+        p = patch.object(config, "CONFIG_PATH", str(self.path))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_same_mtime_change_is_seen(self):
+        self.path.write_text(json.dumps({"player_name": "first"}))
+        self.assertEqual(self.config.load()["player_name"], "first")
+        st = os.stat(self.path)
+        # Same length is not required -- what matters is that mtime alone is
+        # not the key: write a longer value and put the timestamp back.
+        self.path.write_text(json.dumps({"player_name": "second-longer"}))
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(os.stat(self.path).st_mtime_ns, st.st_mtime_ns)
+        self.assertEqual(self.config.load()["player_name"], "second-longer")
+
+
+class SteamRootResolutionTests(unittest.TestCase):
+    """A Flatpak or moved Steam must be found, and callers with no root must
+    not fall back to a hardcoded path that does not exist."""
+
+    def _roots(self, *names):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        paths = []
+        for name in names:
+            p = Path(tmp.name) / name
+            (p / "steamapps").mkdir(parents=True)
+            paths.append(str(p))
+        return tmp.name, paths
+
+    def test_flatpak_steam_is_in_the_detection_list(self):
+        import detect_games
+        self.assertTrue(any("com.valvesoftware.Steam" in p for p in detect_games.STEAM_PATHS))
+
+    def test_find_steam_root_picks_a_flatpak_install(self):
+        """The classic path is tried first; a Flatpak-only machine must still
+        get a root instead of None."""
+        import detect_games
+        _, paths = self._roots("flatpak")           # one install, in the list
+        with patch.object(detect_games, "STEAM_PATHS", ["/nonexistent/classic"] + paths):
+            self.assertEqual(detect_games.find_steam_root(), paths[0])
+
+    def test_default_steam_root_uses_the_configured_one(self):
+        import steam_common
+        with patch("config.load", return_value={"steam_root": "/custom/steam"}):
+            self.assertEqual(steam_common.default_steam_root(), "/custom/steam")
+
+    def test_default_steam_root_falls_back_to_the_installed_one(self):
+        import steam_common
+        with patch("config.load", return_value={}), \
+             patch("detect_games.find_steam_root", return_value="/found/steam"):
+            self.assertEqual(steam_common.default_steam_root(), "/found/steam")
+
+    def test_default_steam_root_last_resort_is_a_real_path(self):
+        import steam_common
+        with patch("config.load", return_value={}), \
+             patch("detect_games.find_steam_root", return_value=None):
+            self.assertEqual(steam_common.default_steam_root(), steam_common.STEAM_ROOT)
+
+    def test_shader_cache_follows_the_resolved_root(self):
+        import cache_cleanup
+        with patch("steam_common.default_steam_root", return_value="/flatpak/Steam"):
+            self.assertEqual(cache_cleanup._shadercache_dir(),
+                             os.path.join("/flatpak/Steam", "steamapps", "shadercache"))
+
+
+class DepotMergeSafetyTests(unittest.TestCase):
+    """An interrupted depot merge must never leave the game missing files.
+
+    _merge_tree deleted every destination file in one pass and moved the new
+    files in a second. A crash, a power cut or a full disk between the passes
+    left the install incomplete, no receipt described it, and the legacy
+    marker check read the staged 32-bit folder as "already downgraded" -- so
+    nothing offered to repair it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.stage = self.root / "stage"
+        self.game = self.root / "game"
+        for rel, data in (("main/iw_00.iwd", b"new-iwd"), ("zone/a.ff", b"new-ff"),
+                          ("zone/b.ff", b"new-bf")):
+            path = self.stage / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        for rel, data in (("main/iw_00.iwd", b"old-iwd"), ("zone/a.ff", b"old-ff"),
+                          ("zone/b.ff", b"old-bf")):
+            path = self.game / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+    def _merge(self):
+        return depot._merge_tree(str(self.stage), str(self.game), lambda m: None)
+
+    def test_files_are_replaced_and_sizes_recorded(self):
+        merged = self._merge()
+        self.assertEqual(sorted(merged), ["main/iw_00.iwd", "zone/a.ff", "zone/b.ff"])
+        self.assertEqual((self.game / "zone" / "a.ff").read_bytes(), b"new-ff")
+        self.assertEqual(list(self.game.rglob(depot._PENDING_SUFFIX)), [])
+
+    def _disk_full_on_second_write(self):
+        """Make the second file write fail, whichever call the merge uses to
+        write it (shutil.move or os.replace), so the interruption lands at the
+        same point for old and new implementations alike."""
+        real_move, real_replace = shutil.move, os.replace
+        seen = []
+
+        def move(src, dst, **kw):
+            seen.append(dst)
+            if len(seen) == 2:
+                raise OSError(28, "No space left on device")
+            return real_move(src, dst, **kw)
+
+        def replace(src, dst):
+            seen.append(dst)
+            if len(seen) == 2:
+                raise OSError(28, "No space left on device")
+            return real_replace(src, dst)
+
+        return (patch.object(depot.shutil, "move", side_effect=move),
+                patch.object(depot.os, "replace", side_effect=replace))
+
+    def test_a_failure_mid_merge_leaves_every_file_present(self):
+        """A failure part way through leaves each file as either its old or
+        its new version -- never missing."""
+        move_patch, replace_patch = self._disk_full_on_second_write()
+        with move_patch, replace_patch:
+            with self.assertRaises(OSError):
+                self._merge()
+
+        for rel in ("main/iw_00.iwd", "zone/a.ff", "zone/b.ff"):
+            self.assertTrue((self.game / rel).is_file(), f"{rel} disappeared")
+
+    def test_an_interrupted_merge_is_detected_as_needing_repair(self):
+        """merge_depots writes the receipt before it touches the install, so a
+        half-merged directory reads as changed (not as downgraded)."""
+        move_patch, replace_patch = self._disk_full_on_second_write()
+        with move_patch, replace_patch:
+            with self.assertRaises(OSError):
+                depot.merge_depots("iw5", str(self.stage),
+                                   str(self.root / "MW3"), on_progress=lambda m: None)
+        install = self.root / "MW3"
+        self.assertTrue(depot._receipt_path("iw5", str(install)))
+        self.assertIs(depot._receipt_status("iw5", str(install)), False)
+        self.assertIs(depot.is_downgrade_needed("iw5", str(install)), True)
+
+
+class DepotQrRetryTests(unittest.TestCase):
+    """run_depot_download_qr must always come back.
+
+    The retry: the loop was bounded by `if max_retries > 0`, and the only
+    caller never passed the argument, so the cap was dead code. Any failure
+    the keyword list did not recognise printed "QR code expired. Generating a
+    new one..." forever -- a fresh QR code per pass, no way out but killing
+    DeckOps.
+
+    The child: an exception while reading DepotDownloader's output returned
+    None without stopping it, leaving a download running against the staging
+    directory the caller had already given up on.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.staging = self.root / "staging"
+        self.staging.mkdir()
+        self.logs = []
+
+    def _fake_dd(self, body: str) -> str:
+        path = self.root / "DepotDownloader"
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+        return str(path)
+
+    def _run(self, binary, on_log=None, **kw):
+        with patch.object(depot, "DEPOTDOWNLOADER_BIN", binary), \
+             patch.object(depot, "DEPOTDOWNLOADER_DIR", str(self.root)):
+            return depot.run_depot_download_qr(
+                staging_dir=str(self.staging),
+                depot_info={"depot": 42681, "manifest": "1", "app": 42680},
+                on_qr=lambda text: None,
+                on_auth_success=lambda user: None,
+                on_progress=lambda msg: None,
+                on_log=on_log or self.logs.append,
+                **kw)
+
+    def test_an_unrecognised_failure_stops_instead_of_looping(self):
+        # Exits 0 without any of _DD_ERROR_KEYWORDS: the old code read that as
+        # "the QR code expired" and started another login, endlessly.
+        binary = self._fake_dd('echo "something we do not recognise"\nexit 0')
+        self.assertIsNone(self._run(binary))
+        self.assertLessEqual(len(self.logs), depot.MAX_QR_RETRIES * 3,
+                             f"kept retrying: {self.logs}")
+
+    def test_the_retry_cap_is_reachable(self):
+        binary = self._fake_dd("exit 0")
+        self.assertIsNone(self._run(binary, max_retries=1))
+        self.assertTrue(any("Max QR login retries reached" in m for m in self.logs), self.logs)
+
+    def test_max_retries_zero_no_longer_means_unlimited(self):
+        """0 used to disable the cap entirely; a caller passing 0 wanted
+        "no retries", not "retry forever"."""
+        binary = self._fake_dd("exit 0")
+        self.assertIsNone(self._run(binary, max_retries=0))
+        self.assertTrue(any("Max QR login retries reached" in m for m in self.logs), self.logs)
+
+    def test_a_failed_read_does_not_leave_depotdownloader_running(self):
+        pidfile = self.root / "dd.pid"
+        # Writes its pid, prints one line, then stays alive: the line reaches
+        # the caller's callback, which raises mid-read like a real one can.
+        binary = self._fake_dd(f'echo $$ > "{pidfile}"\necho "starting"\nsleep 120')
+        # The callback raises mid-read; the function reports the failure
+        # rather than propagating it (its callers only look at None).
+        self.assertIsNone(self._run(binary, on_log=self._boom_after_first))
+        self.assertTrue(pidfile.exists(), "fake DepotDownloader never started")
+        for _ in range(50):
+            if not _pid_alive(int(pidfile.read_text())):
+                break
+            time.sleep(0.1)
+        self.assertFalse(_pid_alive(int(pidfile.read_text())),
+                         "DepotDownloader was left running after the caller gave up")
+
+    def _boom_after_first(self, message):
+        if "starting" in message:
+            raise RuntimeError("callback failed")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class PlutoniumLeakCleanupTests(unittest.TestCase):
     """Update Games' leaked-Plutonium cleanup must only remove DeckOps's folders."""
 
@@ -1187,7 +1679,13 @@ class SetupCheckTests(unittest.TestCase):
         SP exe swap on 7940. Update must rebuild the combined option, or
         Check My Setup flags both modes again after every Fix."""
         from types import SimpleNamespace
-        import ui_manage
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            import ui_manage
+        except ImportError:
+            # Same rule as the other UI tests in this file: a host without a
+            # usable PyQt skips them instead of erroring the whole run.
+            self.skipTest("PyQt is not available")
         from iw3sp import _build_iw3sp_launch_option
         cod4 = Path(self.tmp.name, "games", "CoD4"); cod4.mkdir()
         for marker in ("deckops_cod4r.json", "deckops_iw3sp.json"):

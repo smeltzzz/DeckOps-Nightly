@@ -129,6 +129,9 @@ STEAM_ROOTS=(
     "$HOME/.steam/steam"
     "$HOME/.steam/root"
     "$HOME/.steam/debian-installation"
+    # Steam from Flatpak (detect_games.STEAM_PATHS has the same two)
+    "$HOME/.var/app/com.valvesoftware.Steam/data/Steam"
+    "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
     "/run/media/mmcblk0p1/.local/share/Steam"
     "/home/deck/.local/share/Steam"
 )
@@ -2801,8 +2804,10 @@ PYEOF
 SHORTCUTS_SNAPSHOT="$(mktemp -d)"
 export SHORTCUTS_SNAPSHOT
 trap 'rm -rf "$SHORTCUTS_SNAPSHOT" "$DECKOPS_PY_HELPERS"' EXIT
-for _root in "$STEAM_ROOT"; do
-    [ -n "$_root" ] && [ -d "$_root/userdata" ] || continue
+# One resolved root (STEAM_ROOT is a single path, not a list): iterate it
+# directly instead of looping over a quoted scalar (shellcheck SC2066).
+_root="$STEAM_ROOT"
+if [ -n "$_root" ] && [ -d "$_root/userdata" ]; then
     for _vdf in "$_root"/userdata/*/config/shortcuts.vdf; do
         [ -f "$_vdf" ] || continue
         _uid="$(basename "$(dirname "$(dirname "$_vdf")")")"
@@ -2812,7 +2817,7 @@ for _root in "$STEAM_ROOT"; do
                 { warn "Cannot snapshot Steam shortcuts; install kept for retry."; exit 1; }
         fi
     done
-done
+fi
 
 remove_steam_shortcuts && success "Steam shortcuts cleaned up." || { warn "Steam shortcut cleanup failed; install kept for retry."; exit 1; }
 echo ""

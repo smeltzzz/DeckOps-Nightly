@@ -38,7 +38,37 @@ _log = get_logger(__name__)
 # ── Paths / constants ─────────────────────────────────────────────────────────
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STEAM_ROOT   = os.path.expanduser("~/.local/share/Steam")
+STEAM_ROOT   = os.path.expanduser("~/.local/share/Steam")   # classic path, last resort
+
+
+def default_steam_root() -> str:
+    """Steam root for callers that were given none.
+
+    The root saved by setup, else the first installation found on disk (which
+    includes the Flatpak one), else the classic path. Reading the constant
+    above directly made every such caller assume ~/.local/share/Steam, so on
+    a Flatpak Steam -- or any install that moved -- they looked in a directory
+    that does not exist: no shader cache cleaned, no loginusers.vdf read, no
+    Proton found.
+
+    Lazy imports keep this a leaf module (detect_games imports nothing from
+    DeckOps, and the config import is the same one record_configset_edit does).
+    """
+    try:
+        import config as _cfg
+        root = _cfg.load().get("steam_root")
+        if isinstance(root, str) and root:
+            return os.path.expanduser(root)
+    except Exception:                       # no config yet, unreadable, ...
+        pass
+    try:
+        from detect_games import find_steam_root
+        found = find_steam_root()
+    except Exception:
+        found = None
+    return found or STEAM_ROOT
+
+
 USERDATA_DIR = os.path.join(STEAM_ROOT, "userdata")
 STEAM_CONFIG = os.path.join(STEAM_ROOT, "config", "config.vdf")
 

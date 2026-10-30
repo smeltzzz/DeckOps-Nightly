@@ -9,4 +9,10 @@ assets/music/background.mp3
 decky/
 DeckOps.zip
 .lan_launcher.json
+# Update lock (launcher.sh / update_manifest.update_lock), offline-launcher
+# intent dirs, and configs load() moved aside as unreadable.
+.deckops_update.lock
+.lan_intent.*
+deckops.json.corrupt-*
+deckops.json.corrupt-*.noticed
 assets/images/headers/

@@ -82,8 +82,11 @@ def _compat_tool(steam_root: str, appid: str):
 
 
 def _tool_dirs(steam_root: str) -> list:
+    """Where a compat tool may be: this root's, and the resolved one's (a
+    Steam that moved, or is the Flatpak build, keeps its tools elsewhere)."""
+    from steam_common import default_steam_root
     return [os.path.join(steam_root, "compatibilitytools.d"),
-            os.path.expanduser("~/.local/share/Steam/compatibilitytools.d")]
+            os.path.join(default_steam_root(), "compatibilitytools.d")]
 
 
 def _deckops_paths(option: str) -> list:

@@ -313,7 +313,17 @@ def main(argv):
         _log.warning("fovwatch: %s, running the game without it", ex)
         settings = {}
 
-    child = subprocess.Popen(cmd, env=_child_env())
+    try:
+        child = subprocess.Popen(cmd, env=_child_env())
+    except OSError as ex:
+        # prelaunch.sh runs this as the game's parent and only knows how to
+        # tell "the helper ran the game" from "it did not" by exit status:
+        # 126/127 means "start the game yourself". Without this, a command that
+        # cannot be spawned (exe missing after a Steam update) made Python exit
+        # 1, and the game was never started -- the one thing the launch prefix
+        # promises never happens.
+        _log.warning("fovwatch: could not start the game: %s", ex)
+        return 127
     for name in ("SIGTERM", "SIGINT", "SIGHUP"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), lambda s, f: child.send_signal(s))

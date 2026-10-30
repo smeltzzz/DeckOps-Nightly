@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import subprocess
 import threading
@@ -533,6 +534,7 @@ def open_steam_install(appid: int):
 
 def copy_to_clipboard(text: str):
     for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        proc = None
         try:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE,
@@ -548,6 +550,35 @@ def copy_to_clipboard(text: str):
 
 
 # --- DepotDownloader management
+
+
+def _safe_extractall_zip(zf: zipfile.ZipFile, dest: str):
+    """extractall that can't write outside dest.
+
+    The zip comes from a GitHub release and github_asset() returns no digest
+    for those assets yet, so it is the one download in this module that is
+    unverified. Same rule as ge_proton._safe_extractall: no absolute or ../../
+    member names, no links pointing outside dest.
+    """
+    root = os.path.realpath(dest)
+
+    def inside(path: str) -> bool:
+        real = os.path.realpath(path)
+        return real == root or real.startswith(root + os.sep)
+
+    for info in zf.infolist():
+        target = os.path.join(dest, info.filename)
+        parts = info.filename.replace("\\", "/").split("/")
+        if os.path.isabs(info.filename) or ".." in parts or not inside(target):
+            raise RuntimeError(f"unsafe path in DepotDownloader archive: {info.filename!r}")
+        # A Unix symlink's target is the payload; the type is in the mode bits
+        if stat.S_ISLNK(info.external_attr >> 16):
+            link = zf.read(info).decode("utf-8", "replace")
+            if os.path.isabs(link) or not inside(os.path.join(os.path.dirname(target), link)):
+                raise RuntimeError(
+                    f"unsafe link in DepotDownloader archive: {info.filename!r} -> {link!r}")
+    zf.extractall(dest)
+
 
 def ensure_depotdownloader(on_progress=None) -> str:
     def prog(msg):
@@ -578,14 +609,17 @@ def ensure_depotdownloader(on_progress=None) -> str:
 
     prog("Extracting DepotDownloader...")
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(DEPOTDOWNLOADER_DIR)
-    os.chmod(DEPOTDOWNLOADER_BIN, 0o755)
+        _safe_extractall_zip(zf, DEPOTDOWNLOADER_DIR)
 
+    # Check before chmod: a release that moves the binary into a subfolder used
+    # to fail with a bare FileNotFoundError from chmod, so the message below
+    # (which says where it looked) could never be shown.
     if not os.path.isfile(DEPOTDOWNLOADER_BIN):
         raise RuntimeError(
             f"DepotDownloader binary not found after extraction at "
             f"{DEPOTDOWNLOADER_BIN}"
         )
+    os.chmod(DEPOTDOWNLOADER_BIN, 0o755)
 
     prog("DepotDownloader ready.")
     return DEPOTDOWNLOADER_BIN
@@ -650,6 +684,12 @@ _DD_ERROR_KEYWORDS = (
 # fills them in, so their modified time is the progress signal, not the size.)
 DD_STALL_TIMEOUT = 15 * 60
 DD_STALL_CHECK = 30
+
+# QR logins are only retried this many times. The loop used to be bounded by
+# `max_retries > 0`, and its single caller never passed the argument, so the
+# "Max QR login retries reached" branch was dead: any failure the keyword list
+# below did not recognise spun forever, one new QR code per pass.
+MAX_QR_RETRIES = 4
 
 
 def _newest_mtime(path: str) -> float:
@@ -751,13 +791,18 @@ def run_depot_download_qr(
     on_log,
     app_id: int | None = None,
     username: str | None = None,
-    max_retries: int = 0,
+    max_retries: int | None = MAX_QR_RETRIES,
 ) -> str | None:
     """
     Run DepotDownloader for a single depot with QR code authentication.
 
     app_id overrides the depot_info's own "app" key if provided; falls
     back to depot_info["app"] then the caller must ensure one is set.
+
+    max_retries caps the QR re-logins (0 = no retry, None = no cap), so an
+    error DepotDownloader words differently than _DD_ERROR_KEYWORDS expects
+    cannot leave the user in an endless "QR code expired" loop whose only
+    exit is killing DeckOps.
     """
     os.makedirs(staging_dir, exist_ok=True)
 
@@ -798,6 +843,7 @@ def run_depot_download_qr(
         stalled = [False]
         stop_watch = threading.Event()
 
+        proc = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -892,7 +938,9 @@ def run_depot_download_qr(
                     )
                 return None
 
-            if max_retries > 0 and attempt >= max_retries:
+            # `0` means "do not retry" and None means "no cap": the old
+            # `max_retries > 0` test turned both into an endless loop.
+            if max_retries is not None and attempt >= max_retries:
                 on_log("Max QR login retries reached.")
                 return None
 
@@ -904,6 +952,15 @@ def run_depot_download_qr(
             return None
         finally:
             stop_watch.set()
+            # Never leave DepotDownloader running: an exception while reading
+            # its output used to keep the download alive in the background,
+            # holding the staging directory the caller then failed on.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=30)
+                except (OSError, subprocess.TimeoutExpired):
+                    _log.warning("could not stop DepotDownloader (pid %s)", proc.pid)
 
 
 # --- Merge helpers
@@ -932,37 +989,72 @@ def _cleanup_dd_artifacts(install_dir: str):
         _log.debug("could not remove leftover .manifest files in %s", install_dir, exc_info=True)
 
 
-def _merge_tree(src: str, dst: str, prog):
+def _tree_files(src: str) -> list:
+    """Relative paths of the depot files in src, without DepotDownloader's own."""
     rel_files = []
-    for dirpath, dirnames, filenames in os.walk(src):
+    for dirpath, _dirnames, filenames in os.walk(src):
         rel = os.path.relpath(dirpath, src)
         for fname in filenames:
             rf = fname if rel == "." else os.path.join(rel, fname)
             if not _is_dd_artifact(rf):
                 rel_files.append(rf)
+    return rel_files
 
+
+def _tree_sizes(src: str) -> dict:
+    """{relative path: size} for the depot files in src."""
+    sizes = {}
+    for rf in _tree_files(src):
+        try:
+            sizes[rf.replace(os.sep, "/")] = os.path.getsize(os.path.join(src, rf))
+        except OSError:
+            pass
+    return sizes
+
+
+# Each file is staged next to its destination under this suffix before the
+# swap, so an interrupted merge leaves old-or-new files and a few of these,
+# never a file that is simply missing.
+_PENDING_SUFFIX = ".deckops-new"
+
+
+def _merge_tree(src: str, dst: str, prog):
+    """Move the staged depot files over the install, one atomic swap per file.
+
+    This used to delete every destination file in one pass and move the new
+    ones in a second. Between the two passes the game directory was
+    incomplete, so a crash, a power cut or a full disk there left a game
+    missing files and no receipt describing it -- and the legacy marker check
+    then read the staged 32-bit downgrade folder as "already downgraded", so
+    nothing offered to repair it and the user had to delete downgrade/ by
+    hand. Staging next to the destination and renaming means every file is
+    always either its old or its new version.
+    """
+    rel_files = _tree_files(src)
     total = len(rel_files)
     if total == 0:
         return {}
 
-    deleted = 0
-    for i, rf in enumerate(rel_files, 1):
-        dst_file = os.path.join(dst, rf)
-        if os.path.isfile(dst_file):
-            try:
-                os.remove(dst_file)
-                deleted += 1
-            except OSError as ex:
-                _log.warning("Could not delete %s: %s", dst_file, ex)
-        if i % 25 == 0 or i == total:
-            prog(f"Removing old files... {i}/{total}")
-    _log.info("Deleted %d old files", deleted)
+    # Leftovers from an interrupted merge; they are only ever our own files.
+    for rf in rel_files:
+        try:
+            os.remove(os.path.join(dst, rf) + _PENDING_SUFFIX)
+        except OSError:
+            pass
 
+    staged = []
     for i, rf in enumerate(rel_files, 1):
         src_file = os.path.join(src, rf)
         dst_file = os.path.join(dst, rf)
+        pending = dst_file + _PENDING_SUFFIX
         os.makedirs(os.path.dirname(dst_file), exist_ok=True)
-        shutil.move(src_file, dst_file)
+        shutil.move(src_file, pending)
+        staged.append((pending, dst_file))
+        if i % 25 == 0 or i == total:
+            prog(f"Preparing files... {i}/{total}")
+
+    for i, (pending, dst_file) in enumerate(staged, 1):
+        os.replace(pending, dst_file)
         if i % 25 == 0 or i == total:
             prog(f"Moving files into place... {i}/{total}")
 
@@ -1015,6 +1107,19 @@ def merge_depots(game_id: str, staging_dir, install_dir: str,
 
     target = _merge_dir(game_id, install_dir)
     os.makedirs(target, exist_ok=True)
+
+    # Record the files the merge is about to place BEFORE the install is
+    # touched. If the merge is interrupted, _receipt_status no longer matches
+    # the disk and the next run offers to repair; without this the receipt
+    # was only written on success, so an interrupted merge left no receipt at
+    # all and the legacy marker check called the half-merged install done.
+    expected = {}
+    for sdir in staging_dirs:
+        subdirs = _depot_subdirs(sdir, cfg["depot_ids"])
+        for path in ([path for _id, path in subdirs] if subdirs else [sdir]):
+            expected.update(_tree_sizes(path))
+    if expected:
+        _write_receipt(game_id, install_dir, expected)
 
     merged = {}
     for sdir in staging_dirs:

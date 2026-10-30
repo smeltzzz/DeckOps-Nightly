@@ -103,6 +103,21 @@ def _get_latest_release():
     return version, tarball_url, checksum_url, dir_name
 
 
+def _parse_sha512(body: bytes) -> str | None:
+    """`sha512:<hex>` from a .sha512sum file, or None if it isn't one.
+
+    An empty body (a truncated download) or an HTML error page used to reach
+    `split()[0]` and raise IndexError out of install_ge_proton, which is the
+    only place in this module that failed with a traceback instead of a
+    message; a page's first word would also have been passed on as a digest.
+    """
+    try:
+        first = body.decode("utf-8", "replace").split()[0]
+    except IndexError:
+        return None
+    return "sha512:" + first if re.fullmatch(r"[0-9a-fA-F]{128}", first) else None
+
+
 def _is_complete(tool_dir: str) -> bool:
     """True if tool_dir holds a usable GE-Proton: the proton script, the
     compatibilitytool.vdf Steam registers it by, and the default prefix
@@ -223,7 +238,9 @@ def install_ge_proton(on_progress=None, steam_root: str | None = None):
             # retries a mismatch instead of failing the install outright.
             req = urllib.request.Request(checksum_url, headers=_BROWSER_UA)
             with urllib.request.urlopen(req, timeout=15) as resp:
-                digest = "sha512:" + resp.read().decode().split()[0]
+                digest = _parse_sha512(resp.read())
+            if not digest:
+                _log.warning("%s checksum file unreadable, downloading unverified", dir_name)
         else:
             _log.warning("%s has no checksum file, downloading unverified", dir_name)
 
@@ -366,6 +383,33 @@ def _copy_dlls(src_dir: str, dest_dir: str) -> tuple[int, int]:
     return (copied, skipped)
 
 
+def _prefix_ready(pfx_dir: str) -> bool:
+    """True if wine has actually initialized this prefix.
+
+    drive_c alone is not a usable marker: _copy_dlls creates
+    pfx/drive_c/windows/system32 before Proton ever runs. So a prefix whose
+    finalize failed still has a drive_c, and the next run then said "✓ Prefix
+    already initialized — skipped Proton run" and never retried the step that
+    had never succeeded. Wine writes these files on its first boot.
+    """
+    return (any(os.path.isfile(os.path.join(pfx_dir, n))
+                for n in ("system.reg", "user.reg", "userdef.reg"))
+            or os.path.isdir(os.path.join(pfx_dir, "dosdevices")))
+
+
+def _finalized(returncode: int, pfx_dir: str) -> bool:
+    """True if `proton run cmd /c exit` actually produced the prefix.
+
+    It exits non-zero when it cannot start at all (a missing steamclient.so,
+    a half-extracted GE-Proton, an unusable runtime), and this used to be
+    ignored: the caller printed "✓ Prefix finalized" and counted the prefix
+    as one of the good ones, so the install carried on against a directory
+    that held little more than the DLLs copied into it and the game failed
+    on first launch instead of setup saying so.
+    """
+    return returncode == 0 and _prefix_ready(pfx_dir)
+
+
 def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
                        on_progress=None, proton_path: str | None = None,
                        steam_root: str | None = None) -> bool:
@@ -406,10 +450,10 @@ def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
     wow64_target = os.path.join(pfx_dir, "drive_c", "windows", "syswow64")
     version_file = os.path.join(prefix_path, "version")
 
-    # Check if the prefix has already been initialized by Proton.
-    # If drive_c exists, the prefix structure is in place — we only need
-    # to copy any missing DLLs and can skip the slow Proton run.
-    prefix_exists = os.path.isdir(os.path.join(pfx_dir, "drive_c"))
+    # Check if the prefix has already been initialized by Proton. Wine's own
+    # files, not drive_c: _copy_dlls creates drive_c below, so a prefix whose
+    # finalize failed would look initialized and never be retried.
+    prefix_exists = _prefix_ready(pfx_dir)
 
     # ── Fallback: no proton_path ───────────────────────────────────────
     # Can't run Proton to finalize — copy entire default_pfx as a best effort.
@@ -470,10 +514,13 @@ def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
         env = os.environ.copy()
         env["STEAM_COMPAT_DATA_PATH"]           = prefix_path
         env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = _compat_install
-        subprocess.run(
+        r = subprocess.run(
             [proton_path, "run", "cmd", "/c", "exit"],
             env=env, capture_output=True, timeout=180,
         )
+        if not _finalized(r.returncode, pfx_dir):
+            prog(f"  ⚠ Proton could not finalize the prefix (exit {r.returncode})")
+            return False
         prog("  ✓ Prefix finalized by Proton")
         return True
     except Exception as ex:
@@ -963,7 +1010,7 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
     # ── Step 4: Prepare donor prefix ──────────────────────────────────────
     donor_label, donor_path = unique_paths[0]
     donor_pfx_dir = os.path.join(donor_path, "pfx")
-    donor_exists = os.path.isdir(os.path.join(donor_pfx_dir, "drive_c"))
+    donor_exists = _prefix_ready(donor_pfx_dir)
 
     if donor_exists:
         # Donor already on NVMe -- verify DLLs if it has real dirs (not symlinks)
@@ -1009,16 +1056,24 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
             env["STEAM_COMPAT_DATA_PATH"]           = donor_path
             env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = _compat_install
             start = time.time()
-            subprocess.run(
+            r = subprocess.run(
                 [proton_path, "run", "cmd", "/c", "exit"],
                 env=env, capture_output=True, timeout=600,
             )
             elapsed = time.time() - start
+            # A donor that never got its prefix would be cloned into every
+            # remaining prefix, so its exit status has to count: fall back to
+            # initializing each prefix instead of counting it as ready.
+            if not _finalized(r.returncode, donor_pfx_dir):
+                raise RuntimeError(f"exit {r.returncode}, no wine registry")
             prog(f"  ✓ Donor prefix finalized by Proton ({elapsed:.1f}s)")
             success += 1
         except Exception as ex:
             prog(f"  ⚠ Donor prefix finalize failed: {ex}")
-            for label, compat_path in unique_paths[1:]:
+            # Every prefix, the donor included: it is the one that just
+            # failed, and leaving it out of the fallback meant nothing ever
+            # repaired it (the caller only reported a count).
+            for _label, compat_path in unique_paths:
                 ok = ensure_prefix_deps(ge_version, compat_path,
                                         on_progress=on_progress,
                                         proton_path=proton_path,

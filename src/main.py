@@ -67,7 +67,16 @@ def _ensure_qt6():
         pass
     import shutil, subprocess
     log = get_logger(__name__)
-    venv = os.path.dirname(os.path.dirname(sys.executable))
+    # Only ever install into the virtualenv this process runs from. Started
+    # with the distro interpreter (a stray `python3 src/main.py`, a desktop
+    # file from an older installer), dirname(dirname(sys.executable)) is /usr:
+    # /usr/bin/pip exists on most images, so this put PyQt6 into the OS Python
+    # and the uninstall two blocks down would remove distro packages. PEP 668
+    # images refuse, but the failure was only logged.
+    if sys.prefix == sys.base_prefix:
+        log.info("not running from a virtualenv: PyQt6 upgrade skipped")
+        return
+    venv = sys.prefix
     pip = os.path.join(venv, "bin", "pip")
     # Set when the wheel installed but could not open a window here
     marker = os.path.join(venv, ".qt6_unsupported")
