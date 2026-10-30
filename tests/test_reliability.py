@@ -913,6 +913,89 @@ class DepotLoginTests(unittest.TestCase):
             self.assertEqual(other.read_text(), "keep")
 
 
+class DepotMergeSafetyTests(unittest.TestCase):
+    """An interrupted depot merge must never leave the game missing files.
+
+    _merge_tree deleted every destination file in one pass and moved the new
+    files in a second. A crash, a power cut or a full disk between the passes
+    left the install incomplete, no receipt described it, and the legacy
+    marker check read the staged 32-bit folder as "already downgraded" -- so
+    nothing offered to repair it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.stage = self.root / "stage"
+        self.game = self.root / "game"
+        for rel, data in (("main/iw_00.iwd", b"new-iwd"), ("zone/a.ff", b"new-ff"),
+                          ("zone/b.ff", b"new-bf")):
+            path = self.stage / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        for rel, data in (("main/iw_00.iwd", b"old-iwd"), ("zone/a.ff", b"old-ff"),
+                          ("zone/b.ff", b"old-bf")):
+            path = self.game / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+    def _merge(self):
+        return depot._merge_tree(str(self.stage), str(self.game), lambda m: None)
+
+    def test_files_are_replaced_and_sizes_recorded(self):
+        merged = self._merge()
+        self.assertEqual(sorted(merged), ["main/iw_00.iwd", "zone/a.ff", "zone/b.ff"])
+        self.assertEqual((self.game / "zone" / "a.ff").read_bytes(), b"new-ff")
+        self.assertEqual(list(self.game.rglob(depot._PENDING_SUFFIX)), [])
+
+    def _disk_full_on_second_write(self):
+        """Make the second file write fail, whichever call the merge uses to
+        write it (shutil.move or os.replace), so the interruption lands at the
+        same point for old and new implementations alike."""
+        real_move, real_replace = shutil.move, os.replace
+        seen = []
+
+        def move(src, dst, **kw):
+            seen.append(dst)
+            if len(seen) == 2:
+                raise OSError(28, "No space left on device")
+            return real_move(src, dst, **kw)
+
+        def replace(src, dst):
+            seen.append(dst)
+            if len(seen) == 2:
+                raise OSError(28, "No space left on device")
+            return real_replace(src, dst)
+
+        return (patch.object(depot.shutil, "move", side_effect=move),
+                patch.object(depot.os, "replace", side_effect=replace))
+
+    def test_a_failure_mid_merge_leaves_every_file_present(self):
+        """A failure part way through leaves each file as either its old or
+        its new version -- never missing."""
+        move_patch, replace_patch = self._disk_full_on_second_write()
+        with move_patch, replace_patch:
+            with self.assertRaises(OSError):
+                self._merge()
+
+        for rel in ("main/iw_00.iwd", "zone/a.ff", "zone/b.ff"):
+            self.assertTrue((self.game / rel).is_file(), f"{rel} disappeared")
+
+    def test_an_interrupted_merge_is_detected_as_needing_repair(self):
+        """merge_depots writes the receipt before it touches the install, so a
+        half-merged directory reads as changed (not as downgraded)."""
+        move_patch, replace_patch = self._disk_full_on_second_write()
+        with move_patch, replace_patch:
+            with self.assertRaises(OSError):
+                depot.merge_depots("iw5", str(self.stage),
+                                   str(self.root / "MW3"), on_progress=lambda m: None)
+        install = self.root / "MW3"
+        self.assertTrue(depot._receipt_path("iw5", str(install)))
+        self.assertIs(depot._receipt_status("iw5", str(install)), False)
+        self.assertIs(depot.is_downgrade_needed("iw5", str(install)), True)
+
+
 class DepotQrRetryTests(unittest.TestCase):
     """run_depot_download_qr must always come back.
 

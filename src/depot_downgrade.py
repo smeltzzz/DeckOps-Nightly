@@ -956,37 +956,72 @@ def _cleanup_dd_artifacts(install_dir: str):
         _log.debug("could not remove leftover .manifest files in %s", install_dir, exc_info=True)
 
 
-def _merge_tree(src: str, dst: str, prog):
+def _tree_files(src: str) -> list:
+    """Relative paths of the depot files in src, without DepotDownloader's own."""
     rel_files = []
-    for dirpath, dirnames, filenames in os.walk(src):
+    for dirpath, _dirnames, filenames in os.walk(src):
         rel = os.path.relpath(dirpath, src)
         for fname in filenames:
             rf = fname if rel == "." else os.path.join(rel, fname)
             if not _is_dd_artifact(rf):
                 rel_files.append(rf)
+    return rel_files
 
+
+def _tree_sizes(src: str) -> dict:
+    """{relative path: size} for the depot files in src."""
+    sizes = {}
+    for rf in _tree_files(src):
+        try:
+            sizes[rf.replace(os.sep, "/")] = os.path.getsize(os.path.join(src, rf))
+        except OSError:
+            pass
+    return sizes
+
+
+# Each file is staged next to its destination under this suffix before the
+# swap, so an interrupted merge leaves old-or-new files and a few of these,
+# never a file that is simply missing.
+_PENDING_SUFFIX = ".deckops-new"
+
+
+def _merge_tree(src: str, dst: str, prog):
+    """Move the staged depot files over the install, one atomic swap per file.
+
+    This used to delete every destination file in one pass and move the new
+    ones in a second. Between the two passes the game directory was
+    incomplete, so a crash, a power cut or a full disk there left a game
+    missing files and no receipt describing it -- and the legacy marker check
+    then read the staged 32-bit downgrade folder as "already downgraded", so
+    nothing offered to repair it and the user had to delete downgrade/ by
+    hand. Staging next to the destination and renaming means every file is
+    always either its old or its new version.
+    """
+    rel_files = _tree_files(src)
     total = len(rel_files)
     if total == 0:
         return {}
 
-    deleted = 0
-    for i, rf in enumerate(rel_files, 1):
-        dst_file = os.path.join(dst, rf)
-        if os.path.isfile(dst_file):
-            try:
-                os.remove(dst_file)
-                deleted += 1
-            except OSError as ex:
-                _log.warning("Could not delete %s: %s", dst_file, ex)
-        if i % 25 == 0 or i == total:
-            prog(f"Removing old files... {i}/{total}")
-    _log.info("Deleted %d old files", deleted)
+    # Leftovers from an interrupted merge; they are only ever our own files.
+    for rf in rel_files:
+        try:
+            os.remove(os.path.join(dst, rf) + _PENDING_SUFFIX)
+        except OSError:
+            pass
 
+    staged = []
     for i, rf in enumerate(rel_files, 1):
         src_file = os.path.join(src, rf)
         dst_file = os.path.join(dst, rf)
+        pending = dst_file + _PENDING_SUFFIX
         os.makedirs(os.path.dirname(dst_file), exist_ok=True)
-        shutil.move(src_file, dst_file)
+        shutil.move(src_file, pending)
+        staged.append((pending, dst_file))
+        if i % 25 == 0 or i == total:
+            prog(f"Preparing files... {i}/{total}")
+
+    for i, (pending, dst_file) in enumerate(staged, 1):
+        os.replace(pending, dst_file)
         if i % 25 == 0 or i == total:
             prog(f"Moving files into place... {i}/{total}")
 
@@ -1039,6 +1074,19 @@ def merge_depots(game_id: str, staging_dir, install_dir: str,
 
     target = _merge_dir(game_id, install_dir)
     os.makedirs(target, exist_ok=True)
+
+    # Record the files the merge is about to place BEFORE the install is
+    # touched. If the merge is interrupted, _receipt_status no longer matches
+    # the disk and the next run offers to repair; without this the receipt
+    # was only written on success, so an interrupted merge left no receipt at
+    # all and the legacy marker check called the half-merged install done.
+    expected = {}
+    for sdir in staging_dirs:
+        subdirs = _depot_subdirs(sdir, cfg["depot_ids"])
+        for path in ([path for _id, path in subdirs] if subdirs else [sdir]):
+            expected.update(_tree_sizes(path))
+    if expected:
+        _write_receipt(game_id, install_dir, expected)
 
     merged = {}
     for sdir in staging_dirs:
