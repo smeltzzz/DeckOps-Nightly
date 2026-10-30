@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 import sys
 import tempfile
@@ -910,6 +911,97 @@ class DepotLoginTests(unittest.TestCase):
                 self.assertEqual(depot.cleanup_depotdownloader(), 1)
             self.assertFalse(private.exists())
             self.assertEqual(other.read_text(), "keep")
+
+
+class DepotQrRetryTests(unittest.TestCase):
+    """run_depot_download_qr must always come back.
+
+    The retry: the loop was bounded by `if max_retries > 0`, and the only
+    caller never passed the argument, so the cap was dead code. Any failure
+    the keyword list did not recognise printed "QR code expired. Generating a
+    new one..." forever -- a fresh QR code per pass, no way out but killing
+    DeckOps.
+
+    The child: an exception while reading DepotDownloader's output returned
+    None without stopping it, leaving a download running against the staging
+    directory the caller had already given up on.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.staging = self.root / "staging"
+        self.staging.mkdir()
+        self.logs = []
+
+    def _fake_dd(self, body: str) -> str:
+        path = self.root / "DepotDownloader"
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+        return str(path)
+
+    def _run(self, binary, on_log=None, **kw):
+        with patch.object(depot, "DEPOTDOWNLOADER_BIN", binary), \
+             patch.object(depot, "DEPOTDOWNLOADER_DIR", str(self.root)):
+            return depot.run_depot_download_qr(
+                staging_dir=str(self.staging),
+                depot_info={"depot": 42681, "manifest": "1", "app": 42680},
+                on_qr=lambda text: None,
+                on_auth_success=lambda user: None,
+                on_progress=lambda msg: None,
+                on_log=on_log or self.logs.append,
+                **kw)
+
+    def test_an_unrecognised_failure_stops_instead_of_looping(self):
+        # Exits 0 without any of _DD_ERROR_KEYWORDS: the old code read that as
+        # "the QR code expired" and started another login, endlessly.
+        binary = self._fake_dd('echo "something we do not recognise"\nexit 0')
+        self.assertIsNone(self._run(binary))
+        self.assertLessEqual(len(self.logs), depot.MAX_QR_RETRIES * 3,
+                             f"kept retrying: {self.logs}")
+
+    def test_the_retry_cap_is_reachable(self):
+        binary = self._fake_dd("exit 0")
+        self.assertIsNone(self._run(binary, max_retries=1))
+        self.assertTrue(any("Max QR login retries reached" in m for m in self.logs), self.logs)
+
+    def test_max_retries_zero_no_longer_means_unlimited(self):
+        """0 used to disable the cap entirely; a caller passing 0 wanted
+        "no retries", not "retry forever"."""
+        binary = self._fake_dd("exit 0")
+        self.assertIsNone(self._run(binary, max_retries=0))
+        self.assertTrue(any("Max QR login retries reached" in m for m in self.logs), self.logs)
+
+    def test_a_failed_read_does_not_leave_depotdownloader_running(self):
+        pidfile = self.root / "dd.pid"
+        # Writes its pid, prints one line, then stays alive: the line reaches
+        # the caller's callback, which raises mid-read like a real one can.
+        binary = self._fake_dd(f'echo $$ > "{pidfile}"\necho "starting"\nsleep 120')
+        # The callback raises mid-read; the function reports the failure
+        # rather than propagating it (its callers only look at None).
+        self.assertIsNone(self._run(binary, on_log=self._boom_after_first))
+        self.assertTrue(pidfile.exists(), "fake DepotDownloader never started")
+        for _ in range(50):
+            if not _pid_alive(int(pidfile.read_text())):
+                break
+            time.sleep(0.1)
+        self.assertFalse(_pid_alive(int(pidfile.read_text())),
+                         "DepotDownloader was left running after the caller gave up")
+
+    def _boom_after_first(self, message):
+        if "starting" in message:
+            raise RuntimeError("callback failed")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class PlutoniumLeakCleanupTests(unittest.TestCase):

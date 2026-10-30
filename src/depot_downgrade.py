@@ -533,6 +533,7 @@ def open_steam_install(appid: int):
 
 def copy_to_clipboard(text: str):
     for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        proc = None
         try:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE,
@@ -651,6 +652,12 @@ _DD_ERROR_KEYWORDS = (
 DD_STALL_TIMEOUT = 15 * 60
 DD_STALL_CHECK = 30
 
+# QR logins are only retried this many times. The loop used to be bounded by
+# `max_retries > 0`, and its single caller never passed the argument, so the
+# "Max QR login retries reached" branch was dead: any failure the keyword list
+# below did not recognise spun forever, one new QR code per pass.
+MAX_QR_RETRIES = 4
+
 
 def _newest_mtime(path: str) -> float:
     newest = 0.0
@@ -751,13 +758,18 @@ def run_depot_download_qr(
     on_log,
     app_id: int | None = None,
     username: str | None = None,
-    max_retries: int = 0,
+    max_retries: int | None = MAX_QR_RETRIES,
 ) -> str | None:
     """
     Run DepotDownloader for a single depot with QR code authentication.
 
     app_id overrides the depot_info's own "app" key if provided; falls
     back to depot_info["app"] then the caller must ensure one is set.
+
+    max_retries caps the QR re-logins (0 = no retry, None = no cap), so an
+    error DepotDownloader words differently than _DD_ERROR_KEYWORDS expects
+    cannot leave the user in an endless "QR code expired" loop whose only
+    exit is killing DeckOps.
     """
     os.makedirs(staging_dir, exist_ok=True)
 
@@ -798,6 +810,7 @@ def run_depot_download_qr(
         stalled = [False]
         stop_watch = threading.Event()
 
+        proc = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -892,7 +905,9 @@ def run_depot_download_qr(
                     )
                 return None
 
-            if max_retries > 0 and attempt >= max_retries:
+            # `0` means "do not retry" and None means "no cap": the old
+            # `max_retries > 0` test turned both into an endless loop.
+            if max_retries is not None and attempt >= max_retries:
                 on_log("Max QR login retries reached.")
                 return None
 
@@ -904,6 +919,15 @@ def run_depot_download_qr(
             return None
         finally:
             stop_watch.set()
+            # Never leave DepotDownloader running: an exception while reading
+            # its output used to keep the download alive in the background,
+            # holding the staging directory the caller then failed on.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=30)
+                except (OSError, subprocess.TimeoutExpired):
+                    _log.warning("could not stop DepotDownloader (pid %s)", proc.pid)
 
 
 # --- Merge helpers
