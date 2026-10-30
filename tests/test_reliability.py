@@ -1182,6 +1182,45 @@ class SetupCheckTests(unittest.TestCase):
         (cod4 / "deckops_cod4r.json").write_text("{}")
         self.assertTrue(any("launch option is missing" in p for p in self.check()["problems"]))
 
+    def test_update_rebuilds_shared_cod4_launch_option(self):
+        """Fix (Update) on CoD4R MP + IW3SP SP: install_iw3sp leaves only the
+        SP exe swap on 7940. Update must rebuild the combined option, or
+        Check My Setup flags both modes again after every Fix."""
+        from types import SimpleNamespace
+        import ui_manage
+        from iw3sp import _build_iw3sp_launch_option
+        cod4 = Path(self.tmp.name, "games", "CoD4"); cod4.mkdir()
+        for marker in ("deckops_cod4r.json", "deckops_iw3sp.json"):
+            (cod4 / marker).write_text("{}")
+        game = {"install_dir": str(cod4), "source": "steam"}
+        self.installed = {"cod4mp": game, "cod4sp": game}
+        self.setup = {"cod4mp": {"client": "cod4r", "source": "steam"},
+                      "cod4sp": {"client": "iw3sp", "source": "steam"}}
+        for target, value in (("wrapper.LEDGER_PATH", str(Path(self.tmp.name, "ledger.json"))),
+                              ("steam_common.PROJECT_ROOT", self.inst.as_posix())):
+            p = patch(target, value); p.start(); self.addCleanup(p.stop)
+        p = patch("config.get_setup_games", return_value=self.setup)
+        p.start(); self.addCleanup(p.stop)
+        # What the Update loop leaves behind: only the IW3SP swap
+        self.write(tool="GE-Proton10-1", appid="7940",
+                   option=_build_iw3sp_launch_option().replace('"', '\\"'))
+        results = self.sc.check_setup(str(self.root), self.installed, self.setup)
+        self.assertTrue(all(any("does not run the DeckOps client" in p for p in r["problems"])
+                            for r in results), results)
+
+        logs, failed = [], []
+        screen = SimpleNamespace(steam_root=str(self.root), _failed_games=failed,
+                                 _s=SimpleNamespace(log=SimpleNamespace(emit=logs.append)))
+        succeeded = [("cod4mp", {}, game), ("cod4sp", {}, game)]
+        ui_manage.UpdateScreen._apply_cod4_launch_option(screen, succeeded)
+
+        self.assertEqual(failed, [])
+        self.assertIn("✓  CoD4 launch option set", logs)
+        [opt] = self.sc._launch_options(str(self.root), "7940")
+        self.assertEqual(opt.count("%command%"), 1, opt)
+        results = self.sc.check_setup(str(self.root), self.installed, self.setup)
+        self.assertEqual([r["problems"] for r in results], [[], []], results)
+
     def test_other_ge_proton_than_deckops_set_up(self):
         opt = 'DECKOPS_MENU=\\"iw4mp.exe=iw4x-launcher.exe\\" bash \\"%s/prelaunch.sh\\" menu %%command%%' % self.inst.as_posix()
         (self.root / "compatibilitytools.d" / "GE-Proton10-2").mkdir()

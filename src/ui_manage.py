@@ -2581,6 +2581,31 @@ class UpdateScreen(QWidget):
         except Exception as ex:
             self._s.log.emit(f"  Could not restore launch options: {ex}")
 
+    def _apply_cod4_launch_option(self, succeeded):
+        """CoD4 MP and SP share appid 7940 and so one launch option. The
+        installers only write their own part (IW3SP the exe swap, CoD4R
+        nothing), so rebuild the combined option -- CoD4R pre-launch update
+        plus IW3SP swap -- once they are done, as InstallScreen does.
+        Otherwise Check My Setup keeps reporting both modes after Fix."""
+        cod4 = [item for item in succeeded
+                if item[0] in ("cod4mp", "cod4sp")
+                and (item[2] or {}).get("source", "steam") != "own"]
+        if not cod4:
+            return
+        try:
+            from wrapper import clear_launch_options
+            from iw3sp import apply_cod4_launch_option, COD4_APPID
+            # set_launch_options appends: drop the partial option first
+            clear_launch_options(self.steam_root, COD4_APPID)
+            if apply_cod4_launch_option(self.steam_root):
+                self._s.log.emit("✓  CoD4 launch option set")
+        except Exception as ex:
+            _log.warning("CoD4 launch option not set", exc_info=True)
+            self._s.log.emit(f"✗  Could not set the CoD4 launch option: {ex}")
+            for item in cod4:
+                if item not in self._failed_games:
+                    self._failed_games.append(item)
+
     def _ensure_missing_prefixes(self, ge_version, proton, setup_games):
         """Recreate the prefix of each selected Steam game whose prefix is
         missing (Check My Setup's "prefix is missing"). Intact prefixes are
@@ -2924,6 +2949,7 @@ class UpdateScreen(QWidget):
             self._pending_games.pop(0)
 
         self._restore_failed_launch_options()
+        self._apply_cod4_launch_option(succeeded)
 
         # Touch only appids whose update succeeded. Never replace the custom
         # Proton choice of an unrelated or failed game.
