@@ -59,7 +59,7 @@ class ManagementUITests(unittest.TestCase):
         self.screen = ui_manage.ManagementScreen(self.stack)
         self.screen._startup_checked = True
         self.stack.addWidget(self.screen)
-        for name in ("SetupScreen", "InstallScreen", "ManifestModsScreen", "ConfigureScreen"):
+        for name in ("SetupScreen", "InstallScreen", "ConfigureScreen"):
             self.stack.addWidget(Destination(name))
         self.stack.show()
         _APP.processEvents()
@@ -227,7 +227,7 @@ class ManagementUITests(unittest.TestCase):
         self.assertLessEqual(self.screen._scroll.widget().width(),
                              self.screen._scroll.viewport().width())
 
-    def test_library_toolbar_opens_manifest_mods_and_game_options_keep_folders(self):
+    def test_library_toolbar_fits_without_guide_and_mods_tabs(self):
         self.ready.add("cod4mp")
         gd = ui_manage.ALL_GAMES[0]
         self.screen.set_installed({"cod4mp": {"source": "steam", "install_dir": "/game"}})
@@ -236,13 +236,8 @@ class ManagementUITests(unittest.TestCase):
         toolbar = self.screen.layout().itemAt(1).widget()
         buttons = toolbar.findChildren(QPushButton)
         self.assertEqual([b.text() for b in buttons],
-                         ["Add Games", "Update Games", "Mods", "DeckOps Update", "Guide", "Settings"])
+                         ["Add Games", "Update Games", "DeckOps Update", "Settings"])
         self.assertEqual((self.stack.width(), self.stack.height()), (800, 500))
-        mods = next(b for b in buttons if b.text() == "Mods")
-        self.assertEqual(mods.accessibleName(), "Manage manifest mods")
-        mods.click()
-        self.assertEqual(self.stack.currentWidget().screen_name, "ManifestModsScreen")
-        self.stack.setCurrentWidget(self.screen)
         for button in buttons:
             with self.subTest(button=button.text()):
                 left = button.mapTo(self.screen, button.rect().topLeft()).x()
@@ -522,7 +517,7 @@ class ManagementUITests(unittest.TestCase):
         self.assertIn("All shortcuts present", settings.status.text())
         self.assertFalse(settings._settings_running)
 
-    def test_field_guide_has_scrollable_notes_and_pinned_return_at_both_sizes(self):
+    def test_setup_complete_guide_has_scrollable_notes_and_pinned_return_at_both_sizes(self):
         from ui_constants import _app_style, _load_font
         _load_font()
         previous_style = _APP.styleSheet()
@@ -540,14 +535,13 @@ class ManagementUITests(unittest.TestCase):
                  patch("save_backup.has_backups", return_value=True):
                 stack = QStackedWidget(); stack.resize(width, height)
                 guide = ui_manage.SetupCompleteScreen(stack)
-                guide._from_guide = True
                 stack.addWidget(guide)
                 destination = Destination("ManagementScreen"); stack.addWidget(destination)
                 stack.show(); _APP.processEvents()
                 scroll = guide._guide_scroll
                 self.assertEqual((stack.width(), stack.height()), (width, height))
-                self.assertEqual(guide._heading.text(), "HOW TO PLAY")
-                self.assertEqual(guide._continue_btn.text(), "Back to My Games")
+                self.assertEqual(guide._heading.text(), "SETUP COMPLETE")
+                self.assertEqual(guide._continue_btn.text(), "Continue to My Games")
                 self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
                 self.assertLessEqual(scroll.widget().width(), scroll.viewport().width())
                 self.assertTrue(guide._restore_btn.isVisible())

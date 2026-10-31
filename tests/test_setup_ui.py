@@ -129,17 +129,25 @@ class SetupUITests(unittest.TestCase):
                         self.assertLess(button.mapTo(area.viewport(), button.rect().bottomRight()).x(),
                                         area.viewport().width())
 
-    def test_warm_input_and_first_run_mod_step(self):
+    def test_warm_input_and_first_run_hands_over_to_the_game_scan(self):
         style = self.wizard._name_input.styleSheet()
         self.assertIn(f"background:{ui_theme.C_CARD}", style)
         self.assertIn(f"color:{ui_theme.C_TEXT}", style)
         self.assertIn(f"border:2px solid {ui_theme.C_LINE}", style)
         self.assertIn(f"border-color:{ui_theme.C_IW}", style)
-        manifest = QWidget()
-        manifest.screen_name = "ManifestModsScreen"
-        self.stack.addWidget(manifest)
+        welcome = QWidget()
+        welcome.screen_name = "WelcomeScreen"
+        self.stack.addWidget(welcome)
+        library = QWidget()
+        library.screen_name = "ManagementScreen"
+        self.stack.addWidget(library)
         self.wizard._finish()
-        self.assertIs(self.stack.currentWidget(), manifest)
+        self.assertIs(self.stack.currentWidget(), welcome)
+        # Re-running the wizard after first run returns to the library instead.
+        self.settings.values["first_run_complete"] = True
+        self.stack.setCurrentWidget(self.wizard)
+        self.wizard._finish()
+        self.assertIs(self.stack.currentWidget(), library)
 
     def test_controller_choices_are_not_part_of_setup(self):
         self.assertNotIn("_gyro_section", self.wizard._scrolls)

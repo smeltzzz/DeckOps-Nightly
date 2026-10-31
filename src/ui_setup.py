@@ -585,5 +585,5 @@ class SetupFlowScreen(QWidget):
     # ── Finish ────────────────────────────────────────────────────────────
 
     def _finish(self):
-        # Manifest mods step skips itself straight to the game scan when none are found
-        go_to(self.stack, "ManifestModsScreen")
+        # Setup hands straight over to the game scan; there is no optional-mods step.
+        go_to(self.stack, "WelcomeScreen" if cfg.is_first_run() else "ManagementScreen")

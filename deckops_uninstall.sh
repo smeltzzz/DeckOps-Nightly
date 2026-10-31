@@ -849,26 +849,6 @@ fi
 fi
 echo ""
 
-# ── Manifest mods ─────────────────────────────────────────────────────────────
-# Mods installed from manifests (ui_manifest.py) used to stay behind. Removed
-# with DeckOps' own code while it is still on disk: unchanged mod files go,
-# files they replaced are put back, files the user changed are kept.
-info "Removing manifest mods..."
-if [ -f "$INSTALL_DIR/src/manifest_mods.py" ]; then
-    if [ -x "$VENV_PYTHON" ]; then _MMPY="$VENV_PYTHON"; else _MMPY="python3"; fi
-    (cd "$INSTALL_DIR/src" && "$_MMPY" manifest_mods.py uninstall-all) 2>&1 | while IFS= read -r line; do
-        echo "         $line"
-    done
-    if [ "${PIPESTATUS[0]}" -eq 0 ]; then
-        success "Manifest mods removed."
-    else
-        warn "Some manifest mods could not be removed (see above)."
-    fi
-else
-    skip "manifest_mods.py not found — skipping manifest mods."
-fi
-echo ""
-
 # ── (existing code continues below: info "Removing iw4x / cod4x / cod4r client files...") ──
 
 info "Removing iw4x / cod4x / cod4r client files..."

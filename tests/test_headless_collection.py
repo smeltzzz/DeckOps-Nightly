@@ -24,7 +24,7 @@ TESTS = ROOT / "tests"
 SRC = ROOT / "src"
 
 # Modules that import Qt at module scope and must still be importable.
-MODULES = ("test_manage_ui", "test_manifest_ui", "test_install_ui",
+MODULES = ("test_manage_ui", "test_install_ui",
            "test_setup_ui", "test_theme_ui")
 
 _BLOCKER = '''\
