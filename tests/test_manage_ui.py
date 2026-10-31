@@ -59,7 +59,7 @@ class ManagementUITests(unittest.TestCase):
         self.screen = ui_manage.ManagementScreen(self.stack)
         self.screen._startup_checked = True
         self.stack.addWidget(self.screen)
-        for name in ("SetupScreen", "InstallScreen", "ManifestModsScreen", "ConfigureScreen"):
+        for name in ("SetupScreen", "InstallScreen", "ConfigureScreen"):
             self.stack.addWidget(Destination(name))
         self.stack.show()
         _APP.processEvents()

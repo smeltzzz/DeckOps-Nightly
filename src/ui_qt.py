@@ -27,7 +27,6 @@ from ui_constants import (
 
 from ui_setup import SetupFlowScreen
 from ui_install import WelcomeScreen, SetupScreen, InstallScreen
-from ui_manifest import ManifestModsScreen
 from ui_manage import ManagementScreen, ConfigureScreen, SetupCompleteScreen, UpdateScreen
 
 
@@ -99,7 +98,6 @@ class DeckOpsWindow(QMainWindow):
         for cls in [
             BootstrapScreen,
             SetupFlowScreen,
-            ManifestModsScreen,
             WelcomeScreen,
             SetupScreen,
             InstallScreen,
@@ -149,7 +147,7 @@ class DeckOpsWindow(QMainWindow):
         name = getattr(w, "screen_name", w.__class__.__name__)
         titles = {
             "BootstrapScreen": "OPENING", "SetupFlowScreen": "DEVICE SETUP",
-            "ManifestModsScreen": "OPTIONAL MODS", "WelcomeScreen": "FIND GAMES",
+            "WelcomeScreen": "FIND GAMES",
             "SetupScreen": "SELECT GAMES", "InstallScreen": "INSTALLATION",
             "ManagementScreen": "GAME LIBRARY", "ConfigureScreen": "SETTINGS",
             "SetupCompleteScreen": "GUIDE", "UpdateScreen": "GAME UPDATES",
