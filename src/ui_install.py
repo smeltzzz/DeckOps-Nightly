@@ -330,15 +330,27 @@ class SetupScreen(QWidget):
                 installed = is_steam or is_own
                 source = "own" if is_own and not is_steam else "steam"
                 mode = self._mode_name(key)
-                cb = QCheckBox(mode)
+                # Already configured games stay listed so the library makes sense,
+                # but they can no longer be ticked here: running setup twice would
+                # overwrite a working install. Game Options -> Reinstall Game is the
+                # deliberate way to set one up again.
+                configured = installed and cfg.is_game_setup_for_source(key, source)
+                cb = QCheckBox(f"{mode} · set up" if configured else mode)
                 mode_source = "Steam" if is_steam else "Non-Steam" if is_own else "Not found"
-                cb.setAccessibleName(f"{gd['base']} · {mode} · {mode_source}")
-                cb.setToolTip(cb.accessibleName())
+                if configured:
+                    cb.setAccessibleName(f"{gd['base']} · {mode} · Already set up")
+                    cb.setToolTip("Already set up. Use Game Options → Reinstall Game "
+                                  "to set this mode up again.")
+                else:
+                    cb.setAccessibleName(f"{gd['base']} · {mode} · {mode_source}")
+                    cb.setToolTip(cb.accessibleName())
                 cb.setFont(font(10))
-                cb.setChecked(installed and self._choices.get(
-                    key, not cfg.is_game_setup_for_source(key, source)))
-                cb.setEnabled(installed)
-                if installed:
+                if configured:
+                    # The theme does not tint disabled controls, so say it in colour too.
+                    cb.setStyleSheet(f"QCheckBox{{color:{C_DIM};}}")
+                cb.setChecked(installed and not configured and self._choices.get(key, True))
+                cb.setEnabled(installed and not configured)
+                if installed and not configured:
                     cb.toggled.connect(lambda checked, k=key: self._choices.__setitem__(k, checked))
                 modes.addWidget(cb)
                 self._checks[key] = (cb, gd, source)
@@ -541,6 +553,10 @@ class SetupScreen(QWidget):
         own_selected = {}
         for key, (cb, gd, source) in self._checks.items():
             if not cb.isChecked(): continue
+            # Belt and braces: a configured game must never reach the installer
+            # from this screen, even if a stale tick survived a rebuild.
+            if cfg.is_game_setup_for_source(key, source):
+                continue
             if source == "own" and key in self.own_installed:
                 own_selected[key] = self.own_installed[key]
             elif key in self.steam_installed:

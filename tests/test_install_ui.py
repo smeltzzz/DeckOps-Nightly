@@ -25,6 +25,7 @@ except ImportError:
 class Settings:
     def __init__(self):
         self.completed = []
+        self.setup_for_source = set()
 
     def is_lcd(self):
         return False
@@ -36,7 +37,7 @@ class Settings:
         self.completed.append(root)
 
     def is_game_setup_for_source(self, key, source):
-        return False
+        return (key, source) in self.setup_for_source
 
     def get_offline_mode(self):
         return False
@@ -111,6 +112,57 @@ class InstallUITests(unittest.TestCase):
         self.assertEqual(self.setup._checks["t4sp"][0].text(), "Solo / Zombies")
         self.assertFalse(self.setup._checks["t6mp"][0].isEnabled())
         self.assertIn("Black Ops II · Multiplayer", self.setup._checks["t6mp"][0].accessibleName())
+
+    def test_already_configured_modes_are_shown_but_not_selectable(self):
+        self.settings.setup_for_source.add(("t4mp", "steam"))
+        self.setup.steam_installed = {
+            "t4mp": self.game("World at War - Multiplayer"),
+            "t4sp": self.game("World at War"),
+        }
+        self.setup._build()
+        mp = self.setup._checks["t4mp"][0]
+        self.assertFalse(mp.isEnabled())
+        self.assertFalse(mp.isChecked())
+        self.assertIn("set up", mp.text())
+        self.assertIn("Already set up", mp.accessibleName())
+        # The tunable mode next to it still works, and Select All skips the
+        # configured one instead of quietly re-queuing it.
+        sp = self.setup._checks["t4sp"][0]
+        self.assertTrue(sp.isEnabled())
+        self.setup._set_all(True)
+        self.assertTrue(sp.isChecked())
+        self.assertFalse(mp.isChecked())
+        self.setup._set_all(False)
+        self.assertFalse(sp.isChecked())
+
+    def test_configured_only_selection_never_reaches_the_installer(self):
+        self.settings.setup_for_source.add(("t4mp", "steam"))
+        self.setup.steam_installed = {"t4mp": self.game("World at War - Multiplayer")}
+        self.setup._build()
+        mp = self.setup._checks["t4mp"][0]
+        # Even a stale forced tick cannot start a second setup of a configured game.
+        mp.setChecked(True)
+        with patch.object(self.setup, "_preflight_ok") as preflight:
+            self.setup._go_install()
+        preflight.assert_not_called()
+        self.assertIn("Select at least one game", self.setup.warning.text())
+        self.assertIs(self.stack.currentWidget(), self.setup)
+        self.assertIsNone(self.install.steam_selected)
+
+    def test_configured_game_does_not_block_setting_up_a_fresh_one(self):
+        self.settings.setup_for_source.add(("t4mp", "steam"))
+        self.setup.steam_installed = {
+            "t4mp": self.game("World at War - Multiplayer"),
+            "t4sp": self.game("World at War"),
+        }
+        self.setup._build()
+        with patch.object(self.setup, "_preflight_ok", return_value=True), \
+             patch.object(self.setup, "_review_install", return_value=True), \
+             patch.object(ui_install.QTimer, "singleShot"), \
+             patch.object(ui_install.inhibit, "start"):
+            self.setup._go_install()
+        self.assertEqual([k for k, _, _ in self.install.steam_selected], ["t4sp"])
+        self.assertIs(self.stack.currentWidget(), self.install)
 
     def test_warm_selection_and_install_status_styles(self):
         self.setup.steam_installed = {"cod4mp": self.game("CoD4 - Multiplayer")}

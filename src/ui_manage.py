@@ -457,17 +457,12 @@ class ManagementScreen(QWidget):
         add_btn.clicked.connect(self._add_games)
         self._game_update_btn = _btn("Update Games", C_DARK_BTN, size=9, h=38)
         self._game_update_btn.clicked.connect(self._update_all_games)
-        mods_btn = _btn("Mods", C_DARK_BTN, size=9, h=38)
-        mods_btn.setAccessibleName("Manage manifest mods")
-        mods_btn.clicked.connect(lambda: go_to(self.stack, "ManifestModsScreen"))
         self._deckops_update_btn = _btn("DeckOps Update", C_DARK_BTN, size=9, h=38)
         self._deckops_update_btn.clicked.connect(self._check_deckops_update)
-        guide_btn = _btn("Guide", C_DARK_BTN, size=9, h=38)
-        guide_btn.clicked.connect(self._open_guide)
         cfg_btn = _btn("Settings", C_DARK_BTN, size=9, h=38)
         cfg_btn.clicked.connect(lambda: go_to(self.stack, "ConfigureScreen"))
-        for button in (add_btn, self._game_update_btn, mods_btn,
-                       self._deckops_update_btn, guide_btn, cfg_btn):
+        for button in (add_btn, self._game_update_btn,
+                       self._deckops_update_btn, cfg_btn):
             button.setStyleSheet(button.styleSheet().replace("padding:0 18px;", "padding:0 4px;"))
             button.setMinimumWidth(0)
             actions.addWidget(button, 1)
@@ -492,10 +487,6 @@ class ManagementScreen(QWidget):
         self._status = _lbl("", 12, C_DIM)
         self._status.setContentsMargins(16,4,16,4)
         lay.addWidget(self._status)
-
-    def _open_guide(self):
-        get_screen(self.stack, "SetupCompleteScreen")._from_guide = True
-        go_to(self.stack, "SetupCompleteScreen")
 
     def _add_games(self):
         """Open game selection directly, including its Choose Folder action."""
@@ -1145,7 +1136,6 @@ class ManagementScreen(QWidget):
 class SetupCompleteScreen(QWidget):
     def __init__(self, stack):
         super().__init__(); self.stack = stack; self.screen_name = "SetupCompleteScreen"
-        self._from_guide = False
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         hdr, hl = _header_bar()
         hl.addWidget(_lbl("FIELD GUIDE", 11, C_IW, bold=True, wrap=False))
@@ -1285,13 +1275,11 @@ class SetupCompleteScreen(QWidget):
         super().showEvent(e)
         if e.spontaneous():     # window restored, not a screen change
             return
-        self._heading.setText("HOW TO PLAY" if self._from_guide else "SETUP COMPLETE")
+        self._heading.setText("SETUP COMPLETE")
         self._intro.setText(
-            "How to launch your games and handle the first run. Scroll for device-specific notes."
-            if self._from_guide else
             "DeckOps set up controller layouts, GE-Proton and display settings. "
             "Open Steam or return to Game Mode to play.")
-        self._continue_btn.setText("Back to My Games" if self._from_guide else "Continue to My Games")
+        self._continue_btn.setText("Continue to My Games")
         is_lcd = cfg.is_lcd()
         self._lcd_div.setVisible(is_lcd)
         self._lcd_hdr.setVisible(is_lcd)
@@ -1355,7 +1343,6 @@ class SetupCompleteScreen(QWidget):
         self._restore_status.setVisible(False)
 
     def _go_management(self):
-        self._from_guide = False
         go_to(self.stack, "ManagementScreen")
 
 
