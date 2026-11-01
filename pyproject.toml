@@ -1,0 +1,24 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["assets", "logs"]
+
+[tool.ruff.lint]
+# Correctness-focused only: syntax errors, undefined/unused names, likely bugs.
+select = ["E9", "F", "B"]
+ignore = [
+    # qt.py star-imports PyQt on purpose, so undefined-name detection is blind.
+    "F403",
+    "F405",
+    # Closures here are called inside the loop iteration that defines them.
+    "B023",
+    # Style-only bugbear rules.
+    "B007",
+    "B008",
+    "B904",
+    "B905",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Names re-exported for other modules and tests.
+"src/ui_constants.py" = ["F401"]
