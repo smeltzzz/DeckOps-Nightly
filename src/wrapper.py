@@ -15,16 +15,45 @@ _log = get_logger(__name__)
 # precisely instead of regex-sweeping entire files.
 
 
+def _quarantine_ledger():
+    """Move an unusable ledger aside so the next write doesn't destroy it
+    (it holds the records the uninstaller needs to reverse earlier edits)."""
+    try:
+        import time
+        os.replace(LEDGER_PATH, f"{LEDGER_PATH}.corrupt-{int(time.time())}")
+    except OSError:
+        _log.debug("VDF ledger quarantine failed", exc_info=True)
+
+
 def _read_ledger() -> dict:
-    """Read the VDF edit ledger, returning empty dict if missing/corrupt."""
+    """Read the VDF edit ledger, returning empty dict if missing/corrupt.
+    A corrupt ledger (bad JSON, or JSON that isn't an object) is renamed to
+    <ledger>.corrupt-<time> instead of being overwritten by the next write."""
     if not os.path.exists(LEDGER_PATH):
         return {}
     try:
         with open(LEDGER_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
+            data = json.load(f)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        _log.warning("VDF ledger is corrupt; keeping a copy and starting fresh", exc_info=True)
+        _quarantine_ledger()
+        return {}
+    except OSError:
         _log.debug("VDF ledger read failed, starting fresh", exc_info=True)
         return {}
+    if not isinstance(data, dict):
+        _log.warning("VDF ledger is not a JSON object; keeping a copy and starting fresh")
+        _quarantine_ledger()
+        return {}
+    return data
+
+
+def _ledger_block(parent: dict, key: str) -> dict:
+    """parent[key] as a dict, replacing a hand-edited non-dict value."""
+    block = parent.get(key)
+    if not isinstance(block, dict):
+        block = parent[key] = {}
+    return block
 
 
 def _write_ledger(data: dict):
@@ -39,9 +68,9 @@ def _write_ledger(data: dict):
 def _record_localconfig(uid: str, appid: str, key: str, value: str):
     """Record a localconfig.vdf edit in the ledger."""
     ledger = _read_ledger()
-    lc = ledger.setdefault("localconfig", {})
-    uid_block = lc.setdefault(uid, {})
-    app_block = uid_block.setdefault(appid, {})
+    lc = _ledger_block(ledger, "localconfig")
+    uid_block = _ledger_block(lc, uid)
+    app_block = _ledger_block(uid_block, appid)
     app_block[key] = value
     _write_ledger(ledger)
 
@@ -49,8 +78,8 @@ def _record_localconfig(uid: str, appid: str, key: str, value: str):
 def _record_config_vdf(appid: str, key: str, value: str):
     """Record a config.vdf edit in the ledger."""
     ledger = _read_ledger()
-    cv = ledger.setdefault("config_vdf", {})
-    section = cv.setdefault(key, {})
+    cv = _ledger_block(ledger, "config_vdf")
+    section = _ledger_block(cv, key)
     section[appid] = value
     _write_ledger(ledger)
 
@@ -58,8 +87,8 @@ def _record_config_vdf(appid: str, key: str, value: str):
 def _remove_config_vdf(appid: str, key: str):
     """Remove a config.vdf entry from the ledger (for clear operations)."""
     ledger = _read_ledger()
-    cv = ledger.get("config_vdf", {})
-    section = cv.get(key, {})
+    cv = _ledger_block(ledger, "config_vdf")
+    section = _ledger_block(cv, key)
     section.pop(appid, None)
     if not section:
         cv.pop(key, None)
@@ -69,8 +98,8 @@ def _remove_config_vdf(appid: str, key: str):
 def _record_configset(configset_filename: str, key: str, template_name: str):
     """Record a configset VDF edit in the ledger."""
     ledger = _read_ledger()
-    cs = ledger.setdefault("configsets", {})
-    file_block = cs.setdefault(configset_filename, {})
+    cs = _ledger_block(ledger, "configsets")
+    file_block = _ledger_block(cs, configset_filename)
     file_block[key] = template_name
     _write_ledger(ledger)
 
@@ -163,9 +192,16 @@ def _write_and_validate_vdf(path: str, data: str, encoding: str = "utf-8",
     if not _vdf_balanced(data):
         _log.error("VDF edit for %s rejected: braces or quotes don't balance; file left unchanged", path)
         return False
-    _keep_original(path)
-    _backup_file(path)
-    _atomic_write(path, data.encode(encoding, errors or "strict"))
+    try:
+        _keep_original(path)
+        _backup_file(path)
+        _atomic_write(path, data.encode(encoding, errors or "strict"))
+    except OSError as ex:
+        # A read-only or full disk for one user's file must not abort the
+        # loop over the remaining users/games; callers treat False as "not
+        # written" and skip the ledger record.
+        _log.error("VDF write for %s failed: %s", path, ex)
+        return False
     return True
 
 

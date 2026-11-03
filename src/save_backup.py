@@ -76,6 +76,13 @@ SAVE_GROUPS = {
         "type": "install_dir",
         "subdir": "players2",
     },
+    "t6sp": {
+        # T6SP-Mod keeps the profile (user_sp.cgp, hardware.chp) and saves in
+        # the stock BO2 install's players/, not in a Plutonium prefix
+        "keys": ["t6sp"],
+        "type": "install_dir",
+        "subdir": "players",
+    },
     "t4": {
         "keys": ["t4sp", "t4mp"],
         "type": "plutonium_prefix",

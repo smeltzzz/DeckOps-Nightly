@@ -61,7 +61,12 @@ def parse_settings(args):
         name, _, value = a.partition("=")
         if name not in DVAR_TYPES or not value:
             raise ValueError(f"unknown setting {a!r}")
-        out[name] = float(value) if DVAR_TYPES[name][0] == "f" else int(value)
+        kind, lo, hi = DVAR_TYPES[name]
+        out[name] = float(value) if kind == "f" else int(value)
+        # The same range a real record is recognised by: holding a value outside
+        # it (cg_fov=500) would be rejected by the game or break the view.
+        if not lo <= out[name] <= hi:
+            raise ValueError(f"{a!r} is outside {lo}..{hi}")
     return out
 
 
@@ -217,10 +222,14 @@ def find_dvars(mem, maps, exe_name, names, log=_log.info, heap=True):
 
 # ── the watch loop ───────────────────────────────────────────────────────────
 
-def hold(mem, addr, name, value):
+def hold(mem, addr, name, value, ident=None):
     """Write value if the dvar has another value. Returns True if it wrote, False if it
-    was already right, None if unreadable."""
+    was already right, None if unreadable. ident: the record's name pointer as it was
+    when found; a record that no longer starts with it (freed and reused heap memory)
+    is reported unreadable instead of being written to."""
     kind = DVAR_TYPES[name][0]
+    if ident is not None and mem.read(addr - VALUE_OFFSET, len(ident)) != ident:
+        return None
     raw = mem.read(addr, 4)
     if len(raw) != 4:
         return None
@@ -243,6 +252,7 @@ def search_plan(tries):
 def watch(root_pid, settings, exe, stop, interval=0.2):
     pid = mem = None
     addrs = {}                       # name -> address, for the dvars found
+    idents = {}                      # name -> the record's name pointer when found
     last_find = tries = 0
     told = set()
 
@@ -265,6 +275,7 @@ def watch(root_pid, settings, exe, stop, interval=0.2):
                     mem.close()
                 pid = mem = None
                 addrs = {}
+                idents = {}
                 last_find = tries = 0
                 continue
             missing = [n for n in settings if n not in addrs]
@@ -276,25 +287,34 @@ def watch(root_pid, settings, exe, stop, interval=0.2):
                     got = find_dvars(mem, read_maps(pid), exe, missing, heap=heap)
                     for name, addr in got.items():
                         addrs[name] = addr
+                        ident = mem.read(addr - VALUE_OFFSET, 8)
+                        if len(ident) == 8:
+                            idents[name] = ident
                         _log.info("fovwatch: %s at %#x, holding %s", name, addr, settings[name])
                     if tries == FAST_TRIES and len(addrs) < len(settings):
                         _log.info("fovwatch: %s not found yet, now checking once a minute",
                                   [n for n in settings if n not in addrs])
             for name in list(addrs):
-                if hold(mem, addrs[name], name, settings[name]) is None:
+                if hold(mem, addrs[name], name, settings[name], idents.get(name)) is None:
                     once(f"lost:{name}", f"fovwatch: {name} unreadable, looking again")
                     del addrs[name]
+                    idents.pop(name, None)
         except PermissionError as ex:
             try:
                 scope = open("/proc/sys/kernel/yama/ptrace_scope").read().strip()
             except OSError:
                 scope = "?"
             once("perm", f"fovwatch: no access to the game's memory ({ex}); ptrace_scope={scope}")
+            if mem:
+                mem.close()                  # the fd was leaked on every retry
             stop.wait(5.0)
             pid = mem = None
             addrs = {}
+            idents = {}
         except Exception as ex:
             once(f"err:{type(ex).__name__}", f"fovwatch: {type(ex).__name__}: {ex}")
+            if mem is None:
+                pid = None        # ProcMem() failed: find the process again, not search with no memory
             stop.wait(2.0)
         stop.wait(interval)
 

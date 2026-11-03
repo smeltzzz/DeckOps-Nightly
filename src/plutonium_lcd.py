@@ -1416,8 +1416,10 @@ def _set_heroic_steam_launch_options(game_key: str, steam_root: str,
         # correct GE-Proton version.
         try:
             clear_compat_tool([appid])
-            set_compat_tool([appid], ge_proton_version)
-            prog(f"  Compat tool set to {ge_proton_version} for appid {appid}")
+            if set_compat_tool([appid], ge_proton_version) is False:
+                prog(f"  Could not set compat tool for appid {appid}: config.vdf was not changed")
+            else:
+                prog(f"  Compat tool set to {ge_proton_version} for appid {appid}")
         except Exception as ex:
             prog(f"  Could not set compat tool for appid {appid}: {ex}")
     except Exception as ex:

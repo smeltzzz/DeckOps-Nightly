@@ -129,6 +129,15 @@ EXTRACTED=$(find "$TMPDIR_EXTRACT" -maxdepth 1 -mindepth 1 -type d | head -1)
 
 mkdir -p "$INSTALL_DIR"
 
+# Hold the update lock while files are copied over the install. launcher.sh lets go of
+# it before running this script, so without it a second launcher or a running DeckOps
+# could recover or apply an update into a half-copied tree. Released (fd 8 closed)
+# before DeckOps is started at the end. No flock: same as launcher.sh, carry on unlocked.
+if command -v flock >/dev/null 2>&1; then
+    exec 8> "$INSTALL_DIR/.deckops_update.lock" || die "Could not open the DeckOps update lock."
+    flock -n 8 || die "DeckOps is updating in another window. Wait for it to finish, then try again."
+fi
+
 # A repair over an existing install: first undo an interrupted update so the
 # recorded version matches the files on disk, then remember that version to
 # find files the new one no longer ships.
@@ -143,6 +152,13 @@ cp -r "$EXTRACTED"/. "$INSTALL_DIR"/ || die "Could not copy DeckOps into $INSTAL
 # The complete copy supersedes any leftover update state. A stale journal
 # would roll this fresh install back to old files on the next launch.
 rm -rf "$INSTALL_DIR/.update"
+
+# cp just overwrote VERSION with the (older) one tracked in the archive. Record the
+# version of the files now on disk right away, whole, so a failure or Ctrl-C in the
+# venv/pip steps below never leaves a VERSION older than the files.
+if [ -n "$INITIAL_SHA" ]; then
+    echo "$INITIAL_SHA" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
+fi
 
 if [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ ]] && [ "$PREVIOUS_SHA" != "$INITIAL_SHA" ] \
    && [ -f "$EXTRACTED/src/update_manifest.py" ]; then
@@ -318,11 +334,17 @@ fi
 # ── step 8: record the SHA of the archive actually installed ─────────────────
 info "Recording current version..."
 if [ -n "$INITIAL_SHA" ]; then
-    echo "$INITIAL_SHA" > "$INSTALL_DIR/VERSION"
+    echo "$INITIAL_SHA" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
     success "Version recorded."
 else
-    echo "0" > "$INSTALL_DIR/VERSION"
+    echo "0" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
     warn "Version unknown — DeckOps will refresh its files on the next update."
+fi
+
+# DeckOps checks the update lock itself when it starts: let go of it first
+if command -v flock >/dev/null 2>&1; then
+    flock -u 8 2>/dev/null
+    exec 8>&-
 fi
 
 # ── step 9: done ─────────────────────────────────────────────────────────────

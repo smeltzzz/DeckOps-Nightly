@@ -89,38 +89,54 @@ def load() -> dict:
     global _cache, _cache_key
 
     with _lock:
-        # Check if file exists
-        try:
-            st = os.stat(CONFIG_PATH)
-        except OSError:
-            # File doesn't exist or can't be stat'd — return defaults
-            return copy.deepcopy(DEFAULTS)
-        current_key = (st.st_mtime_ns, st.st_size)
+        for attempt in (0, 1):
+            # Check if file exists
+            try:
+                st = os.stat(CONFIG_PATH)
+            except OSError:
+                # File doesn't exist or can't be stat'd — return defaults
+                return copy.deepcopy(DEFAULTS)
+            current_key = (st.st_mtime_ns, st.st_size)
 
-        # Return cached copy if file hasn't changed
-        if _cache is not None and current_key == _cache_key:
+            # Return cached copy if file hasn't changed
+            if _cache is not None and current_key == _cache_key:
+                return copy.deepcopy(_cache)
+
+            # Cache miss or stale — re-read from disk
+            try:
+                with open(CONFIG_PATH, "r") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("config root is not an object")
+            except ValueError:
+                # Another process (prelaunch, the UI) may have replaced the file
+                # between our stat and read: the bad text we saw is gone, so look
+                # at the new file instead of moving a good one aside.
+                try:
+                    st2 = os.stat(CONFIG_PATH)
+                except OSError:
+                    return copy.deepcopy(DEFAULTS)
+                if attempt == 0 and (st2.st_mtime_ns, st2.st_size) != current_key:
+                    continue
+                # Unparseable (truncated by a power loss, bad hand edit). Move it
+                # aside so the next save() can't overwrite the user's setup.
+                bad = f"{CONFIG_PATH}.corrupt-{datetime.now():%Y%m%d-%H%M%S}"
+                try: os.replace(CONFIG_PATH, bad); _log.warning("deckops.json unreadable, moved to %s", bad)
+                except OSError as ex: _log.warning("deckops.json unreadable and could not be moved aside: %s", ex)
+                return copy.deepcopy(DEFAULTS)
+            except IOError:
+                return copy.deepcopy(DEFAULTS)
+            merged = copy.deepcopy(DEFAULTS)
+            merged.update(data)
+            # A hand edit like {"setup_games": null} would make every setter and
+            # getter that indexes into it raise: keep the default for those keys.
+            for key, default in DEFAULTS.items():
+                if isinstance(default, dict) and not isinstance(merged[key], dict):
+                    _log.warning("deckops.json: %r is not an object, using the default", key)
+                    merged[key] = copy.deepcopy(default)
+            _cache = merged
+            _cache_key = current_key
             return copy.deepcopy(_cache)
-
-        # Cache miss or stale — re-read from disk
-        try:
-            with open(CONFIG_PATH, "r") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("config root is not an object")
-        except ValueError:
-            # Unparseable (truncated by a power loss, bad hand edit). Move it
-            # aside so the next save() can't overwrite the user's setup.
-            bad = f"{CONFIG_PATH}.corrupt-{datetime.now():%Y%m%d-%H%M%S}"
-            try: os.replace(CONFIG_PATH, bad); _log.warning("deckops.json unreadable, moved to %s", bad)
-            except OSError as ex: _log.warning("deckops.json unreadable and could not be moved aside: %s", ex)
-            return copy.deepcopy(DEFAULTS)
-        except IOError:
-            return copy.deepcopy(DEFAULTS)
-        merged = copy.deepcopy(DEFAULTS)
-        merged.update(data)
-        _cache = merged
-        _cache_key = current_key
-        return copy.deepcopy(_cache)
 
 
 def unnoticed_corrupt_files() -> list:

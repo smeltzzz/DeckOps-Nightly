@@ -48,8 +48,14 @@ def _ss_inhibit(why):
         iface = _ss_iface()
         if iface is None:
             return None
-        args = iface.call("Inhibit", "DeckOps", why).arguments()
-        return args[0] if args else None
+        reply = iface.call("Inhibit", "DeckOps", why)
+        # An error reply (service present but refusing) carries its message in
+        # arguments(): that string must not be kept as a cookie and sent back to UnInhibit.
+        from qt import QDBusMessage
+        if reply.type() != QDBusMessage.MessageType.ReplyMessage:
+            return None
+        args = reply.arguments()
+        return args[0] if args and isinstance(args[0], int) else None
     except Exception as ex:
         _log.debug("screensaver inhibit unavailable: %s", ex)
         return None

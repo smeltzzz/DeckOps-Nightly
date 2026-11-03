@@ -22,6 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import depot_downgrade as depot
 import update_manifest
 
+# These tests run fake `#!/bin/sh` programs or check POSIX file modes. Windows cannot
+# spawn such a script (WinError 193) and has no 0o644, so there they failed or, worse,
+# passed without exercising anything. Run them on Linux (see AGENTS.md).
+_POSIX_ONLY = unittest.skipIf(os.name == "nt", "needs POSIX shell scripts and file modes")
+
 _QAPP = []
 
 
@@ -409,6 +414,7 @@ class PrelaunchHelperFallbackTests(unittest.TestCase):
                 marker.unlink(missing_ok=True)
 
 
+@_POSIX_ONLY
 class PrefixFinalizeTests(unittest.TestCase):
     """`proton run cmd /c exit` is the step that turns a bare directory into a
     Wine prefix. Its exit status used to be ignored, so a prefix that was never
@@ -1038,6 +1044,7 @@ class AppInfoWriteTests(unittest.TestCase):
                                     [{"executable": "deckops_x.exe",
                                       "description": description}], record=False)
 
+    @_POSIX_ONLY
     def test_the_edit_keeps_the_permissions_steam_set(self):
         self.assertTrue(self._add("first"))
         self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o644)
@@ -1146,6 +1153,7 @@ class FovWatchSpawnTests(unittest.TestCase):
         rc = fovwatch.main(["iw4sp.exe", "cg_fov=90", "--", "/nonexistent/deckops-game"])
         self.assertEqual(rc, 127)
 
+    @_POSIX_ONLY
     def test_prelaunch_starts_the_game_when_the_helper_reports_127(self):
         """End to end: fovwatch cannot spawn it, prelaunch.sh runs it once."""
         if not shutil.which("bash"):
@@ -1360,6 +1368,7 @@ class DepotMergeSafetyTests(unittest.TestCase):
         self.assertIs(depot.is_downgrade_needed("iw5", str(install)), True)
 
 
+@_POSIX_ONLY
 class DepotQrRetryTests(unittest.TestCase):
     """run_depot_download_qr must always come back.
 

@@ -18,8 +18,19 @@ try:
     # failed recovery, and should get the dialog, not a bare traceback.
     from update_manifest import recover_update, update_lock
     _install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with update_lock(_install_dir):
-        _rolled_back = recover_update(_install_dir)
+    try:
+        with update_lock(_install_dir):
+            _rolled_back = recover_update(_install_dir)
+    except BlockingIOError:
+        raise
+    except OSError:
+        # The lock file itself can't be opened (read-only or full install dir). That
+        # only matters when an interrupted update is waiting to be restored: without a
+        # journal there is nothing to recover, and the "could not restore" dialog was
+        # wrong. recover_update only fails with a journal present, so this re-raises then.
+        if os.path.exists(os.path.join(_install_dir, ".update", "transaction.json")):
+            raise
+        _rolled_back = False
 except Exception as ex:
     print(f"DeckOps could not open safely: {ex}", file=sys.stderr)
     import shutil, subprocess

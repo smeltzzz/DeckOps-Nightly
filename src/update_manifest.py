@@ -68,15 +68,20 @@ def upgrade_desktop_entries(install_dir, home=None):
         if old not in lines:
             continue
         lines = [new if line == old else line for line in lines]
-        mode = stat.S_IMODE(os.stat(path).st_mode)
-        fd, tmp = tempfile.mkstemp(prefix=".deckops-desktop-", dir=os.path.dirname(path))
+        tmp = None
         try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+            fd, tmp = tempfile.mkstemp(prefix=".deckops-desktop-", dir=os.path.dirname(path))
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write("\n".join(lines))
             os.chmod(tmp, mode)
             os.replace(tmp, path)
+        except OSError:
+            # One unwritable icon (read-only home, a root-owned file) must not
+            # stop the other entry from being upgraded
+            continue
         finally:
-            if os.path.exists(tmp):
+            if tmp and os.path.exists(tmp):
                 os.remove(tmp)
         changed.append(path)
     return changed

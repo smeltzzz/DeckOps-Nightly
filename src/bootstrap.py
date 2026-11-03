@@ -23,9 +23,13 @@ FONTS_DIR    = os.path.join(PROJECT_ROOT, "assets", "fonts")
 HEADERS_DIR  = os.path.join(PROJECT_ROOT, "assets", "images", "headers")
 MUSIC_DIR    = os.path.join(PROJECT_ROOT, "assets", "music")
 
-os.makedirs(FONTS_DIR,   exist_ok=True)
-os.makedirs(HEADERS_DIR, exist_ok=True)
-os.makedirs(MUSIC_DIR,   exist_ok=True)
+for _d in (FONTS_DIR, HEADERS_DIR, MUSIC_DIR):
+    try:
+        os.makedirs(_d, exist_ok=True)
+    except OSError:
+        # An unwritable install dir must not make importing this module (before the
+        # window exists) a crash: downloads below report their own failures
+        pass
 
 # ── font ──────────────────────────────────────────────────────────────────────
 # Russo One is shipped with the repo in assets/fonts/ — no download needed.

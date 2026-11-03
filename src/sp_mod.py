@@ -81,14 +81,29 @@ def install_sp_mod(game_key: str, install_dir: str, on_progress=None,
             on_progress(pct, msg)
 
     digests = cdn_digests() if files else {}
-    for i, (cdn_path, local_path) in enumerate(files):
-        dst = os.path.join(install_dir, local_path)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        name = os.path.basename(local_path)
-        download(f"{_CDN_BASE}/{cdn_path}", dst,
-                 lambda p, m, i=i: prog(int((i + p / 100) * 100 / steps), m), name,
-                 digest=digests.get(cdn_path))
-        _log.info("CDN: placed %s", local_path)
+    if files:
+        # Download the whole AlterWare set off to the side, then swap it in as one
+        # (with rollback), like IW-Pad: a failure on file N used to leave the first
+        # N-1 replaced, e.g. a new iw4x-sp.exe beside the old data/iw4sp.exe it
+        # only accepts in one build.
+        for old in glob.glob(os.path.join(install_dir, ".deckops_alterware_*")):
+            shutil.rmtree(old, ignore_errors=True)
+        staging = tempfile.mkdtemp(prefix=".deckops_alterware_", dir=install_dir)
+        try:
+            for i, (cdn_path, local_path) in enumerate(files):
+                dst = os.path.join(staging, local_path)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                name = os.path.basename(local_path)
+                if digests and cdn_path not in digests:
+                    _log.warning("AlterWare files.json has no digest for %s, downloading unverified", cdn_path)
+                download(f"{_CDN_BASE}/{cdn_path}", dst,
+                         lambda p, m, i=i: prog(int((i + p / 100) * 100 / steps), m), name,
+                         digest=digests.get(cdn_path))
+            commit_staged_files(install_dir, staging, [local for _, local in files])
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        for _, local_path in files:
+            _log.info("CDN: placed %s", local_path)
 
     _fetch_iw_pad(game_key, install_dir, "x86" if own else "x64",
                   lambda p, m: prog(int((len(files) + p / 100) * 100 / steps), m))

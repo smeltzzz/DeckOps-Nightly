@@ -1152,6 +1152,15 @@ class _BaseInstallScreen(QWidget):
             if r["key"] == key:
                 r["status"] = status; r["reason"] = reason; return
 
+    def _fail_ok(self, keys, reason):
+        """A later step (shortcuts, compat tool) failed for games that earlier
+        phases marked ok: they can't be launched as set up, so don't report
+        them ready. Skipped/failed rows keep their own reason."""
+        for k in keys:
+            for r in self._results:
+                if r["key"] == k and r["status"] == "ok":
+                    r["status"] = "failed"; r["reason"] = reason
+
     def _retryable(self):
         return [r for r in self._results if r["status"] in ("failed", "pending", "skipped")]
 
@@ -1580,7 +1589,11 @@ class _BaseInstallScreen(QWidget):
                 proton_path=proton,
                 steam_root=self.steam_root,
             )
-            self._s.log.emit(f"✓  Prefix dependencies: {done}/{len(dep_targets)} ready")
+            if done < len(dep_targets):
+                self._s.log.emit(f"⚠  Prefix dependencies: only {done}/{len(dep_targets)} ready; "
+                                 f"games on the other prefixes may not start until Set Up is run again")
+            else:
+                self._s.log.emit(f"✓  Prefix dependencies: {done}/{len(dep_targets)} ready")
         self._s.pulse_stop.emit()
         _log_to_file("[BREADCRUMB] prefix deps done")
 
@@ -2005,6 +2018,7 @@ class _BaseInstallScreen(QWidget):
         # needed below. Launch options are only cleared for the Steam games
         # in this run: a per-game Set Up must not wipe the options of games
         # it doesn't reinstall (IW-Pad, IW3SP).
+        run_appids = set()
         try:
             from wrapper import clear_launch_options, clear_compat_tool
             from detect_games import GAMES
@@ -2031,11 +2045,19 @@ class _BaseInstallScreen(QWidget):
         # Only write for Steam appids if the user actually has Steam games
         # selected; otherwise this may trigger Steam to re-download games.
         if ge_version and steam_sel:
+            steam_keys_run = [k for k, _, _ in steam_sel]
             try:
-                set_compat_tool(run_appids, ge_version, steam_root=self.steam_root)
-                self._s.log.emit(f"✓  {ge_version} set for Steam game appids")
+                if set_compat_tool(run_appids, ge_version, steam_root=self.steam_root) is False:
+                    # config.vdf couldn't be parsed/written: no Proton mapping,
+                    # so these games would launch as bare Windows exes.
+                    self._s.log.emit("✗  GE-Proton could not be set for Steam game appids "
+                                     "(Steam's config.vdf was not changed)")
+                    self._fail_ok(steam_keys_run, "GE-Proton compat tool not set")
+                else:
+                    self._s.log.emit(f"✓  {ge_version} set for Steam game appids")
             except Exception as ex:
                 self._s.log.emit(f"  CompatToolMapping for Steam appids skipped: {ex}")
+                self._fail_ok(steam_keys_run, "GE-Proton compat tool not set")
 
         # Old GE-Protons DeckOps installed that nothing uses any more
         # (keeps this one and the one before it). Steam is closed here.
@@ -2267,7 +2289,8 @@ class _BaseInstallScreen(QWidget):
                     on_progress=lambda msg: self._s.log.emit(msg),
                 )
             except Exception as ex:
-                self._s.log.emit(f"  Own shortcuts failed: {ex}")
+                self._s.log.emit(f"✗  Own shortcuts failed: {ex}")
+                self._fail_ok(list(own_selected.keys()), "Steam shortcut not created")
 
         # --- Non-Steam shortcuts for Steam games
         steam_keys = [k for k, _, _ in steam_sel]
@@ -2296,7 +2319,8 @@ class _BaseInstallScreen(QWidget):
                     steam_root=self.steam_root,
                 )
             except Exception as ex:
-                self._s.log.emit(f"  Steam shortcuts skipped: {ex}")
+                self._s.log.emit(f"✗  Steam shortcuts failed: {ex}")
+                self._fail_ok(steam_keys + sc_extra, "Steam shortcut not created")
 
             # Set default launch option so Steam Deck skips the mode picker
             has_cod4_steam = any(KEY_CLIENT.get(k) in ("cod4r", "iw3sp")

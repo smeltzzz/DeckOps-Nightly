@@ -67,8 +67,12 @@ def redact_also(word: str):
 def redact(text: str) -> str:
     for pat, rep in _REDACT:
         text = pat.sub(rep, text)
-    if _secrets:
-        text = re.sub(r"\b(?:" + "|".join(_secrets) + r")\b", "***", text)
+    # A snapshot: redact_also() can add to the set from a worker thread, and
+    # joining the live set raised "Set changed size during iteration" inside the
+    # formatter (dropping the log line). Longest first so a word inside another wins.
+    secrets = sorted(list(_secrets), key=len, reverse=True)
+    if secrets:
+        text = re.sub(r"\b(?:" + "|".join(secrets) + r")\b", "***", text)
     return text
 
 
@@ -83,13 +87,17 @@ def _scrub_old_logs():
     if os.path.exists(marker):
         return
     for p in [_LOG_PATH] + [f"{_LOG_PATH}.{i}" for i in range(1, _BACKUP_COUNT + 1)]:
+        tmp = p + ".masking"
         try:
             with open(p, encoding="utf-8", errors="replace") as f:
                 text = f.read()
-            with open(p, "w", encoding="utf-8") as f:
+            # Temp file + rename: a crash mid-rewrite used to leave a cut-off log
+            with open(tmp, "w", encoding="utf-8") as f:
                 f.write(redact(text))
+            os.replace(tmp, p)
         except OSError:
-            pass
+            try: os.remove(tmp)
+            except OSError: pass
     try:
         open(marker, "w").close()
     except OSError:

@@ -79,28 +79,39 @@ def fetch_bootstrapper(dest: str, prog=lambda m: None, keep_existing: bool = Fal
     a valid exe already at dest is used instead (LCD keeps one in the Heroic
     prefix). Raises DownloadError when there is no valid exe.
     """
+    # Downloads land in a staging name and replace dest only once they are a
+    # real exe: an HTML error page (HTTP 200) used to overwrite a good
+    # plutonium.exe, and keep_existing then had nothing left to fall back to.
+    staging = dest + ".new"
+
+    def _discard():
+        for p in (staging, staging + ".part"):
+            try: os.remove(p)
+            except OSError: pass
+
+    _discard()
     try:
-        download(PLUT_BOOTSTRAPPER_URL, dest)
-        if is_windows_exe(dest):
+        download(PLUT_BOOTSTRAPPER_URL, staging)
+        if is_windows_exe(staging):
+            os.replace(staging, dest)
             return dest
         _log.warning("Plutonium CDN sent something that isn't plutonium.exe (%d bytes)",
-                     os.path.getsize(dest))
-        os.remove(dest)
+                     os.path.getsize(staging))
     except Exception as ex:
         _log.warning("Primary Plutonium download failed after 3 attempts: %s", ex)
     prog("Falling back to archive.org mirror...")
-    # Drop the primary's partial file or download() would resume the
+    # Drop the primary's file and partial or download() would resume the
     # mirror's copy on top of it.
-    try: os.remove(dest + ".part")
-    except OSError: pass
+    _discard()
     try:
-        download(_PLUT_ARCHIVE_FALLBACK_URL, dest, digest=_PLUT_ARCHIVE_DIGEST)
-        if not is_windows_exe(dest):
-            os.remove(dest)
+        download(_PLUT_ARCHIVE_FALLBACK_URL, staging, digest=_PLUT_ARCHIVE_DIGEST)
+        if not is_windows_exe(staging):
             raise IOError("archive.org copy is not a Windows executable")
+        os.replace(staging, dest)
         _log.info("Plutonium bootstrapper downloaded from archive.org fallback")
         return dest
     except Exception as ex2:
+        _discard()
         if keep_existing and is_windows_exe(dest):
             _log.warning("Plutonium downloads failed, using the existing plutonium.exe: %s", ex2)
             prog("Downloads failed -- using the plutonium.exe already there")
@@ -1441,8 +1452,8 @@ def setup_lan(game: dict, game_key: str, user_plut: str, source: str, prog):
         if mode == "t6mp" and os.path.isdir(leak) and not os.path.islink(leak):
             shutil.rmtree(leak)
         os.makedirs(os.path.join(LAN_ROOT, mode), exist_ok=True)
-        with open(os.path.join(LAN_ROOT, mode, "source.json"), "w") as f:
-            json.dump({"user_plut": user_plut}, f)
+        from steam_common import write_json
+        write_json(os.path.join(LAN_ROOT, mode, "source.json"), {"user_plut": user_plut})
         # Folders first, so every download lands in a real folder of ours
         refresh_lan(mode, prog)
         server, _ = lan_dirs(mode)
@@ -1473,17 +1484,21 @@ def _lan_prefixes(prog):
     """The offline game prefix and the Offline launcher's prefix (the server's), set up
     with GE-Proton's default prefix like a first install of a game prefix."""
     import config as _cfg
-    from ge_proton import ensure_prefix_deps
+    from ge_proton import ensure_prefix_deps, _prefix_ready
     from steam_common import default_steam_root
     from wrapper import get_proton_path
     # The resolved root, not the classic path: GE-Proton (and the prefix it
     # builds from) lives under the Steam that is actually installed.
     steam_root = default_steam_root()
     for p in (LAN_PREFIX, LAN_SERVER_PREFIX):
-        if not os.path.isdir(os.path.join(p, "pfx", "drive_c", "windows")):
+        # Wine's own files, not drive_c/windows: ensure_prefix_deps copies DLLs
+        # (creating drive_c/windows/system32) before Proton finalizes, so a
+        # failed or timed-out finalize used to look ready for good.
+        if not _prefix_ready(os.path.join(p, "pfx")):
             os.makedirs(p, exist_ok=True)
-            ensure_prefix_deps(_cfg.get_ge_proton_version(), p, prog,
-                               proton_path=get_proton_path(steam_root), steam_root=steam_root)
+            if not ensure_prefix_deps(_cfg.get_ge_proton_version(), p, prog,
+                                      proton_path=get_proton_path(steam_root), steam_root=steam_root):
+                raise RuntimeError(f"could not set up the offline prefix {os.path.basename(p)}")
 
 
 def lan_runtime() -> tuple:

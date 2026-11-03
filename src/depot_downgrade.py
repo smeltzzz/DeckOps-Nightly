@@ -609,7 +609,7 @@ def ensure_depotdownloader(on_progress=None) -> str:
         # Its releases carry no GitHub digest yet; download() checks one if they ever do
         dl_url, digest = github_asset("SteamRE/DepotDownloader", f"{_dd_arch}.zip")
     except Exception as ex:
-        raise RuntimeError(f"Failed to get DepotDownloader release: {ex}")
+        raise RuntimeError(f"Failed to get DepotDownloader release: {ex}") from ex
 
     prog("Downloading DepotDownloader...")
     download(dl_url, zip_path, label="DepotDownloader", digest=digest)
@@ -617,6 +617,10 @@ def ensure_depotdownloader(on_progress=None) -> str:
     prog("Extracting DepotDownloader...")
     with zipfile.ZipFile(zip_path, "r") as zf:
         _safe_extractall_zip(zf, DEPOTDOWNLOADER_DIR)
+    try:
+        os.remove(zip_path)             # the extracted copy is all that is used
+    except OSError:
+        pass
 
     # Check before chmod: a release that moves the binary into a subfolder used
     # to fail with a bare FileNotFoundError from chmod, so the message below
@@ -859,7 +863,9 @@ def run_depot_download_qr(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                # Not strict: one invalid UTF-8 byte in its output (a game or
+                # account name) raised mid-read and failed the whole download
+                encoding="utf-8", errors="replace",
                 bufsize=1,
                 cwd=DEPOTDOWNLOADER_DIR,
                 env=_depot_env(),

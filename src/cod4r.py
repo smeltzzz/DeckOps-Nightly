@@ -267,7 +267,7 @@ def _fetch_manifest(log, fetch_timeout: int, tries: int) -> dict:
 # -- public API ---------------------------------------------------------------
 
 def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
-               fetch_timeout: int = 30, tries: int = 3) -> int:
+               fetch_timeout: int = 30, tries: int = 3, before_swap=None) -> int:
     """
     Bring the CoD4R files in line with the signed manifest and return how
     many were replaced. Used by the install and by prelaunch.py.
@@ -277,6 +277,11 @@ def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
     timeout, the network dropping) leaves the previous set intact. The
     .new sits next to its target because the game folder and the prefix
     bin/ can be on different drives.
+
+    before_swap -- optional callable run once every download is staged and
+    before the first file is replaced. The install uses it to undo CoD4x
+    only when CoD4R is certain to arrive, so being offline never leaves
+    the player with neither client.
     """
     log = log or (lambda *a: None)
     prog = prog or (lambda *a: None)
@@ -284,25 +289,40 @@ def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
 
     base = m.get("base_url", _CDN).rstrip("/")
     files = _manifest_files(m, install_dir, compatdata_path)
-    todo = [(p, e) for p, e in files
-            if not (os.path.isfile(p) and _sha256(p) == e["sha256"].lower())]
+
+    def _pending():
+        return [(p, e) for p, e in files
+                if not (os.path.isfile(p) and _sha256(p) == e["sha256"].lower())]
+
+    def _stage(items):
+        total = sum(e["size"] for _, e in items) or 1
+        done = 0
+        for p, e in items:
+            new = p + ".new"
+            # Left by an earlier interrupted update and already complete.
+            if not (os.path.isfile(new) and _sha256(new) == e["sha256"].lower()):
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                _download(
+                    f"{base}/{e['path']}", new,
+                    on_progress=lambda pct, lbl, _d=done, _s=e["size"], _t=total:
+                        prog(int((_d + _s * pct / 100) / _t * 100), lbl),
+                    label=os.path.basename(p), timeout=120,
+                    digest=f"sha256:{e['sha256']}",
+                )
+            done += e["size"]
+
+    todo = _pending()
     log(f"  CoD4R client v{m['client']['version']}: "
         f"{len(files) - len(todo)} of {len(files)} files up to date")
-    total = sum(e["size"] for _, e in todo) or 1
-    done = 0
-    for p, e in todo:
-        new = p + ".new"
-        # Left by an earlier interrupted update and already complete.
-        if not (os.path.isfile(new) and _sha256(new) == e["sha256"].lower()):
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            _download(
-                f"{base}/{e['path']}", new,
-                on_progress=lambda pct, lbl, _d=done, _s=e["size"]:
-                    prog(int((_d + _s * pct / 100) / total * 100), lbl),
-                label=os.path.basename(p), timeout=120,
-                digest=f"sha256:{e['sha256']}",
-            )
-        done += e["size"]
+    _stage(todo)
+    if before_swap:
+        before_swap()
+        # Undoing CoD4x changes what is on disk: stage whatever it now leaves
+        # out of date too, so the swap below still installs the whole set.
+        staged = {p for p, _ in todo}
+        extra = [(p, e) for p, e in _pending() if p not in staged]
+        _stage(extra)
+        todo += extra
     # Swap the set in as a unit: each old file is set aside next to itself first, so a
     # failure part-way puts them all back instead of leaving a mix of builds
     # (iw3mp.exe from one release with mss32.dll from another).
@@ -373,13 +393,18 @@ def install_cod4r(game: dict, steam_root: str, proton_path: str,
     # installed, miles32.dll is the only copy of the stock mss32.dll, so
     # CoD4x is undone first; then the stock files are kept as .deckops_orig
     # so uninstalling, or switching to CoD4x, can put them back.
-    undo_cod4x(install_dir, log)
-    keep_stock_files(install_dir, log)
+    # Done as sync_files' before_swap step, i.e. only once the manifest is
+    # verified and every download is staged: offline or with the hosts down,
+    # CoD4x used to be removed first and CoD4R never arrived.
+    def _prepare_switch():
+        undo_cod4x(install_dir, log)
+        keep_stock_files(install_dir, log)
 
     # -- Steps 2-3: Fetch the manifest, download changed files ---------------
     prog(10, "Fetching CoD4R manifest...")
     sync_files(install_dir, compatdata_path, log,
-               lambda pct, lbl: prog(15 + int(pct * 0.6), lbl))
+               lambda pct, lbl: prog(15 + int(pct * 0.6), lbl),
+               before_swap=_prepare_switch)
 
     # -- Step 4: Verify CoD4R files ------------------------------------------
     prog(80, "Verifying installation...")

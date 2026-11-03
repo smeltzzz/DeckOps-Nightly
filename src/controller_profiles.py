@@ -149,6 +149,19 @@ def _write_layout(uid, appid, names=(), numbered=True):
             patch_configset(path, name, TEMPLATE)
 
 
+def _write_layout_safe(uid, appid, names=(), numbered=True, prog=None):
+    """_write_layout, but a disk/permission error for one account or game is
+    reported and skipped so the rest still get their layout. True if written."""
+    try:
+        _write_layout(uid, appid, names, numbered=numbered)
+        return True
+    except OSError as ex:
+        _log.warning("controller layout for %s (uid %s) not written: %s", appid, uid, ex)
+        if prog:
+            prog(f"  ⚠ Layout for {appid} (account {uid}) not written: {ex}")
+        return False
+
+
 def assign_controller_profiles(gyro_mode=None, on_progress=None):
     """Apply the one Deck layout to supported games, own copies and shortcuts."""
     prog = on_progress or (lambda msg: None)
@@ -163,16 +176,16 @@ def assign_controller_profiles(gyro_mode=None, on_progress=None):
         return
     for uid in uids:
         for appid, names in APPID_NAMED_KEYS.items():
-            _write_layout(uid, appid, names)
-            prog(f"  ✓ [{appid}] → {TEMPLATE}")
+            if _write_layout_safe(uid, appid, names, prog=prog):
+                prog(f"  ✓ [{appid}] → {TEMPLATE}")
         for appid, title in _shortcut_appids(prog).items():
-            _write_layout(uid, appid, [shortcut_title_key(title)])
-            prog(f"  ✓ [shortcut {appid}] → {TEMPLATE}")
+            if _write_layout_safe(uid, appid, [shortcut_title_key(title)], prog=prog):
+                prog(f"  ✓ [shortcut {appid}] → {TEMPLATE}")
         try:
             from shortcut import LAUNCHER_TITLE, get_shortcut_appid
             appid = get_shortcut_appid(LAUNCHER_TITLE)
             if appid is not None:
-                _write_layout(uid, str(appid), [shortcut_title_key(LAUNCHER_TITLE)])
+                _write_layout_safe(uid, str(appid), [shortcut_title_key(LAUNCHER_TITLE)], prog=prog)
         except Exception as ex:
             prog(f"  ⚠ Offline launcher layout skipped: {ex}")
 
@@ -188,9 +201,10 @@ def assign_controller_profiles(gyro_mode=None, on_progress=None):
                 continue  # legacy CoD4x is not supported by this gamepad layout
             title = OWN_SHORTCUTS[key]["name"]
             appid = str(calc_shortcut_appid(f'"{own_shortcut_exe(key, game)}"', title))
-            for uid in uids:
-                _write_layout(uid, appid, [shortcut_title_key(title)], numbered=False)
-            prog(f"  ✓ [own {appid}] → {TEMPLATE}")
+            wrote = [_write_layout_safe(uid, appid, [shortcut_title_key(title)], numbered=False, prog=prog)
+                     for uid in uids]
+            if any(wrote):
+                prog(f"  ✓ [own {appid}] → {TEMPLATE}")
     except Exception as ex:
         prog(f"  ⚠ Could not assign own-copy layouts: {ex}")
     prog("Steam Deck controller layout assigned.")

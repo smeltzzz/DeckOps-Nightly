@@ -653,6 +653,20 @@ def _get_template_filename(template_type: str, gyro_mode: str) -> str:
 def _assign_controller_config(uid: str, appid: int, shortcut_def: dict,
                                gyro_mode: str, prog, title: str = None):
     """
+    Assign controller template for a non-Steam shortcut. A failure (full or
+    read-only Controller Configs directory, say) is reported and skipped: it
+    must not abort the shortcut loop before shortcuts.vdf is written.
+    """
+    try:
+        _assign_controller_config_impl(uid, appid, shortcut_def, gyro_mode, prog, title)
+    except Exception as ex:
+        _log.warning("controller config for shortcut %s not assigned", appid, exc_info=True)
+        prog(f"    ⚠ Controller layout not assigned: {ex}")
+
+
+def _assign_controller_config_impl(uid: str, appid: int, shortcut_def: dict,
+                                   gyro_mode: str, prog, title: str = None):
+    """
     Assign controller template for a non-Steam shortcut.
 
     Writes the device's primary configset (configset_controller_neptune.vdf
@@ -962,8 +976,10 @@ def add_shortcut(
     elif compat_tool:
         try:
             from wrapper import set_compat_tool as _set_compat
-            _set_compat([str(shortcut_appid)], compat_tool)
-            prog(f"    ✓ GE-Proton {compat_tool} set")
+            if _set_compat([str(shortcut_appid)], compat_tool) is False:
+                prog("    ⚠ Could not set compat tool: Steam's config.vdf was not changed")
+            else:
+                prog(f"    ✓ GE-Proton {compat_tool} set")
         except Exception as ex:
             prog(f"    ⚠ Could not set compat tool: {ex}")
 
@@ -1389,8 +1405,10 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
                     from wrapper import set_compat_tool
                     ge_version = cfg.get_ge_proton_version()
                     if ge_version:
-                        set_compat_tool([str(shortcut_appid)], ge_version)
-                        prog(f"    ✓ GE-Proton {ge_version} set")
+                        if set_compat_tool([str(shortcut_appid)], ge_version) is False:
+                            prog("    ⚠ Could not set compat tool: Steam's config.vdf was not changed")
+                        else:
+                            prog(f"    ✓ GE-Proton {ge_version} set")
                     else:
                         prog("    ⚠ GE-Proton version unknown — compat tool not set")
             except Exception as ex:
@@ -1777,8 +1795,10 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
                 from wrapper import set_compat_tool
                 ge_version = _cfg.get_ge_proton_version()
                 if ge_version:
-                    set_compat_tool([str(shortcut_appid)], ge_version)
-                    prog(f"    ✓ GE-Proton {ge_version} set")
+                    if set_compat_tool([str(shortcut_appid)], ge_version) is False:
+                        prog("    ⚠ Could not set GE-Proton: Steam's config.vdf was not changed")
+                    else:
+                        prog(f"    ✓ GE-Proton {ge_version} set")
             except Exception as ex:
                 prog(f"    ⚠ Could not set GE-Proton: {ex}")
 

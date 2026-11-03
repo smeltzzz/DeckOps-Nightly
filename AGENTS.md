@@ -7,7 +7,8 @@ DeckOps Nightly is a Linux/SteamOS installer and PyQt desktop app that sets up C
 - `python -m ruff check .` — lint. `pyproject.toml` selects correctness rules only (`E9`, `F`, `B`), target py311, 120 columns.
 - `python -m pytest -q` — full suite. Tests are `unittest` style; pytest collects them cleanly.
 - Single test: `python -m pytest tests/test_reliability.py::TransactionTests::test_failed_full_apply_restores_all_old_files -q`
-- Linux-only shell tests: run `tests/test_prelaunch_shell.py`, `tests/test_lan_server_shell.py`, and `tests/test_offline_launcher_shell.py` on Linux with `bash`/`flock`; they skip on Windows.
+- Linux-only shell tests: run `tests/test_prelaunch_shell.py`, `tests/test_lan_server_shell.py`, and `tests/test_offline_launcher_shell.py` on Linux with `bash`/`flock`; they skip on Windows. So do the fake-script classes in `tests/test_reliability.py` (`PrefixFinalizeTests`, `DepotQrRetryTests`, marked `_POSIX_ONLY`), so a Windows run is not the full suite.
+- To run everything on a Windows dev box, use a Linux container (`python:3.12-slim` plus `pytest PyQt6`, `QT_QPA_PLATFORM=offscreen`) over a copy of the repo with `.sh`/`.py` converted to LF: a CRLF checkout breaks the shell tests even though git stores LF.
 - Rebuild the tracked offline launcher with `powershell -ExecutionPolicy Bypass -File scripts/build_offline_launcher.ps1 -Publish` on Windows x64. See `docs/offline-launcher-build.md`.
 
 There is no CI, pre-commit, or formatter config. Run the two checks above before finishing.

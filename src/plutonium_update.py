@@ -136,8 +136,10 @@ def sync_master(plut_dir: str, prod: dict, info: dict, log=None, deadline: float
     """
     log = log or (lambda *a: None)
     files = info["files"]
+    # Hex compared case-insensitively (download() already does): a manifest in upper
+    # case made every file look changed, so every launch re-downloaded everything
     todo = [e for e in files if not (
-        os.path.isfile(p := os.path.join(plut_dir, e["name"])) and _sha1(p) == e["hash"])]
+        os.path.isfile(p := os.path.join(plut_dir, e["name"])) and _sha1(p) == e["hash"].lower())]
     log(f"Plutonium r{info['revision']}: {len(files) - len(todo)} of {len(files)} files up to date")
 
     def _check_time(*_):
@@ -148,7 +150,7 @@ def sync_master(plut_dir: str, prod: dict, info: dict, log=None, deadline: float
         p = os.path.join(plut_dir, e["name"])
         new = p + ".new"
         # Left by an earlier interrupted update and already complete.
-        if os.path.isfile(new) and _sha1(new) == e["hash"]:
+        if os.path.isfile(new) and _sha1(new) == e["hash"].lower():
             continue
         _check_time()
         os.makedirs(os.path.dirname(p), exist_ok=True)

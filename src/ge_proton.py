@@ -538,7 +538,7 @@ def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
         try:
             os.makedirs(prefix_path, exist_ok=True)
             if not os.path.isdir(pfx_dir):
-                shutil.copytree(default_pfx, pfx_dir, symlinks=True)
+                _copytree_atomic(default_pfx, pfx_dir)
             if ge_version and not os.path.isfile(version_file):
                 with open(version_file, "w") as f:
                     f.write(ge_version + "\n")
@@ -598,6 +598,26 @@ def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
         return False
 
 
+def _copytree_atomic(src: str, dst: str, ignore=None, post=None):
+    """copytree into dst, but built under dst + '.deckops_new' and renamed in
+    one step. A disk-full, kill or crash mid-copy can then never leave a
+    half-built pfx/ that later runs mistake for a finished prefix (or that
+    makes a retry fail with FileExistsError). post(tmp_dir) runs before the
+    rename for extra edits. Raises FileExistsError if dst already exists."""
+    if os.path.lexists(dst):
+        raise FileExistsError(dst)
+    tmp = dst + ".deckops_new"
+    shutil.rmtree(tmp, ignore_errors=True)       # leftover of an interrupted run
+    try:
+        shutil.copytree(src, tmp, symlinks=True, ignore=ignore)
+        if post:
+            post(tmp)
+        os.rename(tmp, dst)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
 def _finish_clone(source_pfx_dir: str, dest_prefix_path: str, ge_version: str | None):
     # Write version file so Proton knows which version initialized this prefix
     if ge_version:
@@ -640,7 +660,7 @@ def _clone_prefix(source_pfx_dir: str, dest_prefix_path: str,
         os.makedirs(dest_prefix_path, exist_ok=True)
         prog(f"  Cloning: {source_pfx_dir} → {dest_pfx_dir}")
         start = time.time()
-        shutil.copytree(source_pfx_dir, dest_pfx_dir, symlinks=True)
+        _copytree_atomic(source_pfx_dir, dest_pfx_dir)
         elapsed = time.time() - start
         _finish_clone(source_pfx_dir, dest_prefix_path, ge_version)
         prog(f"  ✓ Prefix cloned from donor ({elapsed:.1f}s)")
@@ -682,7 +702,7 @@ def _overlay_prefix(source_pfx_dir: str, dest_prefix_path: str,
             # Fresh prefix -- full clone (fastest path)
             prog(f"  Cloning: {source_pfx_dir} -> {dest_pfx_dir}")
             start = time.time()
-            shutil.copytree(source_pfx_dir, dest_pfx_dir, symlinks=True)
+            _copytree_atomic(source_pfx_dir, dest_pfx_dir)
             elapsed = time.time() - start
             prog(f"  ✓ Prefix cloned from donor ({elapsed:.1f}s)")
         else:
@@ -922,17 +942,19 @@ def _clone_with_symlinks(source_pfx_dir: str, dest_prefix_path: str,
                 return [c for c in contents if c in ("system32", "syswow64")]
             return []
 
-        prog(f"  Cloning skeleton: {source_pfx_dir} -> {dest_pfx_dir}")
-        shutil.copytree(source_pfx_dir, dest_pfx_dir, symlinks=True,
-                        ignore=_ignore_dll_dirs)
-
-        # Create symlinks for system32 and syswow64 pointing to shared DLLs
-        windows_dir = os.path.join(dest_pfx_dir, "drive_c", "windows")
         shared_sys32 = os.path.join(SHARED_DLL_DIR, "system32")
         shared_wow64 = os.path.join(SHARED_DLL_DIR, "syswow64")
 
-        os.symlink(shared_sys32, os.path.join(windows_dir, "system32"))
-        os.symlink(shared_wow64, os.path.join(windows_dir, "syswow64"))
+        def _link_shared(tmp_pfx):
+            # Symlinks for system32 and syswow64 pointing to shared DLLs,
+            # made before the rename so pfx/ appears complete or not at all
+            windows_dir = os.path.join(tmp_pfx, "drive_c", "windows")
+            os.symlink(shared_sys32, os.path.join(windows_dir, "system32"))
+            os.symlink(shared_wow64, os.path.join(windows_dir, "syswow64"))
+
+        prog(f"  Cloning skeleton: {source_pfx_dir} -> {dest_pfx_dir}")
+        _copytree_atomic(source_pfx_dir, dest_pfx_dir,
+                         ignore=_ignore_dll_dirs, post=_link_shared)
 
         elapsed = time.time() - start
         prog(f"  ✓ Prefix cloned with symlinked DLLs ({elapsed:.1f}s)")

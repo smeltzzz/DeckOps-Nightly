@@ -660,7 +660,7 @@ class ManagementScreen(QWidget):
         us = get_screen(self.stack, "UpdateScreen")
         us.selected = selected
         us.all_plut_games = {k: g for k, _, g in selected}
-        us.steam_root = find_steam_root()
+        us.steam_root = find_steam_root() or ""
         go_to(self.stack, "UpdateScreen")
 
     def _offline(self, on):
@@ -925,7 +925,7 @@ class ManagementScreen(QWidget):
         s = get_screen(self.stack, "UpdateScreen")
         s.selected = selected
         s.all_plut_games = {k: g for k, _, g in selected}
-        s.steam_root = find_steam_root()
+        s.steam_root = find_steam_root() or ""
         go_to(self.stack, "UpdateScreen")
 
     def _reinstall(self, gd):
@@ -1708,6 +1708,12 @@ class ConfigureScreen(QWidget):
             self.status.setText("Please wait for the current task to finish.")
             return False
         self._settings_running = True
+        # The caller's signal object was only referenced by the worker's closure, so
+        # it was freed on the worker thread right after its last emit: Qt then drops
+        # the not yet delivered `done` and the slot below never ran, leaving
+        # _settings_running set ("Please wait...") and the sleep lock held. Only one
+        # task runs at a time, so the next one can safely replace this reference.
+        self._settings_sigs = s
         # These close Steam and rewrite its files in daemon threads; without this the
         # window could be closed (or the machine suspended) half way through. Don't
         # take over a lock another operation already holds.
@@ -2211,6 +2217,11 @@ class ConfigureScreen(QWidget):
         except OSError as ex:
             _log.error("Cannot lock DeckOps update", exc_info=True)
             self._apply_sig.log.emit(f"FAIL|Could not start DeckOps update: {ex}")
+        except Exception as ex:
+            # Anything else (an ImportError in the worker's imports, say) used to kill
+            # the thread silently and leave the modal progress dialog up forever
+            _log.error("DeckOps update worker failed", exc_info=True)
+            self._apply_sig.log.emit(f"FAIL|DeckOps update failed: {ex}")
 
     def _apply_worker_locked(self):
         """Download differing files, then apply them as a recoverable update."""
@@ -2554,12 +2565,19 @@ class UpdateScreen(QWidget):
         self._pending_games = []
         self._cancelled = False
         self._steam_closed.clear()
-        inhibit.start("DeckOps is updating")
+        # Like the Settings tasks: don't take over (and later release) a lock another
+        # running operation holds, or this screen finishing would let the machine
+        # sleep in the middle of that one.
+        self._took_inhibit = not inhibit.busy()
+        if self._took_inhibit:
+            inhibit.start("DeckOps is updating")
         _log_to_file("── Update started ──")
         QTimer.singleShot(400, lambda: threading.Thread(target=self._run, daemon=True).start())
 
     def _on_done(self, ok):
-        inhibit.stop()
+        if getattr(self, "_took_inhibit", True):
+            inhibit.stop()
+        self._took_inhibit = False
         self.steam_btn.setVisible(False)
         self.stop_btn.setVisible(False)
         self.back_btn.setVisible(True)

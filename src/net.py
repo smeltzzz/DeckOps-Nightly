@@ -110,6 +110,10 @@ def download(url: str, dest: str, on_progress=None, label: str = "",
     """
     if not digest:
         _log.debug("downloading %s with no digest to check", url)
+    else:
+        # A digest that can never verify (no "algo:", unknown algorithm) used to
+        # surface only after the whole file was fetched, on every retry.
+        _validate_digest(digest)
     part = dest + ".part"
     # The server's version of the file (ETag / Last-Modified) the .part was
     # started from. A resume sends it as If-Range, so a file that changed on
@@ -256,7 +260,15 @@ def commit_staged_files(install_dir: str, staged_dir: str, files, remove=()):
                     raise ValueError(f"not a regular installed file: {target}")
                 backup = safe_manifest_path(backup_dir, rel)
                 os.makedirs(os.path.dirname(backup), exist_ok=True)
-                shutil.copy2(target, backup)
+                # A hard link keeps the old file's data without a second copy
+                # (replacing a target only swaps its directory entry, so the link
+                # still holds the old contents): a multi-GB set such as the iw4x
+                # DLC needed the same space again on a small SD card. Filesystems
+                # without hard links (exFAT) fall back to a copy.
+                try:
+                    os.link(target, backup)
+                except OSError:
+                    shutil.copy2(target, backup)
                 backups[rel] = backup
         try:
             for rel in remove:
@@ -272,6 +284,9 @@ def commit_staged_files(install_dir: str, staged_dir: str, files, remove=()):
             for rel in reversed(dict.fromkeys(changed)):
                 try:
                     if rel in backups:
+                        # Still the very file the backup links to: it was never replaced
+                        if os.path.lexists(targets[rel]) and os.path.samefile(backups[rel], targets[rel]):
+                            continue
                         shutil.copy2(backups[rel], targets[rel])
                     elif os.path.lexists(targets[rel]):
                         os.remove(targets[rel])
@@ -319,6 +334,15 @@ def _write_validator(meta: str, resp_headers):
             json.dump({"if_range": value}, f)
     except OSError:
         _log.debug("could not save resume validator %s", meta, exc_info=True)
+
+
+def _validate_digest(digest: str):
+    """ValueError if digest isn't a usable "algo:hex" (checked before downloading)."""
+    algo, sep, want = str(digest).partition(":")
+    if not sep or not want.strip():
+        raise ValueError(f"malformed digest {digest!r}: expected 'algo:hex'")
+    if algo != "gitblob" and algo not in hashlib.algorithms_available:
+        raise ValueError(f"unsupported digest algorithm {algo!r}")
 
 
 def _check_digest(path: str, digest: str):
