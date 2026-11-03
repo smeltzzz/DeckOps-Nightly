@@ -19,6 +19,7 @@ other games' Plutonium files are missing (Deck + Bazzite, 2026-10-19). User data
 mods/, usermaps/) is never in the manifest and stays real per prefix.
 """
 
+import contextlib
 import fnmatch
 import json
 import os
@@ -33,6 +34,32 @@ _log = get_logger(__name__)
 
 PROD_URL = "https://cdn.plutonium.pw/updater/prod.json"
 SHARED_DIRS = ("bin", "launcher", "games")
+
+
+@contextlib.contextmanager
+def _update_lock(plut_dir: str):
+    """Yield True when this process may update plut_dir, False when another one is
+    already doing it. Two games launched close together would both run sync_master:
+    they share the .new / .part files and both swap them in, so the master could end
+    up with files from both runs. No flock (Windows tests) or no lock file: carry on."""
+    try:
+        import fcntl
+        stream = open(plut_dir.rstrip(os.sep) + ".update.lock", "a+")
+    except (ImportError, OSError):
+        yield True
+        return
+    try:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+    finally:
+        stream.close()
 
 
 def fetch(timeout: int = 30, tries: int = 3):
@@ -196,11 +223,15 @@ def update(plut_dir: str, log=None, budget: float = None) -> dict:
     local = local_revision(plut_dir)
     if local != info["revision"]:
         log(f"Plutonium: r{local}, server r{info['revision']}, updating")
-        try:
-            sync_master(plut_dir, prod, info, log, deadline=deadline)
-        except OutOfTime:
-            log(f"Plutonium: update didn't finish in {budget:.0f}s, launching r{local}; "
-                "the rest downloads on the next launch")
+        with _update_lock(plut_dir) as owner:
+            if not owner:
+                log(f"Plutonium: another update is running, launching r{local}")
+            else:
+                try:
+                    sync_master(plut_dir, prod, info, log, deadline=deadline)
+                except OutOfTime:
+                    log(f"Plutonium: update didn't finish in {budget:.0f}s, launching r{local}; "
+                        "the rest downloads on the next launch")
     else:
         log(f"Plutonium r{local}: up to date")
     return info

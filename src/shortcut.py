@@ -18,7 +18,6 @@ Called at the end of InstallScreen._run() after client installation completes.
 Must be called while Steam is closed.
 """
 
-import hashlib
 import os
 import re
 import shutil
@@ -704,23 +703,12 @@ def _assign_controller_config_impl(uid: str, appid: int, shortcut_def: dict,
         default_steam_root(), "steamapps", "common",
         "Steam Controller Configs", uid, "config"
     )
-    try:
-        from controller_profiles import _primary_configset_name
-        canonical_vdf, configset_name = _primary_configset_name()
-    except Exception:
-        _log.debug("primary configset lookup failed", exc_info=True)
-        canonical_vdf, configset_name = ("controller_neptune.vdf",
-                                         "configset_controller_neptune.vdf")
+    # Only the Neptune (Steam Deck) layout is bundled, so only its files are written
+    from controller_profiles import CANONICAL as canonical_vdf, CONFIGSET as configset_name, install_layout
 
     cfg_dir = os.path.join(steam_cfg_root, appid_str)
     os.makedirs(cfg_dir, exist_ok=True)
-    canonical_path = os.path.join(cfg_dir, canonical_vdf)
-    if not os.path.exists(canonical_path + ".deckops-owned"):
-        _keep_original(canonical_path)
-    shutil.copy2(src_template, canonical_path)
-    with open(src_template, "rb") as layout, \
-         open(canonical_path + ".deckops-owned", "w", encoding="ascii") as marker:
-        marker.write(hashlib.sha256(layout.read()).hexdigest())
+    install_layout(src_template, os.path.join(cfg_dir, canonical_vdf))
     
     # Patch the primary configset
     configset_path = os.path.join(steam_cfg_root, configset_name)
@@ -1004,14 +992,18 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
     artwork_def — dict with *_ext keys for artwork file removal;
                    if None, artwork files are left in place
     on_progress — optional callback(msg: str)
+
+    Returns False when the shortcut may still be in Steam for some account (its
+    shortcuts.vdf could not be read or written), True when none has it any more.
     """
     prog = on_progress or (lambda *a: None)
 
     shortcut_appid = _calc_shortcut_appid(exe_path, name)
+    ok = True
 
     uids = _find_all_steam_uids()
     if not uids:
-        return
+        return ok
 
     for uid in uids:
         shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
@@ -1019,6 +1011,7 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
 
         body = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
         if body is None:
+            ok = False
             continue                # unreadable: this user is left entirely alone
         if body and _split_entries(body):
             new_body, stripped = _strip_entries_by_name(body, {name})
@@ -1027,6 +1020,7 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
                     _write_shortcuts_vdf(shortcuts_path, new_body, [])
                     prog(f"  Removed shortcut '{name}' for uid {uid}")
                 except OSError as ex:
+                    ok = False
                     prog(f"  Could not write shortcuts.vdf: {ex}")
 
         # Remove artwork. Even when the shortcut itself is already gone (the player
@@ -1046,6 +1040,7 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
                         os.remove(art_path)
                     except OSError:
                         _log.debug("file removal failed", exc_info=True)
+    return ok
 
 
 # ── Orphan shortcut cleanup ──────────────────────────────────────────────────
@@ -1103,9 +1098,9 @@ def cleanup_orphan_shortcuts(on_progress=None):
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         body = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
+        if body is None:
+            continue                # unreadable: this user is left entirely alone
         entries = _split_entries(body) if body else []
-        if not entries:
-            continue
 
         # Filter out orphans by checking their stored appid against our set
         keep = []
@@ -1224,8 +1219,12 @@ def remove_merged_mp_shortcuts(steam_root: str = None, on_progress=None) -> list
         appid = get_shortcut_appid(sdef["name"])
         if appid is None:
             continue
-        remove_shortcut(sdef["name"], os.path.join(install_dir, sdef["exe_name"]),
-                        sdef, on_progress=on_progress)
+        if not remove_shortcut(sdef["name"], os.path.join(install_dir, sdef["exe_name"]),
+                               sdef, on_progress=on_progress):
+            # Still in Steam for some account: clearing its compat tool now would leave
+            # a tile that cannot start. The next run tries again.
+            prog(f"  ⚠ {sdef['name']}: shortcut could not be removed, kept as it is")
+            continue
         _clear_compat_tool(str(appid))
         removed.append(sdef["name"])
         prog(f"  ✓ {sdef['name']} now launches from its main Steam tile")
@@ -1926,7 +1925,7 @@ def repair_launcher_files(prog=lambda m: None):
             want = {e["name"]: e["sha"] for e in json.load(r) if e.get("type") == "file"}
     except Exception as ex:
         prog(f"  ⚠ Could not check the launcher files: {ex}")
-        return
+        return False
     for name in ("DeckOps_Offline.exe", "launcher_offline.sh", "lan_server.sh"):
         path = os.path.join(INSTALL_DIR, "assets", "LAN", name)
         if name not in want or (os.path.isfile(path) and git_blob_sha(path) == want[name]):
@@ -1942,6 +1941,7 @@ def repair_launcher_files(prog=lambda m: None):
             os.chmod(new, 0o755)
         os.replace(new, path)
         prog(f"  ✓ {name} replaced")
+    return True
 
 
 def create_launcher_shortcut(on_progress=None):
@@ -1955,6 +1955,9 @@ def create_launcher_shortcut(on_progress=None):
 
     No compat tool is set — the shell script invokes Proton directly.
     Called once after Plutonium games are set up — both OLED and LCD.
+
+    Returns True when the shortcut is in Steam for at least one account afterwards,
+    False when nothing could be created (files missing, no account, write failed).
     """
     prog = on_progress or (lambda *a: None)
 
@@ -1963,11 +1966,11 @@ def create_launcher_shortcut(on_progress=None):
 
     if not os.path.exists(launcher_sh):
         prog(f"  Launcher script not found: {launcher_sh}")
-        return
+        return False
 
     if not os.path.exists(launcher_exe):
         prog(f"  Launcher exe not found: {launcher_exe}")
-        return
+        return False
 
     exe_path  = f'"{launcher_sh}"'
     start_dir = f'"{os.path.dirname(launcher_sh)}"'
@@ -1977,8 +1980,9 @@ def create_launcher_shortcut(on_progress=None):
     uids = _find_all_steam_uids()
     if not uids:
         prog("  No Steam user accounts found - launcher shortcut skipped.")
-        return
+        return False
 
+    in_steam = False
     for uid in uids:
         shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
@@ -2020,6 +2024,7 @@ def create_launcher_shortcut(on_progress=None):
                 a != shortcut_appid for a in _entry_appids(existing_raw, LAUNCHER_TITLE)):
             _stale_names.add(LAUNCHER_TITLE)
 
+        _stripped = []
         if _stale_names:
             existing_raw, _stripped = _strip_entries_by_name(
                 existing_raw, _stale_names
@@ -2056,6 +2061,14 @@ def create_launcher_shortcut(on_progress=None):
 
         if LAUNCHER_TITLE in existing_names:
             prog("  Launcher shortcut already exists")
+            in_steam = True
+            if _stripped:
+                # Only an old-title entry went (the current one is right): without
+                # writing, it was "removed" in the message and stayed in Steam
+                try:
+                    _write_shortcuts_vdf(shortcuts_path, existing_raw, [])
+                except Exception as e:
+                    prog(f"  Failed to remove the stale launcher shortcut: {e}")
         else:
             entry = _shortcut_entry(shortcut_appid, LAUNCHER_TITLE, exe_path, start_dir, icon_path, _launcher_launch_opts(shortcut_appid))
 
@@ -2063,6 +2076,7 @@ def create_launcher_shortcut(on_progress=None):
             try:
                 _write_shortcuts_vdf(shortcuts_path, existing_raw, [entry_bytes])
                 prog(f"  Launcher shortcut created: {LAUNCHER_TITLE}")
+                in_steam = True
             except Exception as e:
                 prog(f"  Failed to write launcher shortcut: {e}")
 
@@ -2095,12 +2109,14 @@ def create_launcher_shortcut(on_progress=None):
             _log.debug("operation failed", exc_info=True)
 
     prog(f"  Launcher shortcut appid: {shortcut_appid}")
+    return in_steam
 
 
 def remove_launcher_shortcut(on_progress=None):
-    """Offline Mode removed: take the offline launcher shortcut and its artwork out."""
+    """Offline Mode removed: take the offline launcher shortcut and its artwork out.
+    False when it may still be in Steam for some account."""
     exe_path = f'"{os.path.join(INSTALL_DIR, _LAUNCHER_SH_REL)}"'
-    remove_shortcut(LAUNCHER_TITLE, exe_path, LAUNCHER_ART, on_progress=on_progress)
+    return remove_shortcut(LAUNCHER_TITLE, exe_path, LAUNCHER_ART, on_progress=on_progress)
 
 
 # --- Repair: re-add any DeckOps shortcut missing from shortcuts.vdf
@@ -2243,8 +2259,14 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
         return []
 
     readded = []
-    # Old CoD4 MP / WaW MP shortcuts go once their main tile launches MP
-    remove_merged_mp_shortcuts(sr, on_progress)
+    # Old CoD4 MP / WaW MP shortcuts go once their main tile launches MP. One
+    # unreadable config.vdf must not abort the whole repair: every other step below
+    # is guarded the same way.
+    try:
+        remove_merged_mp_shortcuts(sr, on_progress)
+    except Exception as ex:
+        _log.warning("merged MP shortcut cleanup failed: %s", ex)
+        prog(f"  ⚠ Old MP shortcuts not cleaned up: {ex}")
     # Plutonium launch menus: current labels, plus the MP / ZM entries that
     # MW3 / BO1 / BO2 keep on their SP tile
     try:

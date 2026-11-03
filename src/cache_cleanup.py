@@ -120,25 +120,31 @@ def _nuke_shader_cache_dir(appid_str: str):
     on next launch, and the game's real shader work happens inside
     Heroic's Proton runtime which stores its cache elsewhere.
     """
+    ok = True
     for base in _shadercache_dirs():
         cache_dir = os.path.join(base, appid_str)
         if os.path.isdir(cache_dir):
             try:
                 shutil.rmtree(cache_dir)
             except OSError:
+                ok = False
                 _log.debug("cache dir removal failed", exc_info=True)
+    return ok
 
 
-def cleanup_shader_cache(game_key: str, source: str):
+def cleanup_shader_cache(game_key: str, source: str) -> bool:
     """
     Nuke the entire shader cache directory for a game. Handles both
     the Steam appid cache (for Steam-owned games) and the shortcut
     appid cache (for own games with non-Steam shortcuts).
+
+    Returns False when a cache folder could not be removed.
     """
+    ok = True
     # Always nuke the Steam appid cache if it exists
     steam_appid = STEAM_APPIDS.get(game_key)
     if steam_appid:
-        _nuke_shader_cache_dir(steam_appid)
+        ok = _nuke_shader_cache_dir(steam_appid) and ok
 
     # For own games, also nuke the shortcut appid cache. The shortcut
     # appid is CRC-derived from the exe path + title used when the
@@ -149,7 +155,8 @@ def cleanup_shader_cache(game_key: str, source: str):
         if title:
             appid_exe = '"/usr/bin/flatpak"'
             shortcut_appid = _calc_shortcut_appid(appid_exe, title)
-            _nuke_shader_cache_dir(str(shortcut_appid))
+            ok = _nuke_shader_cache_dir(str(shortcut_appid)) and ok
+    return ok
 
 
 # ── Steam shader pre-cache environment strip ────────────────────────────────

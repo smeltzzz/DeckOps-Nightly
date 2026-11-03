@@ -86,7 +86,7 @@ def install_sp_mod(game_key: str, install_dir: str, on_progress=None,
         # (with rollback), like IW-Pad: a failure on file N used to leave the first
         # N-1 replaced, e.g. a new iw4x-sp.exe beside the old data/iw4sp.exe it
         # only accepts in one build.
-        for old in glob.glob(os.path.join(install_dir, ".deckops_alterware_*")):
+        for old in glob.glob(os.path.join(glob.escape(install_dir), ".deckops_alterware_*")):
             shutil.rmtree(old, ignore_errors=True)
         staging = tempfile.mkdtemp(prefix=".deckops_alterware_", dir=install_dir)
         try:
@@ -144,7 +144,7 @@ def _fetch_iw_pad(game_key, install_dir, arch, prog, release=None, tries=3, time
     # Download and extract off to the side, then swap the files in as one set: a kill
     # mid-extraction (the pre-launch update has a time limit) used to leave a mixed
     # iw-pad.exe / iw-pad.dll pair that ran until the next launch retried.
-    for old in glob.glob(os.path.join(install_dir, ".deckops_iwpad_*")):
+    for old in glob.glob(os.path.join(glob.escape(install_dir), ".deckops_iwpad_*")):
         shutil.rmtree(old, ignore_errors=True)
     staging = tempfile.mkdtemp(prefix=".deckops_iwpad_", dir=install_dir)
     try:

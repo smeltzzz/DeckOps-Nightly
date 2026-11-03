@@ -877,13 +877,24 @@ echo ""
 info "Backing up player save data before cleanup..."
 SAVE_BACKUP_FAILED=false
 
-zenity --question \
-    --title="$APP_TITLE Uninstaller" \
-    --text="Would you like to back up your save data before uninstalling?\n\nThis preserves player configs, stats, and custom classes\nso they can be restored if you reinstall later." \
-    --ok-label="Yes, Back Up" \
-    --cancel-label="No, Skip" 2>/dev/null
+BACKUP_ANSWER=0
+if command -v zenity >/dev/null 2>&1; then
+    zenity --question \
+        --title="$APP_TITLE Uninstaller" \
+        --text="Would you like to back up your save data before uninstalling?\n\nThis preserves player configs, stats, and custom classes\nso they can be restored if you reinstall later." \
+        --ok-label="Yes, Back Up" \
+        --cancel-label="No, Skip" 2>/dev/null
+    BACKUP_ANSWER=$?
+else
+    # Without zenity the missing command's status (127) read as "No, Skip", and the
+    # saves were never backed up. Ask in the terminal; backing up is the default.
+    printf "  Back up your save data before uninstalling? [Y/n] "
+    read -r _backup_ans </dev/tty 2>/dev/null || _backup_ans=""
+    echo ""
+    case "$_backup_ans" in [nN]*) BACKUP_ANSWER=1 ;; esac
+fi
 
-if [ $? -ne 0 ]; then
+if [ "$BACKUP_ANSWER" -ne 0 ]; then
     skip "Save backup skipped by user."
 else
 
@@ -1271,6 +1282,18 @@ for _wrapper in PLUT_WRAPPER_EXES:
 for _mw3 in ("iw5mp.exe", "iw5plutmp.exe"):
     OWN_CLEANUP.setdefault(_mw3, {"files": [], "dirs": []})["files"].append("admin/deckops_lan.cfg")
 
+def rmtree_safe(path, label):
+    """Remove a folder (or a link to one); an error is reported and the cleanup of the
+    other folders goes on, instead of a traceback that ends the whole pass."""
+    try:
+        if os.path.islink(path):
+            os.remove(path)             # rmtree refuses a link
+        else:
+            shutil.rmtree(path)
+        print(f"    Removed {label}")
+    except OSError as ex:
+        print(f"    Failed to remove {label}: {ex}")
+
 def restore_cod4_audio(install_dir):
     """Mirror of the bash restore_cod4_audio(). CoD4x keeps the stock
     mss32.dll as miles32.dll; CoD4R overwrites iw3mp.exe/mss32.dll/
@@ -1460,31 +1483,31 @@ for uid in os.listdir(USERDATA_DIR):
 
         for dn, dp in dlc_dirs:
             if remove_dlc:
-                shutil.rmtree(dp)
-                print(f"    Removed {dn}/")
+                rmtree_safe(dp, f"{dn}/")
             else:
-                for entry in os.listdir(dp):
-                    p = os.path.join(dp, entry)
-                    if os.path.isdir(p):
-                        shutil.rmtree(p)
-                    elif not entry.endswith(".iwd"):
-                        os.remove(p)
-                print(f"    Removed {dn}/ client files (kept DLC maps)")
+                try:
+                    for entry in os.listdir(dp):
+                        p = os.path.join(dp, entry)
+                        if os.path.isdir(p) and not os.path.islink(p):
+                            shutil.rmtree(p)
+                        elif not entry.endswith(".iwd"):
+                            os.remove(p)
+                    print(f"    Removed {dn}/ client files (kept DLC maps)")
+                except OSError as ex:
+                    print(f"    Failed to clean {dn}/: {ex}")
 
         # DLC .ff directories (zone/iw4x/ and legacy zone/dlc/)
         if remove_dlc:
             for ff_dir in cleanup.get("ff_dlc_dirs", []):
                 ff_path = os.path.join(install_dir, ff_dir)
                 if os.path.isdir(ff_path):
-                    shutil.rmtree(ff_path)
-                    print(f"    Removed {ff_dir}/")
+                    rmtree_safe(ff_path, f"{ff_dir}/")
 
         # Zone directories (patch, zonebuilder — new + legacy paths)
         for zd in cleanup.get("zone_dirs", []):
             zd_path = os.path.join(install_dir, zd)
             if os.path.isdir(zd_path):
-                shutil.rmtree(zd_path)
-                print(f"    Removed {zd}/")
+                rmtree_safe(zd_path, f"{zd}/")
 
         # Remove files in subdirectories (e.g. main/*.iwd, zone/english/*.ff)
         for subdir, fnames in cleanup.get("subdirs", {}).items():
@@ -3128,7 +3151,10 @@ echo ""
 
 info "Removing DeckOps controller templates..."
 
-TEMPLATE_DIR="$HOME/.steam/steam/controller_base/templates"
+# Steam's own templates folder (controller_profiles.templates_dir). Older builds used a
+# fixed ~/.steam/steam path whatever Steam install was in use, so that one is cleaned too.
+TEMPLATE_DIR="$STEAM_ROOT/controller_base/templates"
+ALT_TEMPLATE_DIR="$HOME/.steam/steam/controller_base/templates"
 for f in \
     "controller_neptune_deckops_cod.vdf" \
     "controller_neptune_deckops_hold.vdf" \
@@ -3190,12 +3216,14 @@ for f in \
     if [ -d "$OTHER_DIR" ] && [ "$f" != "controller_neptune_deckops_cod.vdf" ]; then
         continue
     fi
-    target="$TEMPLATE_DIR/$f"
-    if [ -f "$target" ]; then
+    found_template=false
+    for tdir in "$TEMPLATE_DIR" "$ALT_TEMPLATE_DIR"; do
+        target="$tdir/$f"
+        [ -f "$target" ] || continue
+        found_template=true
         rm -f "$target" && success "Removed $f" || warn "Failed to remove $f"
-    else
-        skip "$f not found"
-    fi
+    done
+    $found_template || skip "$f not found"
 done
 echo ""
 

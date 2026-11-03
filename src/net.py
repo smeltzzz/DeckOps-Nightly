@@ -275,7 +275,7 @@ def commit_staged_files(install_dir: str, staged_dir: str, files, remove=()):
                 if os.path.lexists(targets[rel]):
                     changed.append(rel)
                     os.remove(targets[rel])
-            for rel, (source, target) in zip(files, writes):
+            for rel, (source, target) in zip(files, writes, strict=True):
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 changed.append(rel)
                 os.replace(source, target)
@@ -384,8 +384,10 @@ def github_asset(repo: str, suffix: str, fallback: str = None, timeout: int = 30
                 data = json.loads(r.read())
             if isinstance(data, dict):
                 _LATEST_RELEASES[repo] = data
-        for a in data.get("assets", []):
-            if a["name"].endswith(suffix):
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Unexpected answer from GitHub for the latest {repo} release")
+        for a in data.get("assets") or []:
+            if isinstance(a, dict) and str(a.get("name", "")).endswith(suffix) and a.get("browser_download_url"):
                 return a["browser_download_url"], a.get("digest")
         raise RuntimeError(f"No *{suffix} asset in latest {repo} release")
     except Exception as ex:

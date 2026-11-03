@@ -365,6 +365,13 @@ def main(argv):
         threading.Thread(target=watch, args=(os.getpid(), settings, exe, stop), daemon=True).start()
     rc = child.wait()
     stop.set()
+    if rc < 0:
+        rc = 128 - rc           # killed by a signal: the shell's 128 + N, not a wrapped byte
+    if rc in (126, 127):
+        # prelaunch.sh reads those two as "the helper could not run the game" and starts it
+        # again itself. A game that really ran and ended with one of them must not get
+        # launched a second time.
+        rc = 1
     return rc
 
 

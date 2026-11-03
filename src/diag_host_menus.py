@@ -68,12 +68,45 @@ def launch_entries(ai, appid):
              (a._get(i[2], "description") or [0, 0, b""])[2].decode()) for i in launch]
 
 
+def _read_text(path):
+    """The stripped text of a small file, or None when it can't be read."""
+    try:
+        with open(path, errors="replace") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _steam_running():
+    """True while a Steam process runs (--apply rewrites appinfo.vdf, which Steam holds)."""
+    import subprocess
+    try:
+        return subprocess.run(["pgrep", "-x", "steam"], capture_output=True, check=False).returncode == 0
+    except OSError:
+        return False
+
+
 def main():
+    # The report is written whatever went wrong half way: a step that raised used to
+    # end the run with a traceback and no ~/deckops-diag.txt, the one thing to send in
+    try:
+        _report()
+    except Exception as ex:
+        say("--- the report stopped early:", type(ex).__name__, ex)
+    with open(OUT, "w") as f:
+        f.write("\n".join(LINES) + "\n")
+    print("\nSaved to", OUT)
+
+
+def _report():
     cfg = c.load()
     sr = cfg.get("steam_root") or find_steam_root()
     say("steam_root:", sr)
     say("deck_model:", cfg.get("deck_model"), "| is_lcd:", c.is_lcd())
-    say("VERSION:", open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")).read().strip())
+    say("VERSION:", _read_text(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")))
+    if not sr:
+        say("No Steam folder found: nothing more to report.")
+        return
 
     setup = c.get_setup_games()
     for k in ("iw5mp", "t5mp", "t6mp", "t6zm"):
@@ -86,7 +119,7 @@ def main():
         say("dir", k, "->", d)
 
     from plutonium import HOST_MENU, STEAM_MENU_EXES
-    for k, (appid, host_key, label) in HOST_MENU.items():
+    for k, (_appid, host_key, _label) in HOST_MENU.items():
         d = (inst.get(k) or {}).get("install_dir", "")
         wrapper = os.path.join(d, STEAM_MENU_EXES[k][0]) if d else ""
         say("wrapper", k, "->", STEAM_MENU_EXES[k][0], "exists:", bool(wrapper and os.path.isfile(wrapper)),
@@ -95,7 +128,8 @@ def main():
                  and os.path.realpath(d) == os.path.realpath(inst[host_key]["install_dir"])))
 
     try:
-        ai = a._AppInfo(open(a.appinfo_path(sr), "rb").read())
+        with open(a.appinfo_path(sr), "rb") as f:
+            ai = a._AppInfo(f.read())
         for appid in (42680, 42700, 202970):
             say("appinfo", appid, "->", launch_entries(ai, appid))
         # Every field of every launch entry (stock ones too): tells whether a
@@ -159,19 +193,26 @@ def main():
         else:
             say("MW2 iw-pad.log: not found")
 
+    menus = cfg.get("launch_menus")
     say("recorded launch_menus:",
-        {k: [e["executable"] for e in v] for k, v in cfg.get("launch_menus", {}).items()})
+        {k: [e["executable"] for e in v if isinstance(e, dict) and "executable" in e]
+         for k, v in (menus.items() if isinstance(menus, dict) else ())
+         if isinstance(v, list)})
 
     if "--apply" in sys.argv:
-        import plutonium
-        say("--- ensure_host_menus ---")
-        say("added:", plutonium.ensure_host_menus(sr, say))
-        try:
-            ai = a._AppInfo(open(a.appinfo_path(sr), "rb").read())
-            for appid in (42680, 42700, 202970):
-                say("appinfo after", appid, "->", launch_entries(ai, appid))
-        except Exception as ex:
-            say("appinfo unreadable:", ex)
+        if _steam_running():
+            say("--- ensure_host_menus NOT run: Steam is running. Close it first (it holds appinfo.vdf).")
+        else:
+            import plutonium
+            say("--- ensure_host_menus ---")
+            say("added:", plutonium.ensure_host_menus(sr, say))
+            try:
+                with open(a.appinfo_path(sr), "rb") as f:
+                    ai = a._AppInfo(f.read())
+                for appid in (42680, 42700, 202970):
+                    say("appinfo after", appid, "->", launch_entries(ai, appid))
+            except Exception as ex:
+                say("appinfo unreadable:", ex)
 
     try:
         from identity import LOG_DIR
@@ -190,16 +231,10 @@ def main():
         say("--- install.log (last 25 fovwatch lines) ---")
         for l in fov[-25:]:
             say(l)
-        try:
-            say("ptrace_scope:", open("/proc/sys/kernel/yama/ptrace_scope").read().strip())
-        except OSError as ex:
-            say("ptrace_scope not readable:", ex)
+        scope = _read_text("/proc/sys/kernel/yama/ptrace_scope")
+        say("ptrace_scope:", scope if scope is not None else "not readable")
     except Exception as ex:
         say("install.log not read:", ex)
-
-    with open(OUT, "w") as f:
-        f.write("\n".join(LINES) + "\n")
-    print("\nSaved to", OUT)
 
 
 if __name__ == "__main__":

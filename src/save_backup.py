@@ -20,6 +20,7 @@ Two public functions:
 
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 
@@ -185,7 +186,14 @@ def _find_plutonium_storages(steam_root: str, group: dict, setup_games: dict) ->
     def _add(tag, path):
         real = os.path.realpath(path)
         if os.path.isdir(path) and real not in seen:
-            seen.add(real); found[tag] = path
+            # The same appid can have a prefix in two libraries (Steam recreates one on
+            # the SD card by launching the vanilla game): both are saved, "<appid>@1" for
+            # the later ones, instead of the last overwriting the main prefix's stats
+            unique, n = tag, 0
+            while unique in found:
+                n += 1
+                unique = f"{tag}@{n}"
+            seen.add(real); found[unique] = path
 
     for compat_root in _find_all_compatdata_dirs(steam_root):
         for appid in group["appids"]:
@@ -227,14 +235,26 @@ def _plut_restore_dst(steam_root: str, group: dict, tag: str) -> str | None:
         own = _detected_games()[1]
         prefix = _own_prefix(steam_root, k, own[k]) if k in own else None
         return _plut_storage(prefix, group["plut_store"]) if prefix else None
-    # Steam appid: prefer an existing prefix on any library, else internal
-    # (DeckOps always creates Steam prefixes on internal storage)
+    # Steam appid ("<appid>" or "<appid>@n" for the n-th library that had one): prefer an
+    # existing prefix on any library, else internal (DeckOps always creates Steam prefixes
+    # on internal storage)
+    appid, _, n = tag.partition("@")
+    existing = []
     for compat_root in _find_all_compatdata_dirs(steam_root):
-        path = _plut_storage(os.path.join(compat_root, tag), group["plut_store"])
+        path = _plut_storage(os.path.join(compat_root, appid), group["plut_store"])
         if os.path.isdir(path):
-            return path
-    return _plut_storage(os.path.join(steam_root, "steamapps", "compatdata", tag),
+            existing.append(path)
+    if existing:
+        index = int(n) if n.isdigit() else 0
+        return existing[index] if index < len(existing) else existing[0]
+    return _plut_storage(os.path.join(steam_root, "steamapps", "compatdata", appid),
                          group["plut_store"])
+
+
+def _is_plut_tag(entry: str) -> bool:
+    """True for a backup folder name made by _find_plutonium_storages."""
+    return (entry == "heroic" or entry.startswith("own_")
+            or re.fullmatch(r"\d+(@\d+)?", entry) is not None)
 
 
 _DETECTED = None
@@ -425,12 +445,14 @@ def _write_meta(groups: dict):
     os.replace(tmp, meta_path)
 
 
-def _keep_pre_restore(path: str):
+def _keep_pre_restore(path: str) -> bool:
     """Copy the current save dir to <path>.pre-restore before a restore
-    overwrites it, so stats earned since the backup aren't lost for good."""
+    overwrites it, so stats earned since the backup aren't lost for good.
+    False when that copy could not be made: the restore must then not go ahead
+    (it would replace the newest stats with no safety copy)."""
     try:
         if not os.path.isdir(path) or not any(True for _ in os.scandir(path)):
-            return
+            return True
         keep = path.rstrip(os.sep) + ".pre-restore"
         if os.path.isdir(keep):
             # A second restore must not destroy what the first one set aside: keep
@@ -439,8 +461,10 @@ def _keep_pre_restore(path: str):
             shutil.rmtree(older, ignore_errors=True)
             os.replace(keep, older)
         shutil.copytree(path, keep)
+        return True
     except OSError as ex:
         _log.warning("save restore: could not keep %s: %s", path, ex)
+        return False
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -646,8 +670,7 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
         if group["type"] == "plutonium_prefix":
             # Backups made before per-prefix tags hold storage/<game>/ flat
             entries = os.listdir(backup_dir)
-            is_tagged = all(e.isdigit() or e == "heroic" or e.startswith("own_")
-                            for e in entries)
+            is_tagged = all(_is_plut_tag(e) for e in entries)
             if is_tagged:
                 # Sorted so own_old_t4mp restores before own_t4mp and the
                 # current shared-prefix data wins
@@ -655,6 +678,7 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
             else:
                 sources = {group["appids"][0]: backup_dir}
             dsts = []
+            kept, unsafe = set(), set()
             for tag, src_root in sources.items():
                 tdst = _plut_restore_dst(steam_root, group, tag)
                 if not tdst:
@@ -665,8 +689,14 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
                     if not os.path.isdir(src):
                         continue
                     # Once per destination: shared WaW gets two sources
-                    if p == "players" and tdst not in dsts:
-                        _keep_pre_restore(os.path.join(tdst, p))
+                    if p == "players" and tdst not in kept:
+                        kept.add(tdst)
+                        if not _keep_pre_restore(os.path.join(tdst, p)):
+                            unsafe.add(tdst)
+                            on_progress(f"  ⚠ {group_name}: could not keep your current saves in {tdst} "
+                                        "(disk full?), so they were not replaced")
+                    if tdst in unsafe:
+                        continue
                     if _copytree_safe(src, os.path.join(tdst, p), group_name, on_progress):
                         dsts.append(tdst)
             if dsts:
@@ -680,11 +710,13 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
             if install_dir:
                 dst = os.path.join(install_dir, group["subdir"])
 
-        if dst:
-            _keep_pre_restore(dst)
-
         if not dst:
             _log.debug("save restore: %s — dest not found, skipping", group_name)
+            continue
+
+        if not _keep_pre_restore(dst):
+            on_progress(f"  ⚠ {group_name}: could not keep your current saves in {dst} "
+                        "(disk full?), so they were not replaced")
             continue
 
         if _copytree_safe(backup_dir, dst, group_name, on_progress):

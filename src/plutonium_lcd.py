@@ -567,7 +567,8 @@ def _add_heroic_sideload_entry(game_key: str, executable: str,
 
     # Replace existing entry for this app_name, or append
     idx = next(
-        (i for i, g in enumerate(library["games"]) if g.get("app_name") == app_name),
+        (i for i, g in enumerate(library["games"])
+         if isinstance(g, dict) and g.get("app_name") == app_name),
         None,
     )
     if idx is not None:
@@ -772,10 +773,10 @@ def _write_lcd_menu_files(game: dict, game_key: str, lan_wrapper_path: str = Non
     cache_cleanup.py, which launches the Heroic entry instead. Offline (with
     Offline Mode) opens the Offline launcher; cache_cleanup.py runs it.
     """
-    from plutonium import STEAM_MENU_EXES, write_offline_menu_file
+    from plutonium import STEAM_MENU_EXES, write_offline_menu_file, write_script
     online, offline = STEAM_MENU_EXES[game_key]
-    with open(os.path.join(game["install_dir"], online), "w") as f:
-        f.write("#!/bin/bash\n# DeckOps (LCD): cache_cleanup.py launches this entry through Heroic.\n")
+    write_script(os.path.join(game["install_dir"], online),
+                 "#!/bin/bash\n# DeckOps (LCD): cache_cleanup.py launches this entry through Heroic.\n")
     if lan_wrapper_path:
         write_offline_menu_file(os.path.join(game["install_dir"], offline))
 
@@ -879,7 +880,7 @@ def _ensure_bootstrap_sideload_entry(plutonium_exe: str,
     library = _read_heroic_library()
     idx = next(
         (i for i, g in enumerate(library["games"])
-         if g.get("app_name") == BOOTSTRAP_APP_NAME),
+         if isinstance(g, dict) and g.get("app_name") == BOOTSTRAP_APP_NAME),
         None,
     )
     if idx is not None:
@@ -1420,16 +1421,19 @@ def _set_heroic_steam_launch_options(game_key: str, steam_root: str,
         # %command% blocks. Last write wins, which is fine: cache_cleanup.py
         # takes the real game key from the launch menu entry that was picked.
         clear_launch_options(steam_root, appid)
-        set_launch_options(steam_root, appid, launch_opts)
-        prog(f"  HGL launch options set for appid {appid}")
+        if set_launch_options(steam_root, appid, launch_opts):
+            prog(f"  HGL launch options set for appid {appid}")
+        else:
+            prog(f"  ⚠ HGL launch options not set for appid {appid}: launch the game once "
+                 "from Steam, then set it up again")
         # Steam only resolves %command% when a compat tool is set, and plain
         # Play runs the stock game through it, so the game keeps a GE-Proton
         # compat tool entry even though Heroic owns the Proton invocation for
         # Plutonium launches. Clear any stale entry first, then re-set to the
         # correct GE-Proton version.
         try:
-            clear_compat_tool([appid])
-            if set_compat_tool([appid], ge_proton_version) is False:
+            clear_compat_tool([appid], steam_root=steam_root)
+            if set_compat_tool([appid], ge_proton_version, steam_root=steam_root) is False:
                 prog(f"  Could not set compat tool for appid {appid}: config.vdf was not changed")
             else:
                 prog(f"  Compat tool set to {ge_proton_version} for appid {appid}")

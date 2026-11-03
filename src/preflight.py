@@ -26,8 +26,10 @@ OK, WARN, BLOCK = "ok", "warn", "block"
 
 # Mirrors _DG_KEY_MAP in ui_install._run_inner. Kept here so preflight
 # stays a leaf module; update both if the depot game list changes.
-DOWNGRADE_KEYS = {"iw5mp", "iw5mp_ds", "iw5sp"}
-DOWNGRADE_GAME = {"iw5mp": "iw5", "iw5mp_ds": "iw5", "iw5sp": "iw5"}
+# MW3 SP never needs the downgrade ("MW3 SP does not need downgrade, skipped"): counting
+# it made an SP-only install warn about ~10 GB of space and hours of waiting.
+DOWNGRADE_KEYS = {"iw5mp", "iw5mp_ds"}
+DOWNGRADE_GAME = {"iw5mp": "iw5", "iw5mp_ds": "iw5"}
 
 
 def free_gb(path: str):

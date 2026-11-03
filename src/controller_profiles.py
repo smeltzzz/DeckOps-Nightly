@@ -9,17 +9,20 @@ our changes on exit. Legacy DeckOps layout removal remains in the uninstaller.
 import hashlib
 import os
 import shutil
+import time
 
 from log import get_logger
 from steam_common import (
     PROJECT_ROOT, default_steam_root,
     calc_shortcut_appid, find_all_steam_uids, get_deck_serial,
-    patch_configset, shortcut_title_key, keep_original,
+    patch_configset, shortcut_title_key, keep_original, atomic_write,
 )
 
 _log = get_logger(__name__)
 ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets", "controllers")
-TEMPLATES_DIR = os.path.expanduser("~/.steam/steam/controller_base/templates")
+# None: the templates folder of the Steam install DeckOps is set up for (templates_dir()).
+# Set it only to point the module somewhere else (tests).
+TEMPLATES_DIR = None
 TEMPLATE = "controller_neptune_deckops_cod.vdf"
 CONFIGSET = "configset_controller_neptune.vdf"
 CANONICAL = "controller_neptune.vdf"
@@ -71,6 +74,44 @@ def _is_steam_deck():
     return cfg.get_deck_model() in ("lcd", "oled")
 
 
+def templates_dir() -> str:
+    """Steam's global controller templates folder. A fixed ~/.steam/steam only
+    exists for the native install: with Flatpak Steam (or one that moved) the layout
+    went into a folder Steam never reads, and a stray one was created in the home."""
+    return TEMPLATES_DIR or os.path.join(default_steam_root(), "controller_base", "templates")
+
+
+def install_layout(src: str, canonical_path: str):
+    """Put DeckOps' layout at canonical_path (all at once, so a crash can't leave a cut-off
+    file Steam then reads) and record its hash in <path>.deckops-owned.
+
+    The first time the player's own file is kept as <path>.deckops-original. When the file
+    is no longer what DeckOps wrote last time, the player (or Steam) changed it since: that
+    version is kept as <path>.deckops-user-<time> before it is replaced."""
+    with open(src, "rb") as f:
+        data = f.read()
+    digest = hashlib.sha256(data).hexdigest()
+    marker = canonical_path + ".deckops-owned"
+    if os.path.exists(marker):
+        try:
+            with open(marker, encoding="ascii") as m:
+                written = m.read().strip()
+            with open(canonical_path, "rb") as cur:
+                now = hashlib.sha256(cur.read()).hexdigest()
+        except (OSError, UnicodeDecodeError):
+            written = now = None
+        if written and now and now not in (written, digest):
+            try:
+                shutil.copy2(canonical_path, f"{canonical_path}.deckops-user-{int(time.time())}")
+                _log.info("kept the changed layout %s before replacing it", canonical_path)
+            except OSError:
+                _log.warning("could not keep the changed layout %s", canonical_path, exc_info=True)
+    else:
+        keep_original(canonical_path)
+    atomic_write(canonical_path, data)
+    atomic_write(marker, digest.encode("ascii"))
+
+
 def install_controller_templates(on_progress=None):
     """Install only the bundled Steam Deck layout, leaving the player's own alone."""
     prog = on_progress or (lambda msg: None)
@@ -84,9 +125,10 @@ def install_controller_templates(on_progress=None):
     other_build = os.path.expanduser("~/DeckOps" if INSTALL_DIR_NAME == "DeckOps-Nightly"
                                      else "~/DeckOps-Nightly")
     # Leave per-account Steam layouts, including the player's source, untouched.
-    if os.path.isdir(TEMPLATES_DIR) and not os.path.isdir(other_build):
+    templates = templates_dir()
+    if os.path.isdir(templates) and not os.path.isdir(other_build):
         for name in LEGACY_TEMPLATES:
-            path = os.path.join(TEMPLATES_DIR, name)
+            path = os.path.join(templates, name)
             try:
                 if os.path.isfile(path):
                     os.remove(path)
@@ -95,17 +137,19 @@ def install_controller_templates(on_progress=None):
     if not deck:
         prog("  - Steam Deck layout skipped on this device; no external layout is bundled.")
         return
-    os.makedirs(TEMPLATES_DIR, exist_ok=True)
-    shutil.copy2(src, os.path.join(TEMPLATES_DIR, TEMPLATE))
+    os.makedirs(templates, exist_ok=True)
+    shutil.copy2(src, os.path.join(templates, TEMPLATE))
     prog(f"  ✓ Installed {TEMPLATE}")
 
 
 def _shortcut_appids(prog):
     """Return LCD WaW MP shortcut appids; CoD4R MP uses the main Steam tile."""
     try:
-        from detect_games import find_steam_root, parse_library_folders, find_installed_games
+        from detect_games import parse_library_folders, find_installed_games
         from shortcut import SHORTCUTS, mp_on_main_tile
-        steam_root = find_steam_root()
+        # The Steam the layouts are written into (_write_layout), not the first one found:
+        # with a native and a Flatpak Steam both installed they can differ
+        steam_root = default_steam_root()
         if not steam_root or mp_on_main_tile("t4mp"):
             return {}
         installed = find_installed_games(parse_library_folders(steam_root), steam_root)
@@ -131,13 +175,7 @@ def _write_layout(uid, appid, names=(), numbered=True):
     if numbered:
         target_dir = os.path.join(steam_cfg, appid)
         os.makedirs(target_dir, exist_ok=True)
-        canonical_path = os.path.join(target_dir, CANONICAL)
-        if not os.path.exists(canonical_path + ".deckops-owned"):
-            keep_original(canonical_path)
-        shutil.copy2(src, canonical_path)
-        with open(src, "rb") as layout, \
-             open(canonical_path + ".deckops-owned", "w", encoding="ascii") as marker:
-            marker.write(hashlib.sha256(layout.read()).hexdigest())
+        install_layout(src, os.path.join(target_dir, CANONICAL))
     configsets = [CONFIGSET]
     serial = get_deck_serial()
     if serial:
@@ -163,29 +201,36 @@ def _write_layout_safe(uid, appid, names=(), numbered=True, prog=None):
 
 
 def assign_controller_profiles(gyro_mode=None, on_progress=None):
-    """Apply the one Deck layout to supported games, own copies and shortcuts."""
+    """Apply the one Deck layout to supported games, own copies and shortcuts.
+
+    Returns how many layouts were written (0: none could be, so the caller must not
+    report them as applied), or None when this device has no layout to apply."""
     prog = on_progress or (lambda msg: None)
     if not _is_steam_deck():
         prog("  - Controller assignment skipped: bundled layout is Steam Deck only.")
-        return
+        return None
     if not os.path.isfile(os.path.join(ASSETS_DIR, TEMPLATE)):
         raise FileNotFoundError(f"Steam Deck controller layout missing: {TEMPLATE}")
     uids = find_all_steam_uids()
     if not uids:
         prog("  ⚠ No Steam user accounts found; controller assignment skipped.")
-        return
+        return 0
+    written = 0
     for uid in uids:
         for appid, names in APPID_NAMED_KEYS.items():
             if _write_layout_safe(uid, appid, names, prog=prog):
+                written += 1
                 prog(f"  ✓ [{appid}] → {TEMPLATE}")
         for appid, title in _shortcut_appids(prog).items():
             if _write_layout_safe(uid, appid, [shortcut_title_key(title)], prog=prog):
+                written += 1
                 prog(f"  ✓ [shortcut {appid}] → {TEMPLATE}")
         try:
             from shortcut import LAUNCHER_TITLE, get_shortcut_appid
             appid = get_shortcut_appid(LAUNCHER_TITLE)
-            if appid is not None:
-                _write_layout_safe(uid, str(appid), [shortcut_title_key(LAUNCHER_TITLE)], prog=prog)
+            if appid is not None and _write_layout_safe(
+                    uid, str(appid), [shortcut_title_key(LAUNCHER_TITLE)], prog=prog):
+                written += 1
         except Exception as ex:
             prog(f"  ⚠ Offline launcher layout skipped: {ex}")
 
@@ -204,10 +249,15 @@ def assign_controller_profiles(gyro_mode=None, on_progress=None):
             wrote = [_write_layout_safe(uid, appid, [shortcut_title_key(title)], numbered=False, prog=prog)
                      for uid in uids]
             if any(wrote):
+                written += sum(wrote)
                 prog(f"  ✓ [own {appid}] → {TEMPLATE}")
     except Exception as ex:
         prog(f"  ⚠ Could not assign own-copy layouts: {ex}")
-    prog("Steam Deck controller layout assigned.")
+    if written:
+        prog("Steam Deck controller layout assigned.")
+    else:
+        prog("  ⚠ No controller layout could be written.")
+    return written
 
 
 def assign_external_controller_profiles(controller_type=None, gyro_mode=None, on_progress=None):

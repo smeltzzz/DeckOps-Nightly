@@ -498,6 +498,11 @@ class ManagementScreen(QWidget):
 
     def _add_games(self):
         """Open game selection directly, including its Choose Folder action."""
+        # Like every other Library action: a Settings task may still be running (Back
+        # works mid-task), and an install started now would write the same Steam files
+        # and release the sleep lock that task still needs when it ends
+        if self._busy_elsewhere():
+            return
         s = get_screen(self.stack, "SetupScreen")
         if s is None:
             return
@@ -652,6 +657,20 @@ class ManagementScreen(QWidget):
             self._deckops_update_status.setStyleSheet(f"color:{C_DIM};")
 
     def _apply_deckops_update(self):
+        # The update ends in a relaunch that would cut a running Settings task off mid-write
+        if self._busy_elsewhere():
+            return
+        # The update runs on Settings and ends in a relaunch. When it fails there ("Already
+        # up to date", a download error) this button must not keep offering "Update &&
+        # Restart" for it: back to the plain button, which checks again when shown.
+        self._deckops_update_btn.setText("DeckOps Update")
+        try:
+            self._deckops_update_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        self._deckops_update_btn.clicked.connect(self._check_deckops_update)
+        self._deckops_update_status.setText("")
+        self._deckops_update_status.setStyleSheet(f"color:{C_DIM};")
         # Apply runs on Settings; show it so download progress is visible
         s = get_screen(self.stack, "ConfigureScreen")
         go_to(self.stack, "ConfigureScreen")
@@ -729,16 +748,35 @@ class ManagementScreen(QWidget):
             sigs.progress.emit(2, "Closing Steam...")
             kill_steam(on_progress=sigs.log.emit)
             sigs.progress.emit(10, "Checking launcher files...")
-            repair_launcher_files(log)
-            # Also the offline server's prefix; _lan_prefixes sets it up again
+            files_ok = repair_launcher_files(log)
+            # Also the offline server's prefix; _lan_prefixes sets it up again. The old one
+            # is moved aside, not deleted first: when the rebuild fails (offline, GE-Proton
+            # missing) the working prefix is put back instead of lost.
             sigs.progress.emit(40, "Rebuilding launcher prefix...")
-            shutil.rmtree(plutonium.LAN_SERVER_PREFIX, ignore_errors=True)
-            plutonium._lan_prefixes(log)
+            prefix = plutonium.LAN_SERVER_PREFIX
+            aside = prefix + ".deckops_old"
+            shutil.rmtree(aside, ignore_errors=True)
+            moved = os.path.isdir(prefix)
+            if moved:
+                os.replace(prefix, aside)
+            try:
+                plutonium._lan_prefixes(log)
+            except BaseException:
+                if moved:
+                    shutil.rmtree(prefix, ignore_errors=True)
+                    os.replace(aside, prefix)
+                raise
+            shutil.rmtree(aside, ignore_errors=True)
             try: os.remove(os.path.join(PROJECT_ROOT, ".lan_intent.json"))
             except FileNotFoundError: pass
             sigs.progress.emit(90, "Re-adding shortcut...")
-            create_launcher_shortcut(on_progress=log)
-            sigs.log.emit("✓  Offline launcher repaired. Safe to reopen Steam.")
+            if create_launcher_shortcut(on_progress=log) is False:
+                raise RuntimeError("The launcher shortcut could not be added to Steam (see the log above).")
+            if files_ok is False:
+                sigs.log.emit("⚠  Offline launcher repaired, but its files could not be checked against GitHub "
+                              "(no connection?). Run the repair again when online.")
+            else:
+                sigs.log.emit("✓  Offline launcher repaired. Safe to reopen Steam.")
         us = get_screen(self.stack, "UpdateScreen")
         us.task = ("REPAIR OFFLINE LAUNCHER", task)
         go_to(self.stack, "UpdateScreen")
@@ -993,6 +1031,10 @@ class ManagementScreen(QWidget):
             "iw5": ("iw5mp", "iw5mp_ds", "iw5sp"),
         }
         _dg_keys = [k for k in installed_keys if k in _DG_KEY_MAP.get(game_id, ())]
+        # MW3 DS shares MW3 MP's files and is not set up as its own Plutonium mode when MP
+        # is there (_setup and _reinstall drop it the same way)
+        if "iw5mp" in _dg_keys:
+            _dg_keys = [k for k in _dg_keys if k != "iw5mp_ds"]
         if not _dg_keys:
             return
 
@@ -1347,30 +1389,47 @@ class SetupCompleteScreen(QWidget):
         self._restore_status.setVisible(True)
 
         def _run():
+            problems = []
             try:
                 from save_backup import restore_saves
                 steam_root = find_steam_root()
                 restored = restore_saves(
                     steam_root=steam_root,
-                    on_progress=lambda msg: None,
+                    on_progress=lambda msg: problems.append(msg.strip().lstrip("⚠ ").strip())
+                    if "⚠" in msg else None,
                 )
                 count = len(restored) if restored else 0
+                detail = (" " + "; ".join(problems[:2])) if problems else ""
                 if count > 0:
                     groups = ", ".join(restored.keys())
-                    self._s.log.emit(f"✓  Restored saves for {count} group(s): {groups}")
+                    self._s.log.emit(f"DONE|✓  Restored saves for {count} group(s): {groups}."
+                                     + (f" Not everything could be restored:{detail}" if problems else ""))
+                elif problems:
+                    # Copies that failed (a full disk, permissions) are not "no save data":
+                    # the offer stays so the player can try again
+                    self._s.log.emit(f"RETRY|⚠  Restore failed:{detail}")
                 else:
-                    self._s.log.emit("No matching save data found to restore.")
+                    self._s.log.emit("DONE|No matching save data found to restore.")
             except Exception as ex:
-                self._s.log.emit(f"⚠  Restore failed: {ex}")
+                self._s.log.emit(f"RETRY|⚠  Restore failed: {ex}")
 
         self._s = _Sigs()
         self._s.log.connect(self._restore_finished)
         threading.Thread(target=_run, daemon=True).start()
 
     def _restore_finished(self, message):
-        self._mark_offer_handled()
-        self._restore_status.setText(message)
+        kind, sep, text = message.partition("|")
+        if not sep or kind not in ("DONE", "RETRY"):
+            kind, text = "DONE", message
+        self._restore_status.setText(text)
         self._restore_status.setVisible(True)
+        if kind == "RETRY":
+            # The restore did not happen: dismissing the offer for good (the backup is
+            # still there) left the player no way to restore it
+            self._restore_btn.setEnabled(True)
+            self._restore_skip.setEnabled(True)
+            return
+        self._mark_offer_handled()
         self._restore_btn.setVisible(False)
         self._restore_skip.setVisible(False)
         self._restore_body.setVisible(False)
@@ -1805,10 +1864,16 @@ class ConfigureScreen(QWidget):
                 s.log.emit("Closing Steam...")
                 kill_steam(on_progress=lambda msg: s.log.emit(f"  {msg}"))
                 install_controller_templates(on_progress=s.log.emit)
-                assign_controller_profiles(on_progress=s.log.emit)
-                sr = cfg.load().get("steam_root", "")
-                if sr:
-                    set_steam_input_enabled(sr)
+                if assign_controller_profiles(on_progress=s.log.emit) == 0:
+                    # No Steam account, or every layout failed to write: not "applied"
+                    reason.append("No controller layout could be written (is a Steam account signed in "
+                                  "on this device?); see the log.")
+                    s.done.emit(False)
+                    return
+                # Same root the rest of DeckOps resolves: a config without steam_root
+                # used to skip Steam Input silently
+                from steam_common import default_steam_root
+                set_steam_input_enabled(default_steam_root())
                 s.done.emit(True)
                 s.log.emit("✓  Controller profiles applied. It is now safe to reopen Steam.")
             except Exception as ex:
@@ -1878,7 +1943,8 @@ class ConfigureScreen(QWidget):
                 from game_config import rename_player
                 from detect_games import find_all_games as _find_all
                 steam_root = cfg.load().get("steam_root", "") or find_steam_root()
-                installed = _find_all(steam_root) if steam_root else {}
+                # As the other Settings actions: the copy that was set up, not the Steam one
+                installed = _find_all(steam_root, preferred_sources=cfg.get_setup_games()) if steam_root else {}
                 count = rename_player(
                     name, steam_root, installed_games=installed,
                     on_progress=lambda msg: s.log.emit(msg),
@@ -1970,7 +2036,7 @@ class ConfigureScreen(QWidget):
                 from game_config import set_fps_fov
                 from detect_games import find_all_games as _find_all
                 steam_root = cfg.load().get("steam_root", "") or find_steam_root()
-                installed = _find_all(steam_root) if steam_root else {}
+                installed = _find_all(steam_root, preferred_sources=cfg.get_setup_games()) if steam_root else {}
                 count = set_fps_fov(steam_root, installed,
                                     on_progress=lambda msg: _log.info("fps/fov: %s", msg.strip()))
                 s.log.emit(f"✓  Wrote 90 FOV and 90 FPS to {count} config file(s). "
@@ -2012,13 +2078,19 @@ class ConfigureScreen(QWidget):
             try:
                 from cache_cleanup import cleanup_shader_cache, STEAM_APPIDS
                 setup = cfg.get_setup_games()
-                cleared = 0
-                for key in STEAM_APPIDS:
+                # One cache per Steam appid: WaW SP and MP are two keys but one game
+                appids, failed = set(), False
+                for key, appid in STEAM_APPIDS.items():
                     if key in setup:
                         source = setup[key].get("source", "steam")
-                        cleanup_shader_cache(key, source)
-                        cleared += 1
-                s.log.emit(f"✓  Shader cache cleared for {cleared} game(s).")
+                        if cleanup_shader_cache(key, source) is False:
+                            failed = True
+                        appids.add(appid)
+                if failed:
+                    s.log.emit(f"⚠  Shader cache cleared for {len(appids)} game(s), but some "
+                               "folders could not be removed. Close Steam and try again.")
+                else:
+                    s.log.emit(f"✓  Shader cache cleared for {len(appids)} game(s).")
             except Exception as ex:
                 s.log.emit(f"✗  Failed: {ex}")
             finally:
@@ -2178,26 +2250,23 @@ class ConfigureScreen(QWidget):
             self.status.setText(f"✗  Wait for this to finish first: {str(busy).rstrip('.')}.")
             return
         self.status.setText("Launching uninstaller...")
-        try:
-            # Launch in Konsole so the user can see progress
-            subprocess.Popen(
-                ["konsole", "-e", "bash", uninstall_script],
-                start_new_session=True,
-            )
-            # Close DeckOps — the uninstaller will remove our files
-            _kill_audio()
-            QApplication.instance().quit()
-        except Exception:
-            # Konsole not available (shouldn't happen on SteamOS)
+        # Konsole first so the user can see progress; xterm if it isn't there. Only the
+        # launch is in the try: an error from quitting (after Konsole started) used to
+        # start a second uninstaller in xterm.
+        error = None
+        for terminal in ("konsole", "xterm"):
             try:
-                subprocess.Popen(
-                    ["xterm", "-e", "bash", uninstall_script],
-                    start_new_session=True,
-                )
-                _kill_audio()
-                QApplication.instance().quit()
+                subprocess.Popen([terminal, "-e", "bash", uninstall_script], start_new_session=True)
+                error = None
+                break
             except Exception as ex:
-                self.status.setText(f"✗  Could not launch uninstaller: {ex}")
+                error = ex
+        if error is not None:
+            self.status.setText(f"✗  Could not launch uninstaller: {error}")
+            return
+        # Close DeckOps — the uninstaller will remove our files
+        _kill_audio()
+        QApplication.instance().quit()
 
     # ── Update check ────────────────────────────────────────────────────────
     _GITHUB_USER = GITHUB_USER
@@ -2239,6 +2308,13 @@ class ConfigureScreen(QWidget):
             self._update_status.setStyleSheet(f"color:{C_DIM};")
 
     def _apply_update(self):
+        # The update ends in os.execv: a task still running here (closing Steam, rewriting
+        # shortcuts.vdf) would be killed mid-write. The uninstaller and Reset guard the same way.
+        busy = inhibit.busy()
+        if busy:
+            self._update_status.setText(f"Wait for this to finish first: {str(busy).rstrip('.')}.")
+            self._update_status.setStyleSheet(f"color:{C_TREY};")
+            return
         reply = QMessageBox.question(
             self, "Update DeckOps",
             "DeckOps will download the update and relaunch.\n\nContinue?",

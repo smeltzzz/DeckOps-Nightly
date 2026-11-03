@@ -34,7 +34,7 @@ _log = get_logger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-from steam_common import PROJECT_ROOT
+from steam_common import PROJECT_ROOT, atomic_write
 CONFIGS_DIR  = os.path.join(PROJECT_ROOT, "assets", "configs")
 
 # Heroic shared default prefix — used by LCD online play for all Plutonium
@@ -499,8 +499,8 @@ def _deploy_config(src, dest, keep_display):
             continue
         out.append(line)
     out += [line for key, line in saved.items() if key not in used]
-    with open(dest, "w", encoding="utf-8", newline="") as f:
-        f.write(nl.join(out) + nl)
+    # All at once: the player's saved display lines are only in memory now
+    atomic_write(dest, (nl.join(out) + nl).encode("utf-8"))
     return "copied"
 
 
@@ -649,10 +649,13 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
                     skipped += 1
                     continue
 
-            os.makedirs(dest_dir, exist_ok=True)
             dest = os.path.join(dest_dir, os.path.basename(src))
 
             try:
+                # Inside the try: one destination that can't be created (a read-only SD
+                # card library, a file where a folder should be) is this game's failure
+                # to count, not an exception that ends the loop for every later game
+                os.makedirs(dest_dir, exist_ok=True)
                 if _deploy_config(src, dest, keep_display) == "kept":
                     prog(f"  = {key}: kept your {os.path.basename(src)} (My Own resolution)")
                 else:
@@ -992,17 +995,8 @@ def _patch_dvars(path, values, create=False, binds=None, drop=()):
     if new == text:
         return False
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".deckops-tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
-            f.write(new)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)          # a full disk used to leave a stray .deckops-tmp behind
-        except OSError:
-            pass
-        raise
+    # Temp file, fsync, rename; keeps the file's permissions and cleans up after a full disk
+    atomic_write(path, new.encode("utf-8", "surrogateescape"))
     return True
 
 
@@ -1086,7 +1080,9 @@ def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
                     profiles = _cod4_appdata_profiles(steam_root, install_dir, own_pfx)
                     if os.path.isdir(profiles):
                         for sub in os.listdir(profiles):
-                            patch(os.path.join(profiles, sub, name), key)
+                            # active.txt sits here beside the profile folders
+                            if os.path.isdir(os.path.join(profiles, sub)):
+                                patch(os.path.join(profiles, sub, name), key)
                 except OSError:
                     _log.debug("cod4 appdata profiles not read", exc_info=True)
 

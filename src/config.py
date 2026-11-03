@@ -357,7 +357,8 @@ def get_offline_mode() -> bool:
     game, so they keep it."""
     c = load()
     if c.get("offline_mode") is None:
-        on = any(e.get("lan_wrapper_path") for e in c.get("setup_games", {}).values())
+        on = any(isinstance(e, dict) and e.get("lan_wrapper_path")
+                 for e in c.get("setup_games", {}).values())
         _set("offline_mode", on)
         return on
     return bool(c["offline_mode"])
@@ -414,7 +415,8 @@ def set_game_source(source: str):
 
 def get_music_enabled() -> bool:
     """Returns True if background music is enabled."""
-    return load().get("music_enabled", True)
+    value = load().get("music_enabled", True)
+    return value if isinstance(value, bool) else True       # a hand edit like "no" is no switch
 
 
 def set_music_enabled(enabled: bool):
@@ -424,7 +426,10 @@ def set_music_enabled(enabled: bool):
 
 def get_music_volume() -> float:
     """Returns music volume as a float between 0.0 and 1.0."""
-    return load().get("music_volume", 0.4)
+    value = load().get("music_volume", 0.4)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+        return DEFAULTS["music_volume"]         # a text or null value would reach the audio output
+    return max(0.0, min(1.0, float(value)))
 
 
 def set_music_volume(volume: float):
@@ -603,6 +608,8 @@ def is_game_setup_for_source(game_key: str, source: str) -> bool:
     entry = load().get("setup_games", {}).get(game_key)
     if entry is None:
         return False
+    if not isinstance(entry, dict):         # damaged by a hand edit: no source recorded
+        return source == "steam"
     return entry.get("source", "steam") == source
 
 

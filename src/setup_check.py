@@ -28,8 +28,6 @@ CLIENT_MARKERS = {
     "t6sp_mod": "deckops_t6sp_mod.json",
 }
 
-# Clients whose Steam copy gets a launch option (CoD4's is worked out by iw3sp)
-_LAUNCH_OPTION_CLIENTS = {"iw4x", "iw-pad", "plutonium", "t6sp_mod"}
 _COD4_KEYS = ("cod4mp", "cod4sp")
 
 

@@ -306,7 +306,12 @@ fi
 info "Sweeping stale plut_lan.sh sidecars..."
 
 STEAM_ROOT_FOR_SWEEP=""
-for r in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.steam/root"; do
+# The same places the uninstaller looks (detect_games.STEAM_PATHS): Flatpak Steam and
+# the Debian package keep their root elsewhere
+for r in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.steam/root" \
+         "$HOME/.steam/debian-installation" \
+         "$HOME/.var/app/com.valvesoftware.Steam/data/Steam" \
+         "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
     if [ -d "$r/steamapps" ]; then
         STEAM_ROOT_FOR_SWEEP="$r"
         break
@@ -317,7 +322,7 @@ LAN_SWEEP_DIRS=()
 [ -n "$STEAM_ROOT_FOR_SWEEP" ] && LAN_SWEEP_DIRS+=("$STEAM_ROOT_FOR_SWEEP/steamapps/common")
 
 LF_VDF_SWEEP="$STEAM_ROOT_FOR_SWEEP/steamapps/libraryfolders.vdf"
-if [ -f "$LF_VDF_SWEEP" ]; then
+if [ -n "$STEAM_ROOT_FOR_SWEEP" ] && [ -f "$LF_VDF_SWEEP" ]; then
     while IFS= read -r libpath; do
         [ -d "$libpath/steamapps/common" ] && LAN_SWEEP_DIRS+=("$libpath/steamapps/common")
         [ -d "$libpath/SteamLibrary/steamapps/common" ] && LAN_SWEEP_DIRS+=("$libpath/SteamLibrary/steamapps/common")

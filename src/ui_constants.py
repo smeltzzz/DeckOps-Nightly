@@ -21,7 +21,7 @@ from identity import BUILD_BADGE, BRANCH
 from log import get_logger
 from ui_theme import (
     C_BG, C_CARD, C_SURFACE, C_LINE, C_TEXT, C_DIM, C_IW, C_TREY,
-    C_DARK_BTN, C_RED_BTN, C_BLUE_BTN, C_FOCUS,
+    C_DARK_BTN, C_RED_BTN, C_FOCUS,
 )
 
 _log = get_logger(__name__)

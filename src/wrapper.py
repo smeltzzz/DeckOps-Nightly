@@ -536,10 +536,15 @@ def set_launch_options(steam_root, appid, options):
     steam_root  — path to the Steam root directory
     appid       — int or str Steam appid
     options     — launch option string to set, e.g. "iw4x.exe %command%"
+
+    Returns how many Steam accounts have the option in place afterwards. 0 means
+    nothing was written (no account has an entry for the game yet, an unreadable
+    file, a failed write): callers must not report the option as set then.
     """
     appid = str(appid)
     # Escape double quotes so the value is valid inside a VDF quoted string
     vdf_options = options.replace('"', '\\"')
+    in_place = 0
 
     for uid, vdf_path, content in _localconfigs(steam_root):
         block = _app_block(content, appid)
@@ -554,6 +559,7 @@ def set_launch_options(steam_root, appid, options):
             if found:
                 existing = content[found[0][1]:found[0][2]]
                 if vdf_options in existing and len(found) == 1:
+                    in_place += 1
                     continue
                 new_options = existing if vdf_options in existing else \
                     (existing.strip() + " " + vdf_options).strip()
@@ -566,6 +572,12 @@ def set_launch_options(steam_root, appid, options):
 
         if _write_and_validate_vdf(vdf_path, content, errors="surrogateescape"):
             _record_localconfig(uid, appid, "LaunchOptions", vdf_options)
+            in_place += 1
+
+    if not in_place:
+        _log.warning("LaunchOptions not set for %s: no Steam account has an entry for it "
+                     "(launch the game once from Steam) or the write failed", appid)
+    return in_place
 
 
 def clear_launch_options(steam_root, appid):
@@ -941,10 +953,14 @@ def clear_compat_tool(appids, steam_root=None):
 
     appids — list of int or str appids
     steam_root — optional override of the configured/detected Steam root
+
+    Returns False when an entry may still be there (config.vdf did not parse, or
+    the change could not be written), True otherwise, including when there was
+    nothing to clear.
     """
     config_path = os.path.join(_steam_root(steam_root), "config", "config.vdf")
     if not os.path.exists(config_path):
-        return
+        return True
 
     with open(config_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         data = f.read()
@@ -973,11 +989,14 @@ def clear_compat_tool(appids, steam_root=None):
             modified = True
     except ValueError as ex:
         _log.warning("config.vdf not parsed, compat tool not cleared: %s", ex)
-        return
+        return False
 
-    if modified and _write_and_validate_vdf(config_path, data, errors="surrogateescape"):
+    if modified:
+        if not _write_and_validate_vdf(config_path, data, errors="surrogateescape"):
+            return False
         for appid in appids:
             _remove_config_vdf(str(appid), "CompatToolMapping")
+    return True
 
 
 def set_default_launch_option(steam_root, appids_config):

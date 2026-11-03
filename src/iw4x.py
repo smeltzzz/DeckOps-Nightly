@@ -21,6 +21,7 @@ Progress is reported via a callback:
     on_progress(percent: int, status: str)
 """
 
+import glob
 import os
 import json
 import shutil
@@ -322,6 +323,15 @@ def refresh_steam_menu(steam_root: str, log=lambda m: None) -> bool:
 
 # ── DLC install ──────────────────────────────────────────────────────────────
 
+def _sweep_staging(install_dir: str):
+    """Staging folders (.deckops_iw4x_*, manifest ones included) that a run killed
+    mid-download left in the game folder: they hold release.zip, the dll and the
+    extracted tree, hundreds of MB on a small SD card, and nothing else ever removes
+    them. The other clients sweep theirs the same way."""
+    for old in glob.glob(os.path.join(glob.escape(install_dir), ".deckops_iw4x_*")):
+        shutil.rmtree(old, ignore_errors=True)
+
+
 def install_iw4x_dlc(install_dir: str, on_progress=None):
     """
     Download and install free DLC content from cdn.iw4x.io.
@@ -336,6 +346,7 @@ def install_iw4x_dlc(install_dir: str, on_progress=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     prog = on_progress or (lambda *a: None)
+    _sweep_staging(install_dir)
 
     # ── Fetch manifest ────────────────────────────────────────────────────
     prog(0, "Fetching DLC manifest...")
@@ -449,6 +460,7 @@ def install_iw4x(game: dict, steam_root: str,
     # The launcher updates itself on every launch, so an existing one is kept
     # when the lookup fails; only a first install needs it.
     prog(2, "Checking latest launcher version...")
+    _sweep_staging(install_dir)
     existing_launcher = os.path.isfile(os.path.join(install_dir, "iw4x-launcher.exe"))
     try:
         launcher_url, launcher_dg = github_asset("iw4x/launcher", "x86_64-windows.zip")

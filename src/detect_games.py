@@ -411,7 +411,7 @@ KEY_TO_SENTINEL = {
     "cod4mp": "cod4", "cod4sp": "cod4",
     "t4sp":   "waw",  "t4mp":   "waw",
     "iw4sp":  "mw2",  "iw4mp":  "mw2",
-    "iw5sp":  "mw3",  "iw5mp":  "mw3",
+    "iw5sp":  "mw3",  "iw5mp":  "mw3",  "iw5mp_ds": "mw3",
     "t5sp":   "bo1",  "t5mp":   "bo1",
     "t6sp":   "bo2",  "t6mp":   "bo2",  "t6zm": "bo2",
 }

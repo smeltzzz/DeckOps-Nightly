@@ -121,10 +121,16 @@ def undo_cod4r(install_dir: str, log=lambda m: None) -> bool:
     CoD4R's binaries."""
     if not os.path.exists(os.path.join(install_dir, COD4R_METADATA_FILE)):
         return True
-    origs = [os.path.join(install_dir, n + ORIG_SUFFIX) for n in STOCK_FILES]
-    if not all(os.path.isfile(p) for p in origs):
+    pairs = list(zip(STOCK_FILES, (os.path.join(install_dir, n + ORIG_SUFFIX) for n in STOCK_FILES),
+                     strict=True))
+    # keep_stock_files copies both stock files together, so only a run cut off half way
+    # here (one restored, then a failure) leaves a copy for one of them and none for the
+    # other. The retry then finishes with the copies that are left instead of refusing
+    # with "no stock copies were kept". No copy at all is the real "CoD4R without backups".
+    todo = [(name, orig) for name, orig in pairs if os.path.isfile(orig)]
+    if not todo:
         return False
-    for name, orig in zip(STOCK_FILES, origs):
+    for name, orig in todo:
         os.replace(orig, os.path.join(install_dir, name))
         log(f"  Restored the stock {name}")
     _remove_files(install_dir, _COD4R_FILES, log)
@@ -640,19 +646,6 @@ def install_cod4x(game: dict, steam_root: str, proton_path: str,
     compatdata_path = _nvme_compatdata(str(appid))
     log(f"  Prefix path: {compatdata_path}")
 
-    # ── Step 0: Switching from CoD4R ─────────────────────────────────────
-    # CoD4x needs the stock iw3mp.exe and mss32.dll (setup.exe keeps the
-    # stock mss32.dll as miles32.dll and chain-loads it). On top of CoD4R's
-    # builds the result was a broken mix that still passed the checks below.
-    if os.path.exists(os.path.join(install_dir, COD4R_METADATA_FILE)):
-        prog(3, "Removing CoD4R first...")
-        if not undo_cod4r(install_dir, log):
-            raise RuntimeError(
-                "CoD4R replaced iw3mp.exe and mss32.dll and no stock copies were kept, "
-                "so CoD4x can't be installed over it. Restore the original game files first "
-                "(Steam: Call of Duty 4 > Properties > Installed Files > Verify integrity), "
-                "then install CoD4x again.")
-
     # ── Step 1: Write registry keys (pre-setup) ─────────────────────────
     # Write before the setup.exe run so Steam skips first-launch installers.
     prog(5, "Writing registry keys...")
@@ -700,6 +693,23 @@ def install_cod4x(game: dict, steam_root: str, proton_path: str,
                     f"Primary (cod4x.ovh): {e} — Fallback (archive.org): {e2}"
                 ),
             )
+
+    # ── Step 2b: Switching from CoD4R ────────────────────────────────────
+    # CoD4x needs the stock iw3mp.exe and mss32.dll (setup.exe keeps the
+    # stock mss32.dll as miles32.dll and chain-loads it). On top of CoD4R's
+    # builds the result was a broken mix that still passed the checks below.
+    # Only now, with the installer downloaded: removing CoD4R first left the player
+    # with neither client when they were offline (cod4r.install_cod4r stages its files
+    # before it removes CoD4x for the same reason).
+    if os.path.exists(os.path.join(install_dir, COD4R_METADATA_FILE)):
+        prog(52, "Removing CoD4R first...")
+        if not undo_cod4r(install_dir, log):
+            shutil.rmtree(setup_dir, ignore_errors=True)
+            raise RuntimeError(
+                "CoD4R replaced iw3mp.exe and mss32.dll and no stock copies were kept, "
+                "so CoD4x can't be installed over it. Restore the original game files first "
+                "(Steam: Call of Duty 4 > Properties > Installed Files > Verify integrity), "
+                "then install CoD4x again.")
 
     # ── Step 3: Run setup.exe through Proton ───────────────────────────────
     # /DIR= tells Inno Setup where to install. Registry key (step 1b) is a

@@ -88,6 +88,8 @@ class WelcomeScreen(QWidget):
     def _start_scan(self):
         if self._scanning: return
         self._scanning = True
+        # A failed rescan must not hand the previous scan's games on to Set Up
+        self.steam_installed, self.own_installed, self.installed = {}, {}, {}
         self.bar.setValue(20); self.results.setText(""); self.notice.setVisible(False)
         self.cont.setVisible(False); self.retry.setVisible(False); self.back.setVisible(False)
         self.status.setText("Scanning for Steam and games...")
@@ -1148,6 +1150,16 @@ class _BaseInstallScreen(QWidget):
         """One record per selected key; phases overwrite status as they run."""
         self._results = [{"key": k, "name": gd["base"], "status": "pending", "reason": ""}
                          for k, gd, _g in self.selected]
+        self._notes = []
+
+    def _note(self, text):
+        """A step that is not one game's own but still failed (display configs, controller
+        layout, the Offline launcher shortcut): logged and listed in the summary, which
+        used to read "all ready" while it was missing."""
+        self._s.log.emit(f"⚠  {text}")
+        if not hasattr(self, "_notes"):
+            self._notes = []
+        self._notes.append(text)
 
     def _mark(self, key, status, reason=""):
         for r in self._results:
@@ -1162,6 +1174,16 @@ class _BaseInstallScreen(QWidget):
             for r in self._results:
                 if r["key"] == k and r["status"] == "ok":
                     r["status"] = "failed"; r["reason"] = reason
+                    # The phase that succeeded already wrote the game into the config.
+                    # Left there, it reads "set up": Set Up greys it out and it can't be
+                    # picked again, while the summary says it failed (on a first run
+                    # nothing is selectable then, so setup never completes).
+                    try:
+                        source = "own" if k in (self.own_selected or {}) else "steam"
+                        if cfg.is_game_setup_for_source(k, source):
+                            cfg.unmark_game_setup(k)
+                    except Exception as ex:
+                        _log_to_file(f"could not unmark {k} after a failed step: {ex}")
 
     def _retryable(self):
         return [r for r in self._results if r["status"] in ("failed", "pending", "skipped")]
@@ -1182,6 +1204,8 @@ class _BaseInstallScreen(QWidget):
             if r["reason"]:
                 txt += f'<span style="color:{C_DIM}"> · {html.escape(r["reason"][:120])}</span>'
             rows.append(txt)
+        for note in getattr(self, "_notes", ()):
+            rows.append(f'<span style="color:{C_TREY}">⚠&nbsp;&nbsp;{html.escape(note[:160])}</span>')
         self.summary.setText("<br>".join(rows))
         self.summary.setVisible(True)
         self.summary_scroll.setVisible(True)
@@ -1600,11 +1624,14 @@ class _BaseInstallScreen(QWidget):
                 proton_path=proton,
                 steam_root=self.steam_root,
             )
-            if done < len(dep_targets):
-                self._s.log.emit(f"⚠  Prefix dependencies: only {done}/{len(dep_targets)} ready; "
+            # One prefix per appid: CoD4 MP + SP (or WaW SP + MP) are two targets but one
+            # prefix, and ensure_all_prefix_deps counts prefixes
+            n_prefixes = len({os.path.normpath(c) for _, c in dep_targets})
+            if done < n_prefixes:
+                self._s.log.emit(f"⚠  Prefix dependencies: only {done}/{n_prefixes} ready; "
                                  f"games on the other prefixes may not start until Set Up is run again")
             else:
-                self._s.log.emit(f"✓  Prefix dependencies: {done}/{len(dep_targets)} ready")
+                self._s.log.emit(f"✓  Prefix dependencies: {done}/{n_prefixes} ready")
         self._s.pulse_stop.emit()
         _log_to_file("[BREADCRUMB] prefix deps done")
 
@@ -1881,6 +1908,16 @@ class _BaseInstallScreen(QWidget):
             # shortcuts, controller profiles -- was left half set up.
             def _plut_bootstrap():
                 """Log in to / update Plutonium. None when ready, else the reason."""
+                def _launch():
+                    if is_lcd:
+                        launch_bootstrapper_lcd(
+                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m))
+                    else:
+                        launch_bootstrapper(
+                            proton,
+                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
+                            steam_root=self.steam_root)
+
                 if not plut_ready:
                     if is_lcd:
                         self._s.progress.emit(self._ppct(0), "Setting up Plutonium through HGL...")
@@ -1901,16 +1938,7 @@ class _BaseInstallScreen(QWidget):
                             "  4. Click the button below to continue"
                         )
                     try:
-                        if is_lcd:
-                            launch_bootstrapper_lcd(
-                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m)
-                            )
-                        else:
-                            launch_bootstrapper(
-                                proton,
-                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
-                                steam_root=self.steam_root,
-                            )
+                        _launch()
                     except DownloadError as dl_ex:
                         _dl_resolved = False
                         while not _dl_resolved:
@@ -1920,14 +1948,7 @@ class _BaseInstallScreen(QWidget):
                             self._retry_dl_event.wait()
                             if self._retry_dl_choice == "retry":
                                 try:
-                                    if is_lcd:
-                                        launch_bootstrapper_lcd(
-                                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m))
-                                    else:
-                                        launch_bootstrapper(
-                                            proton,
-                                            on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
-                                            steam_root=self.steam_root)
+                                    _launch()
                                     _dl_resolved = True
                                 except DownloadError as dl_ex2:
                                     dl_ex = dl_ex2
@@ -1943,7 +1964,15 @@ class _BaseInstallScreen(QWidget):
                                     self._s.log.emit("  ✗  Skipped by user.")
                                     return "Plutonium download skipped"
                                 self._s.log.emit(f"  ✓  {dl_ex.label} placed manually")
-                                _dl_resolved = True
+                                # Placing the file is not starting Plutonium: without
+                                # this the screen waited for a login window that never
+                                # opened, and the games were marked failed. The retry
+                                # branch above does the same.
+                                try:
+                                    _launch()
+                                    _dl_resolved = True
+                                except DownloadError as dl_ex2:
+                                    dl_ex = dl_ex2
                             else:
                                 self._s.log.emit("  ✗  Skipped by user.")
                                 return "Plutonium download skipped"
@@ -1983,29 +2012,26 @@ class _BaseInstallScreen(QWidget):
                         "  3. Close the Plutonium window\n"
                         "  4. Click the button below to continue"
                     )
+                    launched = True
                     try:
-                        if is_lcd:
-                            launch_bootstrapper_lcd(
-                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m)
-                            )
-                        else:
-                            launch_bootstrapper(
-                                proton,
-                                on_progress=lambda p, m: self._s.progress.emit(self._ppct(p), m),
-                                steam_root=self.steam_root,
-                            )
+                        _launch()
                     except Exception as ex:
+                        launched = False
                         self._s.log.emit(f"  Plutonium update check skipped: {ex}")
 
-                    if is_lcd:
-                        self._s.pulse_start.emit("Waiting for Plutonium update")
+                    # Nothing opened when the launch failed: waiting for a Plutonium
+                    # window to be closed would hold the install until a click on a
+                    # button that has nothing to confirm
+                    if launched:
+                        if is_lcd:
+                            self._s.pulse_start.emit("Waiting for Plutonium update")
 
-                    self._s.plut_wait.emit()
-                    self._plut_event.wait()
-                    self._s.plut_go.emit()
+                        self._s.plut_wait.emit()
+                        self._plut_event.wait()
+                        self._s.plut_go.emit()
 
-                    if is_lcd:
-                        self._s.pulse_stop.emit()
+                        if is_lcd:
+                            self._s.pulse_stop.emit()
 
                     self._s.log.emit("✓  Plutonium ready.")
                 return None
@@ -2041,10 +2067,15 @@ class _BaseInstallScreen(QWidget):
                 clear_launch_options(self.steam_root, appid)
             # Only clear mappings that are re-applied below (GE-Proton found
             # and Steam games selected); otherwise earlier setups would lose them.
+            compat_cleared = True
             if ge_version and steam_sel:
-                clear_compat_tool(run_appids, steam_root=self.steam_root)
-            self._s.log.emit("✓  Cleared launch options" +
-                             (" and compat tools" if ge_version and steam_sel else ""))
+                compat_cleared = clear_compat_tool(run_appids, steam_root=self.steam_root) is not False
+            if compat_cleared:
+                self._s.log.emit("✓  Cleared launch options" +
+                                 (" and compat tools" if ge_version and steam_sel else ""))
+            else:
+                self._s.log.emit("⚠  Cleared launch options; old compat tools could not be cleared "
+                                 "(Steam's config.vdf was not changed)")
             # The CoD4 phase ran before Steam closed, so its launch option
             # (IW3SP swap, CoD4R pre-launch update) has to be set now.
             if "7940" in run_appids:
@@ -2076,6 +2107,12 @@ class _BaseInstallScreen(QWidget):
                 self._s.log.emit(f"  CompatToolMapping for Steam appids skipped: {ex}")
                 compat_failed_keys = steam_keys_run
             self._fail_ok(compat_failed_keys, "GE-Proton compat tool not set")
+        elif steam_sel and not ge_version:
+            # Neither a download nor an installed GE-Proton: no compat tool can be set,
+            # so these games can't start as set up. Reporting them ready (the old
+            # behaviour) ended with "Installation complete!" and games that won't run.
+            compat_failed_keys = [k for k, _, _ in steam_sel]
+            self._fail_ok(compat_failed_keys, "no GE-Proton installed")
 
         # Old GE-Protons DeckOps installed that nothing uses any more
         # (keeps this one and the one before it). Steam is closed here.
@@ -2092,11 +2129,13 @@ class _BaseInstallScreen(QWidget):
             try:
                 if cfg.get_offline_mode():
                     from shortcut import create_launcher_shortcut
-                    create_launcher_shortcut(
+                    if create_launcher_shortcut(
                         on_progress=lambda m: self._s.log.emit(m)
-                    )
+                    ) is False:
+                        self._note("The Offline launcher shortcut was not created in Steam")
             except Exception as ex:
                 self._s.log.emit(f"  Launcher shortcut failed: {ex}")
+                self._note(f"The Offline launcher shortcut failed: {ex}")
 
             # LCD: prepare Heroic's shared prefix
             if cfg.is_lcd():
@@ -2236,16 +2275,19 @@ class _BaseInstallScreen(QWidget):
                 self._s.log.emit(f"  Plutonium cleanup skipped: {ex}")
 
         # --- Mark vanilla games
-        for key, gd, game in self.selected:
+        for key, gd, _game in self.selected:
             c = KEY_CLIENT.get(key, "")
             source = "own" if key in own_selected else "steam"
             if c == "steam":
-                if not cfg.is_game_setup_for_source(key, source):
+                # The game stays vanilla, but an earlier phase (IW-Pad) may have
+                # failed it: keep that visible so the summary and Retry see it, and
+                # don't record it as set up -- it would be greyed out in Set Up while
+                # the summary says it failed.
+                phase_failed = any(r["key"] == key and r["status"] == "failed" for r in self._results)
+                if not phase_failed and not cfg.is_game_setup_for_source(key, source):
                     cfg.mark_game_setup(key, "steam", source=source)
                     self._s.log.emit(f"✓  {gd['base']} ({key}) ready")
-                # The game stays vanilla, but an earlier phase (IW-Pad) may have
-                # failed it: keep that visible so the summary and Retry see it.
-                if not any(r["key"] == key and r["status"] == "failed" for r in self._results):
+                if not phase_failed:
                     self._mark(key, "ok")
 
         # --- Game display configs
@@ -2260,6 +2302,8 @@ class _BaseInstallScreen(QWidget):
                 deck_model=cfg.get_deck_model() or "oled",
                 on_progress=lambda msg: self._s.log.emit(msg),
             )
+            if failed:
+                self._note(f"{failed} game display config file(s) could not be written")
             if applied > 0:
                 self._s.log.emit(f"✓  Game display configs: {applied} written"
                                  + (f", {skipped} skipped" if skipped else "")
@@ -2276,9 +2320,11 @@ class _BaseInstallScreen(QWidget):
         try:
             from controller_profiles import install_controller_templates, assign_controller_profiles
             install_controller_templates(on_progress=self._s.log.emit)
-            assign_controller_profiles(on_progress=self._s.log.emit)
+            if assign_controller_profiles(on_progress=self._s.log.emit) == 0:
+                self._note("The Steam Deck controller layout could not be written for any game")
         except Exception as ex:
             self._s.log.emit(f"  Controller layout skipped: {ex}")
+            self._note(f"The Steam Deck controller layout was skipped: {ex}")
 
         try:
             from wrapper import set_steam_input_enabled
