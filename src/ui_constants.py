@@ -11,7 +11,7 @@ import shutil
 import subprocess
 
 from qt import (
-    QLabel, QPushButton, QFrame, QHBoxLayout, QMessageBox, QWidget,
+    QApplication, QLabel, QPushButton, QFrame, QHBoxLayout, QMessageBox, QWidget,
 )
 from qt import Qt, pyqtSignal, QObject, QUrl, QT6
 from qt import QFont, QFontDatabase
@@ -63,7 +63,18 @@ def _copy_log_to_clipboard(status_widget=None):
         tail = "".join(lines[-200:])
         if errs:
             tail = "--- earlier errors ---\n" + "".join(errs) + "--- last 200 lines ---\n" + tail
-        copy_to_clipboard(tail)
+        # copy_to_clipboard() returns normally when neither wl-copy nor xclip
+        # exists, so the line below used to claim success with nothing copied.
+        # Qt's own clipboard needs neither tool.
+        app = QApplication.instance()
+        if app is not None:
+            app.clipboard().setText(tail)
+        try:
+            copy_to_clipboard(tail)
+        except Exception:
+            if app is None:
+                raise
+            _log.debug("clipboard helper failed; Qt clipboard was set", exc_info=True)
         if status_widget:
             status_widget.setText("Log copied to clipboard (last 200 lines)")
     except FileNotFoundError:
@@ -238,8 +249,35 @@ MUSIC_URL = "https://archive.org/download/adrenaline-klickaud/Adrenaline_KLICKAU
 
 # ── Audio ─────────────────────────────────────────────────────────────────────
 
-_music_volume  = cfg.get_music_volume()
-_music_enabled = cfg.get_music_enabled()
+def _clean_volume(value, default: float = 0.4) -> float:
+    """A usable 0.0-1.0 volume from whatever deckops.json holds. A hand-edited
+    or damaged value (null, text, NaN, 7) otherwise crashed the Settings screen
+    on every start (int(None * 100)) and silently muted the player."""
+    if isinstance(value, bool):
+        return default
+    try:
+        vol = float(value)
+    except (TypeError, ValueError):
+        return default
+    if vol != vol:          # NaN
+        return default
+    return max(0.0, min(1.0, vol))
+
+
+def _clean_enabled(value, default: bool = True) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def saved_music_volume() -> float:
+    return _clean_volume(cfg.get_music_volume())
+
+
+def saved_music_enabled() -> bool:
+    return _clean_enabled(cfg.get_music_enabled())
+
+
+_music_volume  = saved_music_volume()
+_music_enabled = saved_music_enabled()
 
 _player = None
 
@@ -278,6 +316,22 @@ def _set_audio_enabled(enabled: bool):
     global _music_enabled
     _music_enabled = enabled
     cfg.set_music_enabled(enabled)
+
+def _reload_audio_settings():
+    """Re-read the saved music settings (after Reset Config wiped them). The
+    module copies kept the old choice: with music turned off, a reset left the
+    window saying "Music: On" while _start_audio, which reads the copy, stayed
+    silent."""
+    global _music_volume, _music_enabled
+    _music_volume = saved_music_volume()
+    _music_enabled = saved_music_enabled()
+    if _player:
+        try:
+            _player.audioOutput().setVolume(_music_volume)
+        except Exception:
+            _log.debug("audio volume reload failed", exc_info=True)
+    if not _music_enabled:
+        _kill_audio()
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────

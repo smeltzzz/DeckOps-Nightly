@@ -173,9 +173,11 @@ def _write_receipt(game_id: str, install_dir: str, merged: dict):
             data = json.load(f)
     except (OSError, ValueError):
         pass
-    if data.get("game_id") != game_id:
+    # Valid JSON that isn't a receipt (a list, null, files as a list) is replaced too
+    if (not isinstance(data, dict) or data.get("game_id") != game_id
+            or not isinstance(data.get("files"), dict)):
         data = {"game_id": game_id, "files": {}}
-    data.setdefault("files", {}).update(merged)
+    data["files"].update(merged)
     data["manifests"] = {str(d["depot"]): d["manifest"] for d in GAME_CONFIGS[game_id]["depots"]}
     data["updated_at"] = datetime.now().isoformat()
     try:
@@ -207,7 +209,8 @@ def _receipt_status(game_id: str, install_dir: str):
     except (OSError, ValueError) as ex:
         _log.warning("Unreadable downgrade receipt in %s: %s", target, ex)
         return None
-    if data.get("game_id") != game_id or not data.get("files"):
+    if (not isinstance(data, dict) or data.get("game_id") != game_id
+            or not isinstance(data.get("files"), dict) or not data["files"]):
         return None
     files = {rf: sz for rf, sz in data["files"].items() if not rf.lower().endswith(_UNCHECKED_EXTS)}
     if not files:
@@ -532,7 +535,8 @@ def open_steam_install(appid: int):
     launch_steam(f"steam://install/{appid}")
 
 
-def copy_to_clipboard(text: str):
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text with wl-copy or xclip. True if a helper took it, False if none did."""
     for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
         proc = None
         try:
@@ -543,7 +547,7 @@ def copy_to_clipboard(text: str):
             proc.communicate(input=text.encode("utf-8"), timeout=5)
             if proc.returncode == 0:
                 _log.debug("Copied to clipboard via %s", cmd[0])
-                return
+                return True
         except (OSError, subprocess.TimeoutExpired):
             # A helper that didn't finish must not be left running
             if proc is not None and proc.poll() is None:
@@ -554,6 +558,7 @@ def copy_to_clipboard(text: str):
                     pass
             continue
     _log.warning("Could not copy to clipboard (no wl-copy or xclip)")
+    return False
 
 
 # --- DepotDownloader management
@@ -1059,15 +1064,37 @@ def _merge_tree(src: str, dst: str, prog):
             pass
 
     staged = []
-    for i, rf in enumerate(rel_files, 1):
-        src_file = os.path.join(src, rf)
-        dst_file = os.path.join(dst, rf)
-        pending = dst_file + _PENDING_SUFFIX
-        os.makedirs(os.path.dirname(dst_file), exist_ok=True)
-        shutil.move(src_file, pending)
-        staged.append((pending, dst_file))
-        if i % 25 == 0 or i == total:
-            prog(f"Preparing files... {i}/{total}")
+    try:
+        for i, rf in enumerate(rel_files, 1):
+            src_file = os.path.join(src, rf)
+            dst_file = os.path.join(dst, rf)
+            pending = dst_file + _PENDING_SUFFIX
+            os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+            try:
+                shutil.move(src_file, pending)
+            except BaseException:
+                # A cross-drive move cut off by a full disk leaves a partial copy
+                if os.path.isfile(src_file) and os.path.lexists(pending):
+                    try:
+                        os.remove(pending)
+                    except OSError:
+                        pass
+                raise
+            staged.append((pending, dst_file, src_file))
+            if i % 25 == 0 or i == total:
+                prog(f"Preparing files... {i}/{total}")
+    except BaseException:
+        # Nothing has replaced a game file yet. Hand the files already moved
+        # out of the staging folder back to it: they used to stay behind as
+        # .deckops-new files (gigabytes of them) nothing ever cleaned up, and
+        # the retry then had to download the depots all over again.
+        for pending, _dst_file, src_file in reversed(staged):
+            try:
+                shutil.move(pending, src_file)
+            except OSError:
+                _log.warning("could not return %s to the staging folder", pending)
+        raise
+    staged = [(pending, dst_file) for pending, dst_file, _src in staged]
 
     for i, (pending, dst_file) in enumerate(staged, 1):
         os.replace(pending, dst_file)
@@ -1150,8 +1177,15 @@ def merge_depots(game_id: str, staging_dir, install_dir: str,
             merged.update(_merge_tree(sdir, target, prog))
             prog("Merge complete.")
 
-    if merged:
-        _write_receipt(game_id, install_dir, merged)
+    if not merged:
+        # Staging held nothing but DepotDownloader's own files (a run that
+        # "succeeded" without fetching anything). This used to report success
+        # and delete the staging folders, so the game was never downgraded.
+        prog(f"WARNING: no depot files were found to merge into {cfg['name']}. "
+             f"Nothing was changed; run the download again.")
+        return False
+
+    _write_receipt(game_id, install_dir, merged)
 
     _cleanup_dd_artifacts(target)
 
@@ -1247,9 +1281,10 @@ def migrate_legacy_iw5(install_dir: str) -> bool:
     receipt = os.path.join(install_dir, RECEIPT_NAME)
     try:
         with open(receipt) as f:
-            if json.load(f).get("game_id") == "iw5":
-                os.remove(receipt)
-                _log.info("Removed legacy MW3 root receipt %s", receipt)
+            old = json.load(f)
+        if isinstance(old, dict) and old.get("game_id") == "iw5":
+            os.remove(receipt)
+            _log.info("Removed legacy MW3 root receipt %s", receipt)
     except FileNotFoundError:
         pass
     except (OSError, ValueError) as ex:

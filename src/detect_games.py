@@ -147,6 +147,16 @@ def find_steam_root():
     return None
 
 
+def _read_text(path):
+    """File contents, or "" when it is missing or unreadable (a libraryfolders.vdf
+    that can't be read must not abort game detection)."""
+    try:
+        with open(path, "r", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
 def _all_library_dirs(steam_root):
     """
     Returns a deduplicated list of all steamapps directories to search.
@@ -171,9 +181,8 @@ def _all_library_dirs(steam_root):
     # 2. libraryfolders.vdf entries
     if steam_root:
         vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
-        if os.path.exists(vdf_path):
-            with open(vdf_path, "r", errors="replace") as f:
-                content = f.read()
+        content = _read_text(vdf_path)
+        if content:
             for path in re.findall(r'"path"\s+"([^"]+)"', content):
                 add(os.path.join(path, "steamapps"))
                 # Some SD card libraries use a SteamLibrary subfolder
@@ -201,9 +210,8 @@ def parse_library_folders(steam_root):
         return dirs
     dirs.append(steam_root)
     vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
-    if os.path.exists(vdf_path):
-        with open(vdf_path, "r", errors="replace") as f:
-            content = f.read()
+    content = _read_text(vdf_path)
+    if content:
         for path in re.findall(r'"path"\s+"([^"]+)"', content):
             if path not in dirs:
                 dirs.append(path)
@@ -251,16 +259,21 @@ def find_installed_games(library_folders, steam_root=None):
             # Parse install dir name and state flags from acf
             install_name = None
             state_flags  = None
-            with open(acf, "r", errors="replace") as f:
-                for line in f:
-                    m = re.search(r'"installdir"\s+"([^"]+)"', line)
-                    if m:
-                        install_name = m.group(1)
-                    m = re.search(r'"StateFlags"\s+"(\d+)"', line)
-                    if m:
-                        state_flags = m.group(1)
-                    if install_name and state_flags:
-                        break
+            try:
+                with open(acf, "r", errors="replace") as f:
+                    for line in f:
+                        m = re.search(r'"installdir"\s+"([^"]+)"', line)
+                        if m:
+                            install_name = m.group(1)
+                        m = re.search(r'"StateFlags"\s+"(\d+)"', line)
+                        if m:
+                            state_flags = m.group(1)
+                        if install_name and state_flags:
+                            break
+            except OSError:
+                # Unreadable or vanished manifest: look in the next library instead
+                # of failing detection of every game
+                continue
 
             if not install_name:
                 continue

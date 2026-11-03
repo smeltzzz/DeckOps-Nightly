@@ -95,6 +95,8 @@ _OWN_SHORTCUT_TITLES = {
     "t6mp":  "Call of Duty: Black Ops II - Multiplayer",
     "t6zm":  "Call of Duty: Black Ops II - Zombies",
     "iw5mp": "Call of Duty: Modern Warfare 3 (2011) - Multiplayer",
+    # Same shortcut title (so the same shortcut appid) as iw5mp in HEROIC_PLUT_GAMES
+    "iw5mp_ds": "Call of Duty: Modern Warfare 3 (2011) - Multiplayer",
 }
 
 

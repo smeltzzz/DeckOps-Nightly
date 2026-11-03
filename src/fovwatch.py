@@ -301,7 +301,8 @@ def watch(root_pid, settings, exe, stop, interval=0.2):
                     idents.pop(name, None)
         except PermissionError as ex:
             try:
-                scope = open("/proc/sys/kernel/yama/ptrace_scope").read().strip()
+                with open("/proc/sys/kernel/yama/ptrace_scope") as f:
+                    scope = f.read().strip()
             except OSError:
                 scope = "?"
             once("perm", f"fovwatch: no access to the game's memory ({ex}); ptrace_scope={scope}")

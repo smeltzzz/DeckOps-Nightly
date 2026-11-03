@@ -435,9 +435,13 @@ def _relocate_chainloader(compatdata_path: str, install_dir: str,
 
     if not os.path.exists(prefix_mss):
         # Neither /DIR nor prefix fallback has the chain-loader
-        if os.path.exists(real_miles):
-            # miles32.dll exists but mss32.dll is same size — might still be ok
-            return True
+        if os.path.exists(real_miles) and os.path.exists(real_mss):
+            # Same size: only fine if the bytes differ. An identical copy is the
+            # stock mss32.dll next to a stale miles32.dll backup (e.g. after a
+            # Steam file verification), i.e. setup.exe installed nothing.
+            import filecmp
+            if not filecmp.cmp(real_mss, real_miles, shallow=False):
+                return True
         log("  ⚠ Chain-loader not found in prefix or game directory — setup.exe may have failed")
         return False
 
@@ -733,10 +737,10 @@ def install_cod4x(game: dict, steam_root: str, proton_path: str,
         from ge_proton import _stop_wine
         _stop_wine(proton_path, os.path.join(compatdata_path, "pfx"))
         shutil.rmtree(setup_dir, ignore_errors=True)
-        raise RuntimeError("CoD4x installer timed out after 10 minutes")
+        raise RuntimeError("CoD4x installer timed out after 10 minutes") from None
     except Exception as e:
         shutil.rmtree(setup_dir, ignore_errors=True)
-        raise RuntimeError(f"CoD4x installer failed: {e}")
+        raise RuntimeError(f"CoD4x installer failed: {e}") from e
     finally:
         shutil.rmtree(setup_dir, ignore_errors=True)
 

@@ -10,6 +10,7 @@ Progress is reported via a callback:
     on_progress(percent: int, status: str)
 """
 
+import glob
 import os
 import json
 import re
@@ -19,7 +20,7 @@ import urllib.parse
 import urllib.request
 
 from net import download as _download, BROWSER_UA as _BROWSER_UA, safe_manifest_path, commit_staged_files
-from steam_common import sha1_file as _sha1
+from steam_common import sha1_file as _sha1, write_json
 
 # The Gitea releases lag behind this: v4.1.5's game.dll breaks right stick
 # aim with m_rawinput on and ignores the config init marker, and the
@@ -94,7 +95,7 @@ def install_iw3sp(game: dict, steam_root: str,
     try:
         files = _get_manifest()
     except Exception as ex:
-        raise RuntimeError(f"Failed to fetch IW3SP-MOD file list: {ex}")
+        raise RuntimeError(f"Failed to fetch IW3SP-MOD file list: {ex}") from ex
 
     # Validate *all* paths before hashing or writing any files. The CDN's
     # manifest is remote input, including paths for files already installed.
@@ -111,6 +112,9 @@ def install_iw3sp(game: dict, steam_root: str,
     if todo:
         # Every file is downloaded and verified before any is swapped in, so a failure
         # part-way can't leave a game.dll from one build next to the exe of another.
+        # Left behind by an earlier run that was killed mid-download
+        for old in glob.glob(os.path.join(glob.escape(install_dir), ".deckops_iw3sp_*")):
+            shutil.rmtree(old, ignore_errors=True)
         staging = tempfile.mkdtemp(prefix=".deckops_iw3sp_", dir=install_dir)
         try:
             for n, sz, h, dest in todo:
@@ -149,7 +153,6 @@ def install_iw3sp(game: dict, steam_root: str,
     # Write metadata
     prog(95, "Saving metadata...")
     meta_path = os.path.join(install_dir, METADATA_FILE)
-    with open(meta_path, "w") as f:
-        json.dump({"source": f"{_CDN}/files.json"}, f, indent=2)
+    write_json(meta_path, {"source": f"{_CDN}/files.json"})
 
     prog(100, "IW3SP-MOD installation complete!")

@@ -75,10 +75,10 @@ def _read_os_release() -> dict:
             with open(path) as f:
                 for line in f:
                     line = line.strip()
-                    if "=" not in line:
+                    if "=" not in line or line.startswith("#"):
                         continue
                     k, v = line.split("=", 1)
-                    kv[k] = v.strip('"')
+                    kv[k] = v.strip("\"'")      # os-release allows single quotes too
             return kv
         except OSError:
             continue

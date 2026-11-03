@@ -657,8 +657,13 @@ def reset():
     """
     global _cache, _cache_key
 
-    with _lock:
-        if os.path.exists(CONFIG_PATH):
+    # Same order as the setters (update lock, then cache lock). Without the update
+    # lock a setter that had already loaded the old config saved it back right after
+    # the delete, and "reset" brought the whole old setup back.
+    with _txn_lock, _lock:
+        try:
             os.remove(CONFIG_PATH)
+        except FileNotFoundError:
+            pass            # already gone (another process reset it): nothing to wipe
         _cache = None
         _cache_key = None

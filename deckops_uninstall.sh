@@ -41,6 +41,23 @@ fi
 GITHUB_USER="smeltzzz"
 GITHUB_REPO="DeckOps-Nightly"
 
+# An identity file from an older install can set BRANCH but lack a name below. The
+# removals at the end build paths from them ("$HOME/.config/$XDG_ID"), and an empty
+# XDG_ID would turn that into the whole of ~/.config. Fill gaps with this branch's
+# own values, then refuse to go on if anything is still empty.
+if [ "$BRANCH" = "$EXPECTED_BRANCH" ]; then
+    : "${INSTALL_DIR_NAME:=DeckOps-Nightly}"
+    : "${XDG_ID:=deckops-nightly}"
+    : "${APP_TITLE:=DeckOps Nightly}"
+    : "${INSTALL_DIR:=$HOME/$INSTALL_DIR_NAME}"
+    : "${VENV_PYTHON:=$INSTALL_DIR/.venv/bin/python3}"
+    : "${ENTRY_POINT:=$INSTALL_DIR/src/main.py}"
+fi
+if [ -z "$HOME" ] || [ -z "$INSTALL_DIR_NAME" ] || [ -z "$XDG_ID" ] || [ -z "$INSTALL_DIR" ]; then
+    echo "  Cannot tell where $EXPECTED_BRANCH is installed (empty HOME or identity); nothing was removed."
+    exit 1
+fi
+
 # ── The other branch ─────────────────────────────────────────────────────────
 # Stable (~/DeckOps) and Nightly (~/DeckOps-Nightly) can be installed side by
 # side. While the other one is installed, its install dir, config, VDF ledger,
@@ -931,7 +948,7 @@ if [ -n "$STEAM_ROOT" ]; then
         fi
         if $_remove_mw2_dlc; then
             for d in "main/iw4x/x86" "iw4x" "iw4x-updoot"; do
-                [ -d "$mw2_dir/$d" ] && rm -rf "$mw2_dir/$d" && success "Removed $d/" || skip "$d/ not found"
+                [ -d "$mw2_dir/$d" ] && rm -rf "${mw2_dir:?}/$d" && success "Removed $d/" || skip "$d/ not found"
             done
             # Remove DLC .ff files (new path and legacy path)
             [ -d "$mw2_dir/zone/iw4x" ] && rm -rf "$mw2_dir/zone/iw4x" && success "Removed zone/iw4x/" || true
@@ -949,7 +966,7 @@ if [ -n "$STEAM_ROOT" ]; then
         fi
         # Zone directories (new + legacy)
         for _zd in "zone/iw4x/x86/patch" "zone/iw4x/x86/zonebuilder" "zone/patch" "zone/zonebuilder"; do
-            [ -d "$mw2_dir/$_zd" ] && rm -rf "$mw2_dir/$_zd" && success "Removed $_zd/" || true
+            [ -d "$mw2_dir/$_zd" ] && rm -rf "${mw2_dir:?}/$_zd" && success "Removed $_zd/" || true
         done
     fi
 
@@ -971,7 +988,7 @@ if [ -n "$STEAM_ROOT" ]; then
             [ -f "$cod4_dir/zone/english/$f" ] && rm -f "$cod4_dir/zone/english/$f" && success "Removed zone/english/$f" || skip "zone/english/$f not found"
         done
         for d in "userraw" "Mods/mp_bots"; do
-            [ -d "$cod4_dir/$d" ] && rm -rf "$cod4_dir/$d" && success "Removed $d/" || skip "$d/ not found"
+            [ -d "$cod4_dir/$d" ] && rm -rf "${cod4_dir:?}/$d" && success "Removed $d/" || skip "$d/ not found"
         done
     fi
 
@@ -1091,7 +1108,7 @@ if [ -n "$STEAM_ROOT" ]; then
         done
         # Remove AlterWare data/ subdirectories (mod scripts, not base game)
         for d in "data/dw" "data/maps" "data/scripts" "data/ui_scripts" "data/sound"; do
-            [ -d "$ghosts_dir/$d" ] && rm -rf "$ghosts_dir/$d" && success "Removed $d/ (Ghosts)"
+            [ -d "$ghosts_dir/$d" ] && rm -rf "${ghosts_dir:?}/$d" && success "Removed $d/ (Ghosts)"
         done
         [ -f "$ghosts_dir/data/open_source_software_disclosure.txt" ] && rm -f "$ghosts_dir/data/open_source_software_disclosure.txt"
     else
@@ -1105,7 +1122,7 @@ if [ -n "$STEAM_ROOT" ]; then
             [ -f "$aw_dir/$f" ] && rm -f "$aw_dir/$f" && success "Removed $f (AW)" || skip "$f not found"
         done
         for d in "data/dw" "data/maps" "data/scripts" "data/ui_scripts" "data/sound"; do
-            [ -d "$aw_dir/$d" ] && rm -rf "$aw_dir/$d" && success "Removed $d/ (AW)"
+            [ -d "$aw_dir/$d" ] && rm -rf "${aw_dir:?}/$d" && success "Removed $d/ (AW)"
         done
         [ -f "$aw_dir/data/open_source_software_disclosure.txt" ] && rm -f "$aw_dir/data/open_source_software_disclosure.txt"
     else
@@ -1526,28 +1543,41 @@ except (json.JSONDecodeError, OSError) as ex:
 
 def validate_vdf(data):
     """Check brace balance using a quote-aware parser."""
-    depth = 0; in_quote = False
-    for i, c in enumerate(data):
-        if c == '"' and (i == 0 or data[i-1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
-            if c == '{': depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth < 0: return False
+    # Inside quotes a backslash escapes the next character, so a value ending in an
+    # escaped backslash ("C:\\") closes at its last quote; "quote not preceded by a
+    # backslash" read that quote as escaped and failed every valid file after it.
+    depth = 0; in_quote = False; i = 0
+    while i < len(data):
+        c = data[i]
+        if in_quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"': in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == '{': depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth < 0: return False
+        i += 1
     return depth == 0
 
 def find_block_end(text, start):
     depth = 0; i = start; in_quote = False
     while i < len(text):
         c = text[i]
-        if c == '"' and (i == 0 or text[i-1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
-            if c == '{': depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0: return i
+        if in_quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"': in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == '{': depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0: return i
         i += 1
     return -1
 
@@ -1703,7 +1733,9 @@ for uid, apps in lc_edits.items():
     if not os.path.exists(vdf_path):
         continue
 
-    with open(vdf_path, "r", errors="replace") as f:
+    # surrogateescape both ways (as wrapper.py does): bytes that are not UTF-8
+    # (a persona or game name) come back unchanged instead of turning into U+FFFD
+    with open(vdf_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         content = f.read()
 
     modified = False
@@ -1794,9 +1826,9 @@ for uid, apps in lc_edits.items():
             except Exception:
                 pass
         import deckops_vdf
-        deckops_vdf.write_file(vdf_path, content.encode("utf-8", "replace"))
+        deckops_vdf.write_file(vdf_path, content.encode("utf-8", "surrogateescape"))
         # Check the file as it is on disk, not the string that was just validated
-        with open(vdf_path, errors="replace") as f:
+        with open(vdf_path, encoding="utf-8", errors="surrogateescape") as f:
             on_disk = f.read()
         if not validate_vdf(on_disk):
             print(f"  uid {uid}: [ledger] VDF validation FAILED — restoring backup")
@@ -1812,7 +1844,7 @@ compat_edits = cv_edits.get("CompatToolMapping", {})
 if compat_edits:
     config_vdf = os.path.join(steam_dir, "config", "config.vdf")
     if os.path.exists(config_vdf):
-        with open(config_vdf, "r", encoding="utf-8") as f:
+        with open(config_vdf, "r", encoding="utf-8", errors="surrogateescape") as f:
             data = f.read()
         cv_modified = False
         for appid, recorded_version in compat_edits.items():
@@ -1839,7 +1871,7 @@ if compat_edits:
                 except Exception:
                     pass
             import deckops_vdf
-            deckops_vdf.write_file(config_vdf, data.encode("utf-8"))
+            deckops_vdf.write_file(config_vdf, data.encode("utf-8", "surrogateescape"))
 
 # ── configset VDF edits ───────────────────────────────────────────────────
 cs_edits = ledger.get("configsets", {})
@@ -1857,7 +1889,7 @@ for cs_filename, keys in cs_edits.items():
         cs_path = os.path.join(steam_cfg_root, cs_filename)
         if not os.path.exists(cs_path):
             continue
-        with open(cs_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(cs_path, "r", encoding="utf-8", errors="surrogateescape") as f:
             cs_content = f.read()
         cs_modified = False
         for key, recorded_template in keys.items():
@@ -1876,7 +1908,7 @@ for cs_filename, keys in cs_edits.items():
             if not validate_vdf(cs_content):
                 raise ValueError(f"invalid configset after cleanup: {cs_path}")
             import deckops_vdf
-            deckops_vdf.write_file(cs_path, cs_content.encode("utf-8"))
+            deckops_vdf.write_file(cs_path, cs_content.encode("utf-8", "surrogateescape"))
 
 # Clean up the ledger file itself
 try:
@@ -1916,27 +1948,40 @@ def find_block_end(text, start):
     depth = 0; i = start; in_quote = False
     while i < len(text):
         c = text[i]
-        if c == '"' and (i == 0 or text[i-1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
-            if c == '{': depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0: return i
+        if in_quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"': in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == '{': depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0: return i
         i += 1
     return -1
 
 def validate_vdf(data):
     """Check brace balance using the same quote-aware parser."""
-    depth = 0; in_quote = False
-    for i, c in enumerate(data):
-        if c == '"' and (i == 0 or data[i-1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
-            if c == '{': depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth < 0: return False
+    # Inside quotes a backslash escapes the next character, so a value ending in an
+    # escaped backslash ("C:\\") closes at its last quote; "quote not preceded by a
+    # backslash" read that quote as escaped and failed every valid file after it.
+    depth = 0; in_quote = False; i = 0
+    while i < len(data):
+        c = data[i]
+        if in_quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"': in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == '{': depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth < 0: return False
+        i += 1
     return depth == 0
 
 for uid in os.listdir(userdata):
@@ -1946,7 +1991,9 @@ for uid in os.listdir(userdata):
     if not os.path.exists(vdf_path):
         continue
 
-    with open(vdf_path, "r", errors="replace") as f:
+    # surrogateescape both ways (as wrapper.py does): bytes that are not UTF-8
+    # (a persona or game name) come back unchanged instead of turning into U+FFFD
+    with open(vdf_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         content = f.read()
 
     # Find the Deck configurator apps block
@@ -1997,10 +2044,10 @@ for uid in os.listdir(userdata):
                 pass
 
         import deckops_vdf
-        deckops_vdf.write_file(vdf_path, new_content.encode("utf-8", "replace"))
+        deckops_vdf.write_file(vdf_path, new_content.encode("utf-8", "surrogateescape"))
 
         # Validate the file as written -- if corrupt, restore backup and leave edits in place
-        with open(vdf_path, errors="replace") as f:
+        with open(vdf_path, encoding="utf-8", errors="surrogateescape") as f:
             on_disk = f.read()
         if not validate_vdf(on_disk):
             print(f"  uid {uid}: VDF validation FAILED — restoring backup")
@@ -2041,15 +2088,24 @@ if not os.path.isdir(userdata):
 
 def validate_vdf(data):
     """Check brace balance using a quote-aware parser."""
-    depth = 0; in_quote = False
-    for i, c in enumerate(data):
-        if c == '"' and (i == 0 or data[i-1] != '\\'):
-            in_quote = not in_quote
-        elif not in_quote:
-            if c == '{': depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth < 0: return False
+    # Inside quotes a backslash escapes the next character, so a value ending in an
+    # escaped backslash ("C:\\") closes at its last quote; "quote not preceded by a
+    # backslash" read that quote as escaped and failed every valid file after it.
+    depth = 0; in_quote = False; i = 0
+    while i < len(data):
+        c = data[i]
+        if in_quote:
+            if c == '\\':
+                i += 2
+                continue
+            if c == '"': in_quote = False
+        elif c == '"':
+            in_quote = True
+        elif c == '{': depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth < 0: return False
+        i += 1
     return depth == 0
 
 # Structural VDF reading, same as the ledger pass above and wrapper.py:
@@ -2186,7 +2242,9 @@ for uid in os.listdir(userdata):
     if not os.path.exists(vdf_path):
         continue
 
-    with open(vdf_path, "r", errors="replace") as f:
+    # surrogateescape both ways (as wrapper.py does): bytes that are not UTF-8
+    # (a persona or game name) come back unchanged instead of turning into U+FFFD
+    with open(vdf_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         content = f.read()
 
     modified = False
@@ -2225,10 +2283,10 @@ for uid in os.listdir(userdata):
                 pass
 
         import deckops_vdf
-        deckops_vdf.write_file(vdf_path, content.encode("utf-8", "replace"))
+        deckops_vdf.write_file(vdf_path, content.encode("utf-8", "surrogateescape"))
 
         # Validate the file as written -- if corrupt, restore backup and leave edits in place
-        with open(vdf_path, errors="replace") as f:
+        with open(vdf_path, encoding="utf-8", errors="surrogateescape") as f:
             on_disk = f.read()
         if not validate_vdf(on_disk):
             print(f"  uid {uid}: VDF validation FAILED — restoring backup")
@@ -2389,7 +2447,11 @@ def parse(buf, pos=0):
         elif t == 1: end = buf.index(b"\x00", pos); val = bytes(buf[pos:end]); pos = end + 1
         elif t == 5:
             end = pos
-            while buf[end:end + 2] != b"\x00\x00": end += 2
+            while buf[end:end + 2] != b"\x00\x00":
+                # A cut-off value never reaches the terminator: slicing past the
+                # end gives b"" for ever (steam_appinfo.py has the same bound)
+                if end + 2 > len(buf): raise ValueError("unterminated wide string in appinfo")
+                end += 2
             val = bytes(buf[pos:end]); pos = end + 2
         elif t in FIXED: val = bytes(buf[pos:pos + FIXED[t]]); pos += FIXED[t]
         else: raise ValueError(t)
@@ -2456,9 +2518,8 @@ while pos + 8 <= len(data):
 
 if removed:
     shutil.copy2(path, path + ".deckops_uninstall.bak")
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f: f.write(data)
-    os.replace(tmp, path)
+    import deckops_vdf
+    deckops_vdf.write_file(path, bytes(data))     # temp file + fsync + rename, keeps permissions
     print(f"  Removed {removed} launch menu entr{'y' if removed == 1 else 'ies'}.")
 else:
     print("  No DeckOps launch menu entries found.")
@@ -2649,18 +2710,32 @@ fi
 #    we ONLY remove entries whose app_name starts with "do_" (DeckOps prefix).
 if [ -f "$HGL_LIB" ]; then
     python3 - "$HGL_LIB" << 'PYEOF'
-import json, sys
+import json, os, sys, tempfile
 p = sys.argv[1]
 try:
-    with open(p) as f:
+    with open(p, encoding="utf-8") as f:
         data = json.load(f)
     games_before = data.get("games", [])
     games_after = [g for g in games_before
-                   if not g.get("app_name", "").startswith("do_")]
+                   if not (isinstance(g, dict) and str(g.get("app_name", "")).startswith("do_"))]
     removed = len(games_before) - len(games_after)
-    data["games"] = games_after
-    with open(p, "w") as f:
-        json.dump(data, f, indent=2)
+    if removed:
+        # The user's own Heroic library lives in this file: write a temp file and
+        # rename it over, so a full disk or a crash can't leave it empty (open(p, "w")
+        # truncated it first)
+        data["games"] = games_after
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p) or ".", prefix=".deckops-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+            os.replace(tmp, p)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
     if removed > 0:
         print(f"Removed {removed} DeckOps sideload entries from library.json")
     else:
@@ -3243,7 +3318,7 @@ def clean_configset(configset_path, keys_to_remove):
     if not os.path.exists(configset_path):
         return False
 
-    with open(configset_path, "r", encoding="utf-8", errors="replace") as f:
+    with open(configset_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         content = f.read()
 
     original = content
@@ -3256,7 +3331,7 @@ def clean_configset(configset_path, keys_to_remove):
 
     if content != original:
         import deckops_vdf
-        deckops_vdf.write_file(configset_path, content.encode("utf-8"))
+        deckops_vdf.write_file(configset_path, content.encode("utf-8", "surrogateescape"))
         return True
     return False
 

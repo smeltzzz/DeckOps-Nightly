@@ -993,9 +993,16 @@ def _patch_dvars(path, values, create=False, binds=None, drop=()):
         return False
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".deckops-tmp"
-    with open(tmp, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
-        f.write(new)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
+            f.write(new)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)          # a full disk used to leave a stray .deckops-tmp behind
+        except OSError:
+            pass
+        raise
     return True
 
 

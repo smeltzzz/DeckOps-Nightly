@@ -330,7 +330,11 @@ def _record(appid, entries=None, remove=None):
     with cfg.transaction():         # load -> change -> save as one step
         c = cfg.load()
         menus = copy.deepcopy(c.get("launch_menus", {}))
-        cur = [e for e in menus.get(str(appid), []) if e["executable"] not in (remove or ())]
+        if not isinstance(menus, dict):         # hand-edited / damaged record: start it over
+            menus = {}
+        old = menus.get(str(appid), [])
+        cur = [e for e in (old if isinstance(old, list) else [])
+               if isinstance(e, dict) and "executable" in e and e["executable"] not in (remove or ())]
         for e in entries or []:
             cur = [x for x in cur if x["executable"] != e["executable"]] + [dict(e)]
         if cur:
@@ -405,7 +409,8 @@ def forget_launch_entries(appid: int, executables: list):
 def reapply_all(steam_root: str):
     """Re-add every recorded menu; Steam may have refreshed appinfo since."""
     import config as cfg
-    for appid, entries in cfg.load().get("launch_menus", {}).items():
+    menus = cfg.load().get("launch_menus", {})
+    for appid, entries in (menus.items() if isinstance(menus, dict) else ()):
         # One bad record must not stop the rest being reapplied.
         try:
             entries = [e for e in entries if isinstance(e, dict) and e.get("executable")]

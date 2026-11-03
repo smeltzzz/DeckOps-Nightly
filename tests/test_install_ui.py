@@ -508,6 +508,20 @@ class InstallUITests(unittest.TestCase):
         self.assertFalse(inst.iw5_dg_btn.isHidden())
         self.assertIn("download_depot 1 2 3", inst.manual_step.text())
 
+    def test_iw5_wait_screen_shows_the_command_when_no_clipboard_helper_took_it(self):
+        inst = self.install
+        # copy_to_clipboard() returns False (no exception) without wl-copy/xclip
+        with patch("depot_downgrade.copy_to_clipboard", return_value=False):
+            inst._show_iw5_dg_wait("download_depot 1 2 3", "Step 1")
+        self.assertIn("download_depot 1 2 3", inst.manual_step.text())
+        self.assertNotIn("command copied", inst.manual_step.text())
+
+    def test_iw5_wait_screen_says_copied_when_a_helper_took_it(self):
+        inst = self.install
+        with patch("depot_downgrade.copy_to_clipboard", return_value=True):
+            inst._show_iw5_dg_wait("download_depot 1 2 3", "Step 1")
+        self.assertIn("command copied", inst.manual_step.text())
+
 
 @unittest.skipIf(QApplication is None, "PyQt is not installed")
 class StyledSelectionUITests(unittest.TestCase):

@@ -583,21 +583,6 @@ def _download_artwork(grid_dir: str, appid: int, shortcut_def: dict, prog,
     appid_str = str(appid)
     os.makedirs(grid_dir, exist_ok=True)
 
-    if clean_stale:
-        # Exactly this appid's artwork names ({id}.ext, {id}p.ext, {id}_hero.ext, ...).
-        # A "{id}*" prefix match also took other apps' art whose id starts with these
-        # digits (10090 matched 100900p.jpg) when the appid is a short Steam one.
-        own_art = re.compile(rf"{re.escape(appid_str)}(?:p|_hero|_logo|_icon)?\.[A-Za-z0-9]+")
-        try:
-            for name in os.listdir(grid_dir):
-                if own_art.fullmatch(name):
-                    try:
-                        os.remove(os.path.join(grid_dir, name))
-                    except OSError:
-                        _log.debug("file removal failed", exc_info=True)
-        except Exception:
-            _log.debug("file removal failed", exc_info=True)
-    
     artwork_map = [
         ("icon_url",  f"{appid_str}_icon.{shortcut_def['icon_ext']}",  "icon"),
         ("grid_url",  f"{appid_str}p.{shortcut_def['grid_ext']}",      "grid"),
@@ -605,6 +590,26 @@ def _download_artwork(grid_dir: str, appid: int, shortcut_def: dict, prog,
         ("hero_url",  f"{appid_str}_hero.{shortcut_def['hero_ext']}",  "hero"),
         ("logo_url",  f"{appid_str}_logo.{shortcut_def['logo_ext']}",  "logo"),
     ]
+
+    if clean_stale:
+        # Exactly this appid's artwork names ({id}.ext, {id}p.ext, {id}_hero.ext, ...).
+        # A "{id}*" prefix match also took other apps' art whose id starts with these
+        # digits (10090 matched 100900p.jpg) when the appid is a short Steam one.
+        # The files about to be downloaded are NOT removed first: net.download swaps
+        # a finished file in, so a failed download (offline, CDN error) leaves the
+        # working artwork in place instead of blank tiles. Only other names (an old
+        # extension) are orphans.
+        wanted = {filename for url_key, filename, _ in artwork_map if shortcut_def.get(url_key)}
+        own_art = re.compile(rf"{re.escape(appid_str)}(?:p|_hero|_logo|_icon)?\.[A-Za-z0-9]+")
+        try:
+            for name in os.listdir(grid_dir):
+                if own_art.fullmatch(name) and name not in wanted:
+                    try:
+                        os.remove(os.path.join(grid_dir, name))
+                    except OSError:
+                        _log.debug("file removal failed", exc_info=True)
+        except Exception:
+            _log.debug("file removal failed", exc_info=True)
 
     # Collect items that actually need downloading
     to_download = []
@@ -1013,18 +1018,19 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         body = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
-        if not body or not _split_entries(body):
-            continue
+        if body is None:
+            continue                # unreadable: this user is left entirely alone
+        if body and _split_entries(body):
+            new_body, stripped = _strip_entries_by_name(body, {name})
+            if stripped:
+                try:
+                    _write_shortcuts_vdf(shortcuts_path, new_body, [])
+                    prog(f"  Removed shortcut '{name}' for uid {uid}")
+                except OSError as ex:
+                    prog(f"  Could not write shortcuts.vdf: {ex}")
 
-        new_body, stripped = _strip_entries_by_name(body, {name})
-        if stripped:
-            try:
-                _write_shortcuts_vdf(shortcuts_path, new_body, [])
-                prog(f"  Removed shortcut '{name}' for uid {uid}")
-            except OSError as ex:
-                prog(f"  Could not write shortcuts.vdf: {ex}")
-
-        # Remove artwork
+        # Remove artwork. Even when the shortcut itself is already gone (the player
+        # deleted it in Steam, or shortcuts.vdf is empty): its files would stay for good.
         if artwork_def:
             artwork_suffixes = [
                 f"_icon.{artwork_def.get('icon_ext', 'png')}",

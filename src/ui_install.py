@@ -831,7 +831,9 @@ class _BaseInstallScreen(QWidget):
         copied = True
         try:
             from depot_downgrade import copy_to_clipboard
-            copy_to_clipboard(cmd)
+            # False (not an exception) when neither wl-copy nor xclip took it;
+            # the screen must then show the command instead of saying "copied"
+            copied = copy_to_clipboard(cmd) is not False
         except Exception as ex:
             copied = False
             _log_to_file(f"[InstallScreen] could not copy the Steam console command: {ex}")
@@ -1310,6 +1312,8 @@ class _BaseInstallScreen(QWidget):
     def _on_done(self, ok):
         self._stop_pulse()
         self._tick.stop()
+        # A QR download that raised never hid its code, which also collapses the log
+        self._hide_iw5_qr()
         inhibit.stop()
         el = int(time.time() - self._t0)
         self.stat.setText(f"Finished in {el // 60}:{el % 60:02d}")
@@ -1420,6 +1424,11 @@ class _BaseInstallScreen(QWidget):
             _log_to_file(f"Offline Mode: {'on' if cfg.get_offline_mode() else 'off'}")
             self._run_inner()
         except _SteamStillRunning:
+            # Games the earlier phases (CoD4) already marked ok never got their
+            # Steam-side setup; leaving them "ready" with no Retry button would
+            # be a dead end, since Select Games greys out set-up games.
+            self._fail_ok([r["key"] for r in self._results],
+                          "setup stopped before Steam settings were applied (Steam still running)")
             self._s.log.emit("Close Steam yourself (Steam menu → Exit), then run Set Up again. "
                              "Game files already downloaded are kept; Steam's settings were not changed.")
             self._s.progress.emit(100, "Install stopped: Steam is still running.")
@@ -1427,6 +1436,8 @@ class _BaseInstallScreen(QWidget):
         except Exception:
             err = _tb.format_exc()
             _log_to_file(f"[FATAL] {self.screen_name}._run crashed:\n{err}")
+            self._fail_ok([r["key"] for r in self._results],
+                          "setup stopped before it finished; see the log")
             try:
                 self._s.log.emit(f"✗ Install failed with error:\n{err}")
                 self._s.progress.emit(100, "Install failed — see log.")
@@ -1846,8 +1857,11 @@ class _BaseInstallScreen(QWidget):
         # Downloads Plutonium and launches it so the user can log in. LCD
         # routes through HGL (shared default prefix); OLED uses the
         # dedicated DeckOps prefix via Proton directly.
-        plut_ok = has_plut
-        if has_plut:
+        # Games whose downgrade failed are skipped below, so the login only matters
+        # when some Plutonium game is still going to be installed.
+        plut_ok = has_plut and any(KEY_CLIENT.get(k) == "plutonium" and k not in _dg_failed
+                                   for k in selected_keys)
+        if plut_ok:
             from plutonium import (launch_bootstrapper, is_plutonium_ready,
                                    install_plutonium)
             from plutonium import GAME_META as _PLUT_META
@@ -2044,6 +2058,9 @@ class _BaseInstallScreen(QWidget):
         # Must run AFTER kill_steam -- Steam overwrites config.vdf on exit.
         # Only write for Steam appids if the user actually has Steam games
         # selected; otherwise this may trigger Steam to re-download games.
+        # The clients below (Plutonium, T6SP-MOD, IW4x, IW-Pad) mark their games ok
+        # after this point, so a failure here is applied again once they have run.
+        compat_failed_keys = []
         if ge_version and steam_sel:
             steam_keys_run = [k for k, _, _ in steam_sel]
             try:
@@ -2052,12 +2069,13 @@ class _BaseInstallScreen(QWidget):
                     # so these games would launch as bare Windows exes.
                     self._s.log.emit("✗  GE-Proton could not be set for Steam game appids "
                                      "(Steam's config.vdf was not changed)")
-                    self._fail_ok(steam_keys_run, "GE-Proton compat tool not set")
+                    compat_failed_keys = steam_keys_run
                 else:
                     self._s.log.emit(f"✓  {ge_version} set for Steam game appids")
             except Exception as ex:
                 self._s.log.emit(f"  CompatToolMapping for Steam appids skipped: {ex}")
-                self._fail_ok(steam_keys_run, "GE-Proton compat tool not set")
+                compat_failed_keys = steam_keys_run
+            self._fail_ok(compat_failed_keys, "GE-Proton compat tool not set")
 
         # Old GE-Protons DeckOps installed that nothing uses any more
         # (keeps this one and the one before it). Steam is closed here.
@@ -2276,7 +2294,16 @@ class _BaseInstallScreen(QWidget):
         # configs, and sets GE-Proton compat tool per shortcut.
         # Plutonium games whose login failed weren't installed: no shortcuts for them
         def _installable(k):
-            return plut_ok or KEY_CLIENT.get(k) != "plutonium"
+            c = KEY_CLIENT.get(k)
+            if c == "plutonium" and not plut_ok:
+                return False
+            # A mod client that failed or was skipped never put its exe in place;
+            # a shortcut to it would launch nothing. (Vanilla "steam" games keep
+            # theirs: a failed IW-Pad leaves the game launchable as-is.)
+            if c != "steam" and any(r["key"] == k and r["status"] in ("failed", "skipped")
+                                    for r in self._results):
+                return False
+            return True
 
         if has_own:
             gyro_mode = cfg.get_gyro_mode() or "on"
@@ -2360,6 +2387,9 @@ class _BaseInstallScreen(QWidget):
                 self._s.log.emit(f"  Steam artwork skipped: {ex}")
 
         # --- Done
+        # Games whose client finished after the compat tool step failed are still
+        # missing their Proton mapping, whatever their own phase reported.
+        self._fail_ok(compat_failed_keys, "GE-Proton compat tool not set")
         _log_to_file("[BREADCRUMB] all phases complete, finishing up")
         self._finish_run(has_own)
 

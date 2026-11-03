@@ -31,7 +31,7 @@ from ui_constants import (
     _active_keys, _active_client, _active_appid,
     SP_IMAGE_URLS, IMG_RATIO, CARD_COLS, CARD_MAX_W,
     HEROES_DIR, PROJECT_ROOT,
-    _music_volume, _music_enabled,
+    _clean_volume, _clean_enabled, _reload_audio_settings,
     _set_audio_volume, _set_audio_enabled, _start_audio, _kill_audio,
     go_to, get_screen,
 )
@@ -41,6 +41,14 @@ from identity import GITHUB_USER, GITHUB_REPO
 from log import get_logger
 
 _log = get_logger(__name__)
+
+
+def _saved_music_volume():
+    return _clean_volume(cfg.get_music_volume())
+
+
+def _saved_music_enabled():
+    return _clean_enabled(cfg.get_music_enabled())
 
 
 def _update_candidates(installed, keys=None):
@@ -649,8 +657,22 @@ class ManagementScreen(QWidget):
         go_to(self.stack, "ConfigureScreen")
         QTimer.singleShot(0, s._apply_update)
 
+    def _busy_elsewhere(self):
+        """True, with a message, while another operation holds the sleep lock.
+        Settings has a Back button that works mid-task, so a Settings task
+        (closing Steam, rewriting shortcuts.vdf / configsets) could still be
+        running when an update, setup or Offline Mode change started here and
+        did the same: two writers on the same files."""
+        busy = inhibit.busy()
+        if not busy:
+            return False
+        self._status.setText(f"Wait for this to finish first: {str(busy).rstrip('.')}.")
+        return True
+
     # ── Update all games (batch) ──────────────────────────────────────────
     def _update_all_games(self):
+        if self._busy_elsewhere():
+            return
         selected, extras = _update_selection(self.installed)
         if not selected:
             self._status.setText("No configured mod-client modes found for the installed game sources.")
@@ -665,6 +687,8 @@ class ManagementScreen(QWidget):
 
     def _offline(self, on):
         """Add or remove Offline Mode (offline launcher, Steam menu Offline entries, bot matches)."""
+        if self._busy_elsewhere():
+            return
         text = ("Add Offline Mode? It adds the offline launcher, an Offline entry in each game's Steam "
                 "launch menu, and bot matches in WaW, BO1, BO2 and MW3 multiplayer. "
                 "Steam closes while it is set up."
@@ -687,6 +711,8 @@ class ManagementScreen(QWidget):
 
     def _readd(self, gd):
         """Repair the offline launcher: its files, its prefix and its shortcut."""
+        if self._busy_elsewhere():
+            return
         if QMessageBox.question(self, "Offline Mode", "Repair the offline launcher? It checks the "
                                 "files, rebuilds the prefix and re-adds the shortcut. Steam closes while it runs.") \
                 != QMessageBox.StandardButton.Yes:
@@ -737,6 +763,8 @@ class ManagementScreen(QWidget):
     def _setup(self, gd, force_downgrade_ids=None, cod4_client=None,
                keys_to_setup=None, clear_setup_keys=None, clear_receipt=None):
         """Preflight only the requested modes; commit a reinstall only after approval."""
+        if self._busy_elsewhere():
+            return False
         keys = _active_keys(gd)
         present_keys = [k for k in keys if k in self.installed]
         if not present_keys:
@@ -916,17 +944,20 @@ class ManagementScreen(QWidget):
 
     def _update(self, gd, keys):
         """Update the configured modes on this card and their shared dependants."""
+        if self._busy_elsewhere():
+            return False
         selected, extras = _update_selection(self.installed, keys)
         if not selected:
             self._status.setText("No configured modes found for this game's installed source.")
-            return
+            return False
         if not _confirm_game_update(self, selected, extras):
-            return
+            return True         # the player said no: nothing to explain
         s = get_screen(self.stack, "UpdateScreen")
         s.selected = selected
         s.all_plut_games = {k: g for k, _, g in selected}
         s.steam_root = find_steam_root() or ""
         go_to(self.stack, "UpdateScreen")
+        return True
 
     def _reinstall(self, gd):
         """Run a clean install of detected modes after preflight approval."""
@@ -1406,7 +1437,8 @@ class ConfigureScreen(QWidget):
         _head(left, "Background Music", first=True)
         _desc(left, "Plays music inside DeckOps. The slider sets the volume.")
         mr = QHBoxLayout(); mr.setSpacing(12)
-        self._music_on = _music_enabled
+        self._music_on = _saved_music_enabled()
+        music_volume = _saved_music_volume()
         self._music_toggle = _btn(
             "Music: ON" if self._music_on else "Music: OFF",
             C_IW if self._music_on else C_DARK_BTN,
@@ -1415,8 +1447,8 @@ class ConfigureScreen(QWidget):
         self._music_toggle.setFixedWidth(160)
         self._music_toggle.clicked.connect(self._toggle_music)
         self._vol_slider = QSlider(Qt.Orientation.Horizontal); self._vol_slider.setRange(0,100)
-        self._vol_slider.setValue(int(_music_volume*100))
-        self._vol_label = _lbl(f"{int(_music_volume*100)}%", 12, C_DIM, wrap=False)
+        self._vol_slider.setValue(int(round(music_volume*100)))
+        self._vol_label = _lbl(f"{self._vol_slider.value()}%", 12, C_DIM, wrap=False)
         self._vol_label.setFixedWidth(44)
         self._vol_slider.valueChanged.connect(self._set_volume)
         mr.addWidget(self._music_toggle); mr.addWidget(self._vol_slider,stretch=1); mr.addWidget(self._vol_label)
@@ -1655,14 +1687,35 @@ class ConfigureScreen(QWidget):
         )
 
     def _sync_music_toggle(self):
-        self._music_on = cfg.get_music_enabled()
+        self._music_on = _saved_music_enabled()
         self._music_toggle.setText("Music: ON" if self._music_on else "Music: OFF")
         self._music_toggle.setStyleSheet(
             _button_style(C_IW if self._music_on else C_DARK_BTN))
 
+    def _reload_saved_settings(self):
+        """Show what deckops.json holds now (after Reset Config): the music
+        controls and the FPS-limit button kept the wiped values."""
+        timer = getattr(self, "_vol_save", None)
+        if timer is not None:
+            timer.stop()        # a pending save would write the old slider value back
+        _reload_audio_settings()
+        volume = int(round(_saved_music_volume() * 100))
+        self._vol_slider.blockSignals(True)
+        try:
+            self._vol_slider.setValue(volume)
+        finally:
+            self._vol_slider.blockSignals(False)
+        self._vol_label.setText(f"{volume}%")
+        self._sync_music_toggle()
+        self._refresh_cap_btn()
+        window = self.window()
+        if hasattr(window, "_sync_mute_button"):
+            window._muted = not self._music_on
+            window._sync_mute_button()
+
     def _toggle_music(self):
         _set_audio_enabled(not self._music_on)
-        if cfg.get_music_enabled():
+        if _saved_music_enabled():
             _start_audio()
         else:
             _kill_audio()
@@ -1979,13 +2032,14 @@ class ConfigureScreen(QWidget):
             return
         self.status.setText("Checking your setup...")
         self._setup_results = None
+        # Looked up here: the worker must not walk the widget stack from its thread
+        mgmt = get_screen(self.stack, "ManagementScreen")
+        known = dict(getattr(mgmt, "installed", None) or {})
 
         def _run():
             try:
                 from setup_check import check_setup, check_shortcuts
-                mgmt = get_screen(self.stack, "ManagementScreen")
-                installed = (getattr(mgmt, "installed", None) or
-                             find_all_games(preferred_sources=cfg.get_setup_games()))
+                installed = known or find_all_games(preferred_sources=cfg.get_setup_games())
                 sr, setup = find_steam_root(), cfg.get_setup_games()
                 results = check_setup(sr, installed, setup)
                 try:
@@ -2058,7 +2112,10 @@ class ConfigureScreen(QWidget):
         if not gd or not mgmt.installed.get(key):
             self.status.setText("That game could not be found; open My Games and try again.")
             return
-        mgmt._update(gd, [key])
+        # _update refuses (busy, or nothing it can update) on the Library's status
+        # line, which is not on screen here: Fix used to do nothing and say nothing.
+        if mgmt._update(gd, [key]) is False:
+            self.status.setText(mgmt._status.text() or "Update has nothing to repair for this game.")
 
     def _view_log(self):
         from ui_constants import LOG_PATH
@@ -2335,9 +2392,28 @@ class ConfigureScreen(QWidget):
         python = sys.executable
         entry = os.path.join(PROJECT_ROOT, "src", "main.py")
         _log.info("Relaunching: %s %s", python, entry)
-        os.execv(python, [python, entry])
+        try:
+            os.execv(python, [python, entry])
+        except OSError as ex:
+            # An uncaught error here left the modal "Update complete" progress
+            # dialog on screen for good, with the window behind it unusable.
+            _log.error("Relaunch failed", exc_info=True)
+            pd = getattr(self, "_update_pd", None)
+            if pd is not None:
+                pd.close()
+            self._update_btn.setText("Restart needed")     # stays disabled: nothing left to apply
+            self._update_status.setText(
+                f"Update installed, but DeckOps could not restart itself ({ex}). "
+                "Close DeckOps and open it again.")
+            self._update_status.setStyleSheet(f"color:{C_TREY};")
 
     def _confirm_reset(self):
+        # Like the uninstall: a running task (or install) still writes deckops.json,
+        # which would bring back half a config right after the wipe.
+        busy = inhibit.busy()
+        if busy:
+            self.status.setText(f"✗  Wait for this to finish first: {str(busy).rstrip('.')}.")
+            return
         reply = QMessageBox.warning(
             self, "Reset Config",
             "This clears the DeckOps settings file (deckops.json). "
@@ -2360,6 +2436,7 @@ class ConfigureScreen(QWidget):
         library = get_screen(self.stack, "ManagementScreen")
         if library is not None:
             library.installed = {}
+        self._reload_saved_settings()
         self.status.setText("Config wiped. Restarting setup...")
         QTimer.singleShot(1500, lambda: go_to(self.stack, "BootstrapScreen"))
 

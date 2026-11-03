@@ -113,7 +113,11 @@ TMPZIP="$(mktemp /tmp/deckops_XXXXXX.zip)"
 TMPDIR_EXTRACT=""
 # `die` exits from many places below: don't leave the archive and its extraction in /tmp
 trap 'rm -f "$TMPZIP"; [ -n "$TMPDIR_EXTRACT" ] && rm -rf "$TMPDIR_EXTRACT"' EXIT
-curl -fL --progress-bar "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$ARCHIVE_REF.zip" -o "$TMPZIP" \
+# Give up on a connection that never opens or a transfer that stalls (under 1 KB/s for
+# 60 s) instead of leaving the installer frozen on a dead Wi-Fi link; a slow but moving
+# download is not cut off.
+curl -fL --progress-bar --connect-timeout 15 --speed-limit 1024 --speed-time 60 \
+    "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$ARCHIVE_REF.zip" -o "$TMPZIP" \
     || die "Download failed. Check your internet connection, or try again in about an hour (GitHub may be limiting downloads)."
 success "Download complete."
 
@@ -193,9 +197,18 @@ info "Downloading background music..."
 mkdir -p "$MUSIC_DIR"
 
 if [ ! -f "$MUSIC_DIR/$MUSIC_FILE" ]; then
-    curl -fsSL "$MUSIC_URL" -o "$MUSIC_DIR/$MUSIC_FILE" \
-        && success "Background music downloaded." \
-        || warn "Could not download background music — app will run without it."
+    # Into a .part file, moved into place only once curl finished. Straight into
+    # background.mp3, a dropped connection left a cut-off file that the check above then
+    # treated as "already present" on every later install, so the music stayed broken.
+    # Stall limits as for the archive: the music is optional and must not hang the install.
+    MUSIC_PART="$MUSIC_DIR/$MUSIC_FILE.part"
+    if curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 60 "$MUSIC_URL" -o "$MUSIC_PART" \
+            && mv -f "$MUSIC_PART" "$MUSIC_DIR/$MUSIC_FILE"; then
+        success "Background music downloaded."
+    else
+        rm -f "$MUSIC_PART"
+        warn "Could not download background music — app will run without it."
+    fi
 else
     success "Background music already present."
 fi

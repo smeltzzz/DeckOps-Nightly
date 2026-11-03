@@ -19,12 +19,13 @@ Progress is reported via a callback:
     on_progress(percent: int, status: str)
 """
 
+import glob
 import os
-import json
 import shutil
 import tempfile
 
 from net import download as _download, github_asset, commit_staged_files
+from steam_common import write_json
 
 # Rattpak's releases; the pinned URLs are only used if the GitHub API lookup fails
 _REPO = "Rattpak/T6SP-Mod-Release"
@@ -75,6 +76,9 @@ def install_t6sp_mod(game: dict, steam_root: str,
 
     # Do not replace either playable file until both downloads succeed. A
     # failed second download or commit restores the previous exe/DLL pair.
+    # Left behind by an earlier run that was killed mid-download
+    for old in glob.glob(os.path.join(glob.escape(install_dir), ".deckops_t6sp_*")):
+        shutil.rmtree(old, ignore_errors=True)
     with tempfile.TemporaryDirectory(prefix=".deckops_t6sp_", dir=install_dir) as staged:
         prog(5, "Downloading T6SP-MOD exe...")
         _download(
@@ -112,7 +116,6 @@ def install_t6sp_mod(game: dict, steam_root: str,
     # Write metadata
     prog(95, "Saving metadata...")
     meta_path = os.path.join(install_dir, METADATA_FILE)
-    with open(meta_path, "w") as f:
-        json.dump({"client": "t6sp_mod", "source": source}, f, indent=2)
+    write_json(meta_path, {"client": "t6sp_mod", "source": source})
 
     prog(100, "T6SP-MOD (Beta) installation complete!")

@@ -372,6 +372,9 @@ def _ensure_flathub_remote(on_progress=None):
         prog("Flathub remote setup timed out.")
 
 
+HEROIC_INSTALL_TIMEOUT = 30 * 60
+
+
 def install_heroic(on_progress=None) -> bool:
     """
     Install Heroic Games Launcher via Flatpak from Flathub.
@@ -397,7 +400,9 @@ def install_heroic(on_progress=None) -> bool:
                 "flathub", HEROIC_FLATPAK_ID,
             ],
             capture_output=True,
-            timeout=300,
+            # Heroic plus its runtime is a download of several hundred MB: five
+            # minutes killed the install on a slow connection, every attempt
+            timeout=HEROIC_INSTALL_TIMEOUT,
         )
         if result.returncode == 0:
             prog("HGL installed.")
@@ -428,7 +433,7 @@ def _grant_heroic_filesystem_access(paths: list, on_progress=None):
         if not path:
             continue
         try:
-            subprocess.run(
+            r = subprocess.run(
                 [
                     "flatpak", "override", "--user",
                     HEROIC_FLATPAK_ID,
@@ -437,6 +442,12 @@ def _grant_heroic_filesystem_access(paths: list, on_progress=None):
                 capture_output=True,
                 timeout=10,
             )
+            # A refused override used to pass silently: Heroic then could not
+            # see the game folder and failed at launch with no hint why
+            if r.returncode != 0:
+                err = (r.stderr or b"").decode(errors="replace").strip()[:200]
+                _log.warning("flatpak override for %s failed (%s): %s", path, r.returncode, err)
+                prog(f"  Warning: could not grant HGL access to {path}: {err or 'exit ' + str(r.returncode)}")
         except (FileNotFoundError, subprocess.TimeoutExpired):
             prog(f"  Warning: could not grant HGL access to {path}")
 
@@ -711,9 +722,11 @@ def _write_plutonium_config_lcd(plut_dir: str, selected_keys: list,
     config_path = os.path.join(plut_dir, "config.json")
     if os.path.exists(config_path):
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):
+            # ValueError also covers UnicodeDecodeError (a file cut off inside a
+            # multi-byte character), which used to abort the whole LCD install
             data = {}
     else:
         data = {}

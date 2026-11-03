@@ -21,7 +21,7 @@ from identity import APP_TITLE
 from ui_constants import (
     C_CARD, C_DIM, C_DARK_BTN, C_LINE, C_TEXT, font, _lbl, _title_block,
     _load_font, _app_style, _start_audio, _kill_audio,
-    _set_audio_enabled,
+    _set_audio_enabled, _clean_enabled,
     go_to, get_screen,
 )
 
@@ -127,7 +127,7 @@ class DeckOpsWindow(QMainWindow):
         strip.addPermanentWidget(self._dbg_label)
         self._dbg_label.setVisible(os.environ.get("DECKOPS_DEBUG") == "1")
 
-        self._muted = not cfg.get_music_enabled()
+        self._muted = not _clean_enabled(cfg.get_music_enabled())
         self._mute_btn = QPushButton(self)
         self._mute_btn.setFixedSize(112, 30)
         self._mute_btn.setFont(font(10, bold=True))
@@ -154,7 +154,7 @@ class DeckOpsWindow(QMainWindow):
         }
         self._screen_label.setText(titles.get(name, name.upper()))
         self._dbg_label.setText(f"[{idx}] {name}")
-        self._muted = not cfg.get_music_enabled()
+        self._muted = not _clean_enabled(cfg.get_music_enabled())
         self._sync_mute_button()
 
     def _sync_mute_button(self):

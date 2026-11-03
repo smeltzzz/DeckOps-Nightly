@@ -378,8 +378,11 @@ def _copy_plut_to_prefix(src_plut_dir: str, dest_plut_dir: str,
     # stats (players/, e.g. WaW mpdata) and mods. Move those aside first and
     # put them back after, so reinstall/update never resets progress.
     keep_root = dest_plut_dir.rstrip(os.sep) + ".deckops_keep"
-    _stash_user_storage(dest_plut_dir, keep_root, prog)
+    # The stash is inside the try: one part that fails to move (full or locked
+    # disk) used to leave the parts already moved in keep_root, out of the
+    # prefix the game still runs from, until some later install succeeded.
     try:
+        _stash_user_storage(dest_plut_dir, keep_root, prog)
         _copy_plut_fresh(src_plut_dir, dest_plut_dir, game_key, prog)
     finally:
         _restore_user_storage(dest_plut_dir, keep_root, prog)
@@ -1378,7 +1381,9 @@ def _lan_download(dst: str, url: str, digest, prog):
         z = os.path.join(tmp, "dl.zip")
         download(url, z, digest=digest)
         with zipfile.ZipFile(z) as zf:
-            name = next(n for n in zf.namelist() if os.path.basename(n) == os.path.basename(dst))
+            name = next((n for n in zf.namelist() if os.path.basename(n) == os.path.basename(dst)), None)
+            if name is None:    # a bare StopIteration reached the user as an empty message
+                raise RuntimeError(f"{os.path.basename(dst)} is not in the downloaded archive")
             # Never write dst itself: setup_lan skips a download whenever dst exists,
             # so a copy cut off mid-way would be kept as if it were complete.
             part = dst + ".part"

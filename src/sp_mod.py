@@ -152,7 +152,12 @@ def _fetch_iw_pad(game_key, install_dir, arch, prog, release=None, tries=3, time
         download(url, zip_dest, prog, "IW-Pad", timeout=timeout, digest=dg, tries=tries)
         staged = os.path.join(staging, "files")
         os.makedirs(staged)
-        commit_staged_files(install_dir, staged, _stage_zip(zip_dest, staged))
+        names = _stage_zip(zip_dest, staged)
+        # The launch option swaps the SP exe for iw-pad.exe: an archive without it
+        # (empty or wrong asset, unverified fallback) must not report an install.
+        if "iw-pad.exe" not in names:
+            raise RuntimeError(f"iw-pad-{arch}.zip does not contain iw-pad.exe")
+        commit_staged_files(install_dir, staged, names)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     # .../releases/download/<tag>/iw-pad-x64.zip; the unverified fallback saves

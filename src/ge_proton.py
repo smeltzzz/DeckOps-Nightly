@@ -623,6 +623,14 @@ def _finish_clone(source_pfx_dir: str, dest_prefix_path: str, ge_version: str | 
     if ge_version:
         with open(os.path.join(dest_prefix_path, "version"), "w") as f:
             f.write(ge_version + "\n")
+    # A finalize that timed out earlier left its in-progress marker here. The
+    # prefix now holds the donor's wine files, so the marker is stale: it made
+    # _prefix_ready say "not ready" for good and every run re-ran Proton on it.
+    if _wine_files(os.path.join(dest_prefix_path, "pfx")):
+        try:
+            os.remove(os.path.join(dest_prefix_path, _FINALIZING_MARKER))
+        except OSError:
+            pass
     # Copy tracked_files from the donor's parent directory.
     # Proton requires this file to exist -- without it, prefix setup
     # crashes with FileNotFoundError on update_builtin_libs().

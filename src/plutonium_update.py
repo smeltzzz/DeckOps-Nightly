@@ -56,9 +56,11 @@ def fetch(timeout: int = 30, tries: int = 3):
 def local_revision(plut_dir: str):
     try:
         with open(os.path.join(plut_dir, "info.json")) as f:
-            return json.load(f).get("revision")
+            data = json.load(f)
     except (OSError, ValueError):
         return None
+    # Valid JSON that isn't the updater's info.json (a list, null) has no revision
+    return data.get("revision") if isinstance(data, dict) else None
 
 
 def _yeet(plut_dir: str, patterns: list, keep: set, log) -> int:

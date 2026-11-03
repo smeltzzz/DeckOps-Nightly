@@ -253,9 +253,19 @@ def _detected_games() -> tuple:
             steam = find_installed_games(parse_library_folders(sr), sr)
             own = find_own_installed()
         except Exception:
+            # Not remembered: a failed scan (Steam files mid-write, say) must not
+            # make every later backup/restore in this session see "no games"
             _log.warning("save backup: game detection failed", exc_info=True)
+            return (steam, own)
         _DETECTED = (steam, own)
     return _DETECTED
+
+
+def _forget_detected_games():
+    """A new backup/restore starts from a fresh scan: the app stays open across an
+    uninstall, a reinstall into another library, a moved game folder."""
+    global _DETECTED
+    _DETECTED = None
 
 
 def _find_install_dir(keys: list, setup_games: dict, installed_games: dict = None) -> str | None:
@@ -397,8 +407,11 @@ def _write_meta(groups: dict):
     if not isinstance(old, dict):       # valid JSON, wrong shape
         old = {}
     now = datetime.now().isoformat()
-    times = dict(old.get("group_times") or {})
-    names = [g for g in old.get("groups", []) if isinstance(g, str)
+    # Hand-edited or half-written lists must not crash the backup after its copies are done
+    times = old.get("group_times")
+    times = dict(times) if isinstance(times, dict) else {}
+    old_groups = old.get("groups")
+    names = [g for g in (old_groups if isinstance(old_groups, list) else []) if isinstance(g, str)
              and g in SAVE_GROUPS and os.path.isdir(os.path.join(BACKUP_ROOT, g))]
     for g in groups:
         times[g] = now
@@ -446,6 +459,7 @@ def backup_saves(steam_root: str = None, on_progress=None,
     Returns a dict of {group_name: backup_path} for groups that were backed up.
     """
     failed = failures if failures is not None else []
+    _forget_detected_games()
     if steam_root is None:
         steam_root = STEAM_ROOT_DEFAULT()
     if on_progress is None:
@@ -573,6 +587,7 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
 
     Returns a dict of {group_name: dest_path} for groups that were restored.
     """
+    _forget_detected_games()
     if steam_root is None:
         steam_root = STEAM_ROOT_DEFAULT()
     if on_progress is None:
@@ -595,7 +610,7 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
         return {}
 
     groups_to_restore = meta.get("groups", [])
-    if not groups_to_restore:
+    if not groups_to_restore or not isinstance(groups_to_restore, list):
         return {}
 
     config = _load_config() or {}
@@ -607,7 +622,7 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
     on_progress("Checking for save data backups...")
 
     for group_name in groups_to_restore:
-        if group_name not in SAVE_GROUPS:
+        if not isinstance(group_name, str) or group_name not in SAVE_GROUPS:
             continue
 
         group = SAVE_GROUPS[group_name]
