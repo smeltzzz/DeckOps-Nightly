@@ -10,10 +10,10 @@ import os, subprocess, sys, shutil, threading, json, urllib.request, urllib.erro
 
 from qt import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QScrollArea,
-    QLabel, QPushButton, QCheckBox, QProgressBar, QPlainTextEdit,
+    QLabel, QPushButton, QProgressBar, QPlainTextEdit,
     QFrame, QSizePolicy, QMessageBox, QLineEdit, QSlider, QDialog,
 )
-from qt import Qt, QTimer, QObject, pyqtSignal
+from qt import Qt, QTimer
 from qt import QPixmap
 from qt import QGraphicsOpacityEffect
 
@@ -931,6 +931,10 @@ class ManagementScreen(QWidget):
     def _reinstall(self, gd):
         """Run a clean install of detected modes after preflight approval."""
         keys = [k for k in _active_keys(gd) if k in self.installed]
+        if "iw5mp" in keys:
+            # The Dedicated Server is an alternative to MW3 MP, not an extra: the card and
+            # the setup screen treat it that way, and _setup drops it the same way
+            keys = [k for k in keys if k != "iw5mp_ds"]
         if not keys:
             self._status.setText("Game files not found. Use Add Games to find them.")
             return
@@ -1293,10 +1297,13 @@ class SetupCompleteScreen(QWidget):
         self._mw2own_hdr.setVisible(show_mw2own)
         self._mw2own_body.setVisible(show_mw2own)
         try:
-            from save_backup import has_backups
-            show_restore = has_backups()
+            from save_backup import restore_offer_pending
+            show_restore = restore_offer_pending()
         except Exception:
             show_restore = False
+        # A previous visit may have left the buttons disabled and hidden
+        self._restore_btn.setEnabled(True)
+        self._restore_skip.setEnabled(True)
         for w in self._restore_widgets:
             w.setVisible(show_restore)
         self._restore_status.setVisible(False)
@@ -1330,6 +1337,7 @@ class SetupCompleteScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _restore_finished(self, message):
+        self._mark_offer_handled()
         self._restore_status.setText(message)
         self._restore_status.setVisible(True)
         self._restore_btn.setVisible(False)
@@ -1338,9 +1346,18 @@ class SetupCompleteScreen(QWidget):
 
     def _skip_restore(self):
         """Hide the restore section without restoring."""
+        self._mark_offer_handled()
         for w in self._restore_widgets:
             w.setVisible(False)
         self._restore_status.setVisible(False)
+
+    @staticmethod
+    def _mark_offer_handled():
+        try:
+            from save_backup import mark_restore_offer_handled
+            mark_restore_offer_handled()
+        except Exception as ex:
+            _log_to_file(f"[SetupCompleteScreen] could not record restore answer: {ex}")
 
     def _go_management(self):
         go_to(self.stack, "ManagementScreen")
@@ -1657,7 +1674,26 @@ class ConfigureScreen(QWidget):
 
     def _set_volume(self, val):
         self._vol_label.setText(f"{val}%")
-        _set_audio_volume(val / 100.0)
+        _set_audio_volume(val / 100.0, persist=False)
+        # One save once the slider rests, not a config write per step of a drag
+        timer = getattr(self, "_vol_save", None)
+        if timer is None:
+            timer = self._vol_save = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(400)
+            timer.timeout.connect(self._persist_volume)
+        timer.start()
+
+    def _persist_volume(self):
+        cfg.set_music_volume(self._vol_slider.value() / 100.0)
+
+    def hideEvent(self, event):
+        # Leaving the screen inside the 400 ms window must not lose the last value
+        timer = getattr(self, "_vol_save", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+            self._persist_volume()
+        super().hideEvent(event)
 
     def _settings_task(self, s):
         """
@@ -1672,7 +1708,18 @@ class ConfigureScreen(QWidget):
             self.status.setText("Please wait for the current task to finish.")
             return False
         self._settings_running = True
-        s.done.connect(lambda _ok: setattr(self, "_settings_running", False))
+        # These close Steam and rewrite its files in daemon threads; without this the
+        # window could be closed (or the machine suspended) half way through. Don't
+        # take over a lock another operation already holds.
+        took_lock = not inhibit.busy()
+        if took_lock:
+            inhibit.start("DeckOps is changing Steam settings")
+
+        def _release(_ok):
+            self._settings_running = False
+            if took_lock:
+                inhibit.stop()
+        s.done.connect(_release)
         return True
 
     def _apply_controller_profiles(self):
@@ -1681,15 +1728,19 @@ class ConfigureScreen(QWidget):
             return
         self.status.setText("Re-applying controller profiles...")
         s.log.connect(lambda msg: self.status.setText(msg))
+        # The worker's own explanation, kept: the generic line below used to replace
+        # it the instant `done` fired, so the real reason was never readable.
+        reason = []
         s.done.connect(lambda ok: self.status.setText(
-            "✓  Steam Deck layout applied." if ok else "✗  Could not apply Steam Deck layout; see log."
+            "✓  Steam Deck layout applied." if ok else
+            f"✗  {reason[0]}" if reason else "✗  Could not apply Steam Deck layout; see log."
         ))
         def _run():
             try:
                 from controller_profiles import install_controller_templates, assign_controller_profiles
                 from wrapper import kill_steam, set_steam_input_enabled
                 if cfg.get_deck_model() not in ("lcd", "oled"):
-                    s.log.emit("This bundled layout supports Steam Deck controls only.")
+                    reason.append("This bundled layout supports Steam Deck controls only.")
                     s.done.emit(False)
                     return
                 s.log.emit("Closing Steam...")
@@ -1702,7 +1753,7 @@ class ConfigureScreen(QWidget):
                 s.done.emit(True)
                 s.log.emit("✓  Controller profiles applied. It is now safe to reopen Steam.")
             except Exception as ex:
-                s.log.emit(f"✗  Failed: {ex}")
+                reason.append(f"Failed: {ex}")
                 s.done.emit(False)
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1789,11 +1840,12 @@ class ConfigureScreen(QWidget):
         if not self._settings_task(s):
             return  # A busy click must not change the config or the button.
         try:
-            config = cfg.load()
-            had_cap = "dxvk_frame_cap" in config
-            old_value = config.get("dxvk_frame_cap", True)
-            config["dxvk_frame_cap"] = not bool(old_value)
-            cfg.save(config)
+            with cfg.transaction():
+                config = cfg.load()
+                had_cap = "dxvk_frame_cap" in config
+                old_value = config.get("dxvk_frame_cap", True)
+                config["dxvk_frame_cap"] = not bool(old_value)
+                cfg.save(config)
             self._refresh_cap_btn()
         except Exception as ex:
             s.done.emit(False)  # Release the Settings task slot even if saving failed.
@@ -1807,12 +1859,13 @@ class ConfigureScreen(QWidget):
                 return
             reason = errors[0] if errors else "unknown error"
             try:
-                config = cfg.load()
-                if had_cap:
-                    config["dxvk_frame_cap"] = old_value
-                else:
-                    config.pop("dxvk_frame_cap", None)
-                cfg.save(config)
+                with cfg.transaction():
+                    config = cfg.load()
+                    if had_cap:
+                        config["dxvk_frame_cap"] = old_value
+                    else:
+                        config.pop("dxvk_frame_cap", None)
+                    cfg.save(config)
                 self._refresh_cap_btn()
             except Exception as ex:
                 self.status.setText(f"✗  Shortcut repair failed ({reason}); "
@@ -2055,6 +2108,12 @@ class ConfigureScreen(QWidget):
         if not os.path.exists(uninstall_script):
             self.status.setText("✗  Uninstall script not found.")
             return
+        # quit() skips the window's "stop it part way?" question, so check here: an
+        # uninstall during an install or a Steam change would cut that off mid-write
+        busy = inhibit.busy()
+        if busy:
+            self.status.setText(f"✗  Wait for this to finish first: {str(busy).rstrip('.')}.")
+            return
         self.status.setText("Launching uninstaller...")
         try:
             # Launch in Konsole so the user can see progress
@@ -2282,6 +2341,14 @@ class ConfigureScreen(QWidget):
 
     def _reset_deckops(self):
         cfg.reset()
+        # The screens keep what the old setup chose and found; setup starts clean
+        for name in ("SetupScreen",):
+            screen = get_screen(self.stack, name)
+            if screen is not None and hasattr(screen, "reset_state"):
+                screen.reset_state()
+        library = get_screen(self.stack, "ManagementScreen")
+        if library is not None:
+            library.installed = {}
         self.status.setText("Config wiped. Restarting setup...")
         QTimer.singleShot(1500, lambda: go_to(self.stack, "BootstrapScreen"))
 
@@ -2652,9 +2719,12 @@ class UpdateScreen(QWidget):
         is_lcd = cfg.is_lcd()
 
         if is_lcd:
-            from plutonium_lcd import (install_plutonium_lcd,
-                                       launch_bootstrapper_lcd,
+            from plutonium_lcd import (launch_bootstrapper_lcd,
                                        is_plutonium_ready_lcd)
+            # install_plutonium sends LCD to the LCD installer itself, after setting up
+            # Offline Mode first; calling the LCD installer directly skipped that, so an
+            # update never refreshed the offline launcher or the bot-match files.
+            from plutonium import install_plutonium
         else:
             from plutonium import (install_plutonium,
                                         launch_bootstrapper,
@@ -2898,19 +2968,10 @@ class UpdateScreen(QWidget):
                     install_iw4x(game, self.steam_root, proton, compat, op,
                                  source=source, install_dlc=False)
                 elif c == "plutonium":
-                    if is_lcd:
-                        install_plutonium_lcd(game, key,
-                                             installed_games=installed_for_plut,
-                                             on_progress=op,
-                                             steam_root=self.steam_root,
-                                             proton_path=proton,
-                                             compatdata_path=compat,
-                                             source=source)
-                    else:
-                        install_plutonium(game, key, self.steam_root, proton, compat,
-                                         on_progress=op,
-                                         installed_games=installed_for_plut,
-                                         source=source)
+                    install_plutonium(game, key, self.steam_root, proton, compat,
+                                      on_progress=op,
+                                      installed_games=installed_for_plut,
+                                      source=source)
                 elif c == "t6sp_mod":
                     install_t6sp_mod(game, self.steam_root, proton, compat, op,
                                     source=source)

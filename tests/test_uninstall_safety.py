@@ -120,6 +120,51 @@ class UninstallSafety(unittest.TestCase):
         self.run_code(REPOINT, "apply")
         self.assertEqual(path.read_bytes(), original.replace(str(ours).encode(), str(other).encode()))
 
+    def test_steam_files_are_replaced_whole_and_keep_their_permissions(self):
+        path = self.config / "localconfig.vdf"
+        path.write_bytes(b"old")
+        os.chmod(path, 0o644)
+        self.run_code("import sys, deckops_vdf; deckops_vdf.write_file(sys.argv[1], b'new content')",
+                      str(path))
+        self.assertEqual(path.read_bytes(), b"new content")
+        self.assertEqual([p.name for p in self.config.iterdir()], ["localconfig.vdf"])
+        if sys.platform != "win32":
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+
+    def test_a_failed_replace_leaves_the_old_file_and_no_temp(self):
+        path = self.config / "localconfig.vdf"
+        path.write_bytes(b"old")
+        code = ("import os, sys, deckops_vdf\n"
+                "def boom(a, b): raise OSError('disk full')\n"
+                "os.replace = boom\n"
+                "try:\n    deckops_vdf.write_file(sys.argv[1], b'new')\n"
+                "except OSError:\n    sys.exit(0)\nsys.exit(1)\n")
+        self.run_code(code, str(path))
+        self.assertEqual(path.read_bytes(), b"old")
+        self.assertEqual([p.name for p in self.config.iterdir()], ["localconfig.vdf"])
+
+    def test_repoint_with_no_own_config_is_not_a_crash(self):
+        # A never-configured install has no deckops.json: nothing of ours to repoint
+        ours = self.home / "DeckOps-Nightly"
+        other = self.home / "DeckOps"
+        ours.mkdir()
+        other.mkdir()
+        (other / "deckops.json").write_text(json.dumps({"setup_games": {}}))
+        self.env.update(DECKOPS_INSTALL_DIR=str(ours), DECKOPS_OTHER_DIR=str(other))
+        result = self.run_code(REPOINT, "check")
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_repoint_with_damaged_own_config_keeps_install_with_a_clear_reason(self):
+        ours = self.home / "DeckOps-Nightly"
+        other = self.home / "DeckOps"
+        ours.mkdir()
+        other.mkdir()
+        (ours / "deckops.json").write_text("{not json")
+        (other / "deckops.json").write_text(json.dumps({"setup_games": {}}))
+        self.env.update(DECKOPS_INSTALL_DIR=str(ours), DECKOPS_OTHER_DIR=str(other))
+        result = self.run_code(REPOINT, "check", ok=False)
+        self.assertIn("install kept for retry", result.stderr)
+
     def test_repoint_requires_other_branch_to_have_the_configured_game(self):
         ours = self.home / "DeckOps-Nightly"
         other = self.home / "DeckOps"

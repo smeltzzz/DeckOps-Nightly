@@ -36,7 +36,9 @@ _log = get_logger(__name__)
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 from steam_common import (
-    PROJECT_ROOT, STEAM_ROOT, USERDATA_DIR,
+    PROJECT_ROOT, default_steam_root,
+    userdata_dir as _userdata_dir,
+    compat_root as _compat_root,
     atomic_write as _atomic_write,
     backup_file as _backup_file,
     keep_original as _keep_original,
@@ -47,7 +49,6 @@ from steam_common import (
     shortcut_title_key as _shortcut_title_key,
 )
 
-COMPAT_ROOT    = os.path.join(STEAM_ROOT, "steamapps", "compatdata")
 ASSETS_DIR     = os.path.join(PROJECT_ROOT, "assets", "controllers")
 
 
@@ -510,6 +511,17 @@ def _get_next_index(raw_data: bytes) -> int:
     if not raw_data:
         return 0
 
+    # Preferred: walk the entries' real structure and read each one's own index.
+    # The byte scan below only knows entries whose first field is the appid, so a
+    # shortcuts.vdf written by another tool (different field order) gave too small a
+    # number and a new entry then reused an existing index.
+    entries = _split_entries(raw_data)
+    if entries:
+        found = [int(m.group(1)) for m in
+                 (re.match(rb'\x00(\d+)\x00', e) for e in entries) if m]
+        if found:
+            return max(found) + 1
+
     indices = []
     i = 0
     while i < len(raw_data) - 2:
@@ -572,13 +584,17 @@ def _download_artwork(grid_dir: str, appid: int, shortcut_def: dict, prog,
     os.makedirs(grid_dir, exist_ok=True)
 
     if clean_stale:
+        # Exactly this appid's artwork names ({id}.ext, {id}p.ext, {id}_hero.ext, ...).
+        # A "{id}*" prefix match also took other apps' art whose id starts with these
+        # digits (10090 matched 100900p.jpg) when the appid is a short Steam one.
+        own_art = re.compile(rf"{re.escape(appid_str)}(?:p|_hero|_logo|_icon)?\.[A-Za-z0-9]+")
         try:
-            import glob as _glob
-            for f in _glob.glob(os.path.join(grid_dir, f"{appid_str}*")):
-                try:
-                    os.remove(f)
-                except OSError:
-                    _log.debug("file removal failed", exc_info=True)
+            for name in os.listdir(grid_dir):
+                if own_art.fullmatch(name):
+                    try:
+                        os.remove(os.path.join(grid_dir, name))
+                    except OSError:
+                        _log.debug("file removal failed", exc_info=True)
         except Exception:
             _log.debug("file removal failed", exc_info=True)
     
@@ -666,7 +682,7 @@ def _assign_controller_config(uid: str, appid: int, shortcut_def: dict,
     
     # Path: Steam Controller Configs/<uid>/config/<appid>/
     steam_cfg_root = os.path.join(
-        STEAM_ROOT, "steamapps", "common",
+        default_steam_root(), "steamapps", "common",
         "Steam Controller Configs", uid, "config"
     )
     try:
@@ -743,7 +759,7 @@ def get_shortcut_appid(name: str) -> int | None:
     appid_field = re.compile(rb'\x02(?i:appid)\x00(.{4})', re.DOTALL)
 
     for uid in _find_all_steam_uids():
-        shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
+        shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
         try:
             body = _read_shortcuts_raw(shortcuts_path)
         except ShortcutsReadError:
@@ -759,6 +775,20 @@ def get_shortcut_appid(name: str) -> int | None:
                 return struct.unpack("<I", m.group(1))[0]
 
     return None
+
+
+def _entry_appids(raw_body: bytes, name: str) -> list:
+    """Unsigned appids stored in the entries of a header-stripped body whose AppName
+    is exactly `name` (same matching as get_shortcut_appid, for one user's file)."""
+    name_field = re.compile(rb'\x01(?i:appname)\x00' + re.escape(name.encode("utf-8")) + rb'\x00')
+    appid_field = re.compile(rb'\x02(?i:appid)\x00(.{4})', re.DOTALL)
+    out = []
+    for entry in _split_entries(raw_body):
+        if name_field.search(entry):
+            m = appid_field.search(entry)
+            if m:
+                out.append(struct.unpack("<I", m.group(1))[0])
+    return out
 
 
 # ── Entry-stripping helper (rewrite-on-collision support) ────────────────────
@@ -874,8 +904,8 @@ def add_shortcut(
         return shortcut_appid
 
     for uid in uids:
-        shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
-        grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
+        shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
+        grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
         if existing_raw is None:
@@ -963,8 +993,8 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
         return
 
     for uid in uids:
-        shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
-        grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
+        shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
+        grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         body = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
         if not body or not _split_entries(body):
@@ -1047,8 +1077,8 @@ def cleanup_orphan_shortcuts(on_progress=None):
     total_removed = 0
 
     for uid in uids:
-        shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
-        grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
+        shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
+        grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         body = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
         entries = _split_entries(body) if body else []
@@ -1088,7 +1118,7 @@ def cleanup_orphan_shortcuts(on_progress=None):
                     _log.debug("file removal failed", exc_info=True)
 
     # Remove shader caches for orphan appids
-    shadercache_dir = os.path.join(STEAM_ROOT, "steamapps", "shadercache")
+    shadercache_dir = os.path.join(default_steam_root(), "steamapps", "shadercache")
     if os.path.isdir(shadercache_dir):
         for appid in orphan_appids:
             cache_dir = os.path.join(shadercache_dir, str(appid))
@@ -1148,7 +1178,7 @@ def remove_merged_mp_shortcuts(steam_root: str = None, on_progress=None) -> list
     import config as cfg
 
     prog = on_progress or (lambda *a: None)
-    sr = steam_root or STEAM_ROOT
+    sr = steam_root or default_steam_root()
     setup = cfg.get_setup_games()
     todo = [k for k in ("cod4mp", "t4mp")
             if setup.get(k, {}).get("source", "steam") == "steam"
@@ -1190,7 +1220,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
 
     steam_root -- path to Steam root, used to dynamically resolve the game's
                   compatdata prefix (internal or SD card). Falls back to
-                  STEAM_ROOT if not provided.
+                  the configured/detected Steam root if not provided.
     """
     prog = on_progress or (lambda *a: None)
 
@@ -1227,8 +1257,8 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
     for uid in uids:
         prog(f"Creating shortcuts for user {uid}...")
         
-        shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
-        grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
+        shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
+        grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
         
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
         if existing_raw is None:
@@ -1262,7 +1292,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
             # on the internal NVME or an SD card. The shortcut reuses the
             # game's prefix (no separate prefix needed).
             from wrapper import find_compatdata
-            _sr = steam_root or STEAM_ROOT
+            _sr = steam_root or default_steam_root()
             game_data = installed_games.get(key, {})
             compatdata_path = find_compatdata(
                 _sr, game_appid,
@@ -1425,7 +1455,7 @@ def apply_steam_artwork(selected_keys: list, on_progress=None):
         return
 
     for uid in uids:
-        grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
+        grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
         os.makedirs(grid_dir, exist_ok=True)
 
         for key, steam_appid, art_def in to_apply:
@@ -1470,7 +1500,7 @@ def own_plut_prefix(key: str, game: dict) -> str:
     else:
         exe = game["exe_path"]
     appid = _calc_shortcut_appid(f'"{exe}"', OWN_SHORTCUTS[key]["name"])
-    return os.path.join(COMPAT_ROOT, str(appid))
+    return os.path.join(_compat_root(), str(appid))
 
 
 def _migrate_waw_mp_prefix(old_compat: str, new_compat: str, prog):
@@ -1545,13 +1575,13 @@ def enrich_own_games(own_games: dict, selected_keys: list,
 
         # Own games get a CRC-based prefix keyed on the shortcut appid,
         # except WaW MP which shares the WaW SP prefix (see own_plut_prefix).
-        compatdata_path = os.path.join(COMPAT_ROOT, str(shortcut_appid))
+        compatdata_path = os.path.join(_compat_root(), str(shortcut_appid))
         if key == "t4mp":
             import config as _cfg
             compatdata_path = own_plut_prefix(key, game)
             if not _cfg.is_lcd():
                 _migrate_waw_mp_prefix(
-                    os.path.join(COMPAT_ROOT, str(shortcut_appid)), compatdata_path, prog)
+                    os.path.join(_compat_root(), str(shortcut_appid)), compatdata_path, prog)
 
         # Enrich the game dict so downstream code has the appid and paths
         game["shortcut_appid"]  = shortcut_appid
@@ -1615,7 +1645,7 @@ def enrich_own_games(own_games: dict, selected_keys: list,
             final_appid   = _calc_shortcut_appid(quoted_actual, name)
             if final_appid != shortcut_appid:
                 shortcut_appid  = final_appid
-                compatdata_path = os.path.join(COMPAT_ROOT, str(shortcut_appid))
+                compatdata_path = os.path.join(_compat_root(), str(shortcut_appid))
                 game["shortcut_appid"]  = shortcut_appid
                 game["compatdata_path"] = compatdata_path
 
@@ -1681,8 +1711,8 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
     for uid in uids:
         prog(f"Writing own game shortcuts for user {uid}...")
 
-        shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
-        grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
+        shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
+        grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
         if existing_raw is None:
@@ -1924,8 +1954,8 @@ def create_launcher_shortcut(on_progress=None):
         return
 
     for uid in uids:
-        shortcuts_path = os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")
-        grid_dir = os.path.join(USERDATA_DIR, uid, "config", "grid")
+        shortcuts_path = os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")
+        grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
         if existing_raw is None:
@@ -1957,7 +1987,11 @@ def create_launcher_shortcut(on_progress=None):
 
         # If the current title exists but under an old appid, strip it
         # so the new entry (with the shell script path) can be written fresh.
-        if _stale_appids and LAUNCHER_TITLE in existing_names:
+        # Only when an entry's own appid really differs: _stale_appids always
+        # holds the old formulas' appids, so keying on it recreated a correct
+        # shortcut on every install/repair and reset the user's edits to it.
+        if LAUNCHER_TITLE in existing_names and any(
+                a != shortcut_appid for a in _entry_appids(existing_raw, LAUNCHER_TITLE)):
             _stale_names.add(LAUNCHER_TITLE)
 
         if _stale_names:
@@ -2061,7 +2095,7 @@ def _drop_old_t6sp_appid(game: dict, prog):
     if get_shortcut_appid(OWN_SHORTCUTS["t6sp"]["name"]) != old:
         return
     for uid in _find_all_steam_uids():
-        for f in glob.glob(os.path.join(USERDATA_DIR, uid, "config", "grid", f"{old}*")):
+        for f in glob.glob(os.path.join(_userdata_dir(), uid, "config", "grid", f"{old}*")):
             try:
                 os.remove(f)
             except OSError:
@@ -2071,7 +2105,7 @@ def _drop_old_t6sp_appid(game: dict, prog):
     except Exception:
         _log.debug("compat tool clear failed", exc_info=True)
     prog(f"  Old BO2 Singleplayer shortcut (appid {old}) cleaned up; its prefix is kept at "
-         f"{os.path.join(COMPAT_ROOT, str(old))}")
+         f"{os.path.join(_compat_root(), str(old))}")
 
 
 def migrate_own_t6sp(game: dict, on_progress=None) -> bool:
@@ -2127,7 +2161,7 @@ def present_shortcut_names() -> set | None:
     present = None
     for uid in _find_all_steam_uids():
         names = set(_read_existing_shortcuts(
-            os.path.join(USERDATA_DIR, uid, "config", "shortcuts.vdf")))
+            os.path.join(_userdata_dir(), uid, "config", "shortcuts.vdf")))
         present = names if present is None else present & names
     return present
 
@@ -2171,7 +2205,7 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
 
     prog = on_progress or (lambda *a: None)
 
-    sr = steam_root or STEAM_ROOT
+    sr = steam_root or default_steam_root()
     setup = cfg.get_setup_games()
 
     # key -> (kind, name). kind picks the writer below.

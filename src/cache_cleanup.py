@@ -53,6 +53,23 @@ def _shadercache_dir() -> str:
     from steam_common import default_steam_root
     return os.path.join(default_steam_root(), "steamapps", "shadercache")
 
+
+def _shadercache_dirs() -> list:
+    """Every shadercache folder Steam uses: the main one, plus the one in each other
+    library (an SD card holds the cache of the games installed on it, and cleaning
+    only the main library's left those piling up)."""
+    dirs = [_shadercache_dir()]
+    try:
+        from steam_common import default_steam_root
+        from detect_games import parse_library_folders
+        for lib in parse_library_folders(default_steam_root()):
+            d = os.path.join(lib, "steamapps", "shadercache")
+            if d not in dirs:
+                dirs.append(d)
+    except Exception:
+        _log.debug("library folders unreadable, cleaning the main shader cache only", exc_info=True)
+    return dirs
+
 # Map game key to Steam appid. Used to find the shadercache folder for
 # Steam-owned games (whose cache is keyed on the Steam appid, not the
 # shortcut appid).
@@ -101,12 +118,13 @@ def _nuke_shader_cache_dir(appid_str: str):
     on next launch, and the game's real shader work happens inside
     Heroic's Proton runtime which stores its cache elsewhere.
     """
-    cache_dir = os.path.join(_shadercache_dir(), appid_str)
-    if os.path.isdir(cache_dir):
-        try:
-            shutil.rmtree(cache_dir)
-        except OSError:
-            _log.debug("cache dir removal failed", exc_info=True)
+    for base in _shadercache_dirs():
+        cache_dir = os.path.join(base, appid_str)
+        if os.path.isdir(cache_dir):
+            try:
+                shutil.rmtree(cache_dir)
+            except OSError:
+                _log.debug("cache dir removal failed", exc_info=True)
 
 
 def cleanup_shader_cache(game_key: str, source: str):

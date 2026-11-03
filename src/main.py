@@ -13,8 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # The installed desktop shortcut launches main.py directly. Recover before
 # importing logging, Qt, or anything else an interrupted update may have touched.
-from update_manifest import recover_update, update_lock
 try:
+    # Inside the try: an import failure here is as much "could not open safely" as a
+    # failed recovery, and should get the dialog, not a bare traceback.
+    from update_manifest import recover_update, update_lock
     _install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with update_lock(_install_dir):
         _rolled_back = recover_update(_install_dir)

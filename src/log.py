@@ -112,8 +112,13 @@ def setup_logging(level: int = logging.DEBUG):
         return
     _setup_done = True
 
-    os.makedirs(_LOG_DIR, exist_ok=True)
-    _scrub_old_logs()
+    # An unwritable install dir (read-only mount, full disk) must not stop DeckOps
+    # from starting: the file handler below already falls back to stderr only.
+    try:
+        os.makedirs(_LOG_DIR, exist_ok=True)
+        _scrub_old_logs()
+    except OSError:
+        pass
 
     root = logging.getLogger("deckops")
     root.setLevel(level)

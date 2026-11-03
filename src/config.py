@@ -12,7 +12,9 @@ The config file tracks:
     - The Steam root path found during setup
 """
 
+import contextlib
 import copy
+import functools
 import os
 import json
 import re
@@ -152,6 +154,32 @@ def save(config: dict):
         _cache_key = None
 
 
+# load() and save() each take _lock, but a setter calls both: with the lock dropped in
+# between, two threads (an install worker marking a game set up while the UI saves a
+# setting) could both load the same dict and the second save would lose the first's
+# change. Read-modify-write sequences hold this one across the whole sequence.
+# Re-entrant, so a setter may call another. (Other processes -- prelaunch -- still
+# write the file on their own; this covers the threads of one process.)
+_txn_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def transaction():
+    """Hold the config update lock: `with config.transaction(): c = load(); ...; save(c)`."""
+    with _txn_lock:
+        yield
+
+
+def _updates(fn):
+    """Run a load-modify-save setter under the update lock."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _txn_lock:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+@_updates
 def _set(key: str, value):
     config = load()
     config[key] = value
@@ -163,6 +191,7 @@ def is_first_run() -> bool:
     return not load().get("first_run_complete", False)
 
 
+@_updates
 def set_os_type(os_type: str):
     """Save the user's operating system type.
 
@@ -178,6 +207,7 @@ def get_deck_model() -> str | None:
     return load().get("deck_model")
 
 
+@_updates
 def set_deck_model(model: str):
     """Save the user's device model.
 
@@ -222,6 +252,7 @@ def get_other_device() -> str | None:
     return load().get("other_device")
 
 
+@_updates
 def set_other_device(device: str):
     """Save the resolution key, e.g. '1920x1200_144hz'.
 
@@ -243,6 +274,7 @@ def get_other_device_type() -> str | None:
     return load().get("other_device_type")
 
 
+@_updates
 def set_other_device_type(device_type: str):
     """Save the device type for controller profile selection.
 
@@ -389,6 +421,7 @@ def get_ge_proton_version() -> str | None:
     return load().get("ge_proton_version")
 
 
+@_updates
 def set_ge_proton_version(version: str):
     """Save the installed GE-Proton version after CompatToolMapping is applied.
     Also remembers it (and the version it replaces) as one DeckOps uses, so
@@ -495,6 +528,7 @@ def get_steam_display_name(steam_root: str | None = None) -> str | None:
     return most_recent_name or first_name
 
 
+@_updates
 def mark_game_setup(game_key: str, client: str, source: str = "steam",
                     wrapper_path: str = None,
                     lan_wrapper_path: str = None):
@@ -528,6 +562,7 @@ def is_game_setup(game_key: str) -> bool:
     return game_key in load().get("setup_games", {})
 
 
+@_updates
 def unmark_game_setup(game_keys):
     """
     Remove one or more game keys from setup_games so they appear as
@@ -564,6 +599,7 @@ def is_depot_patched(game_id: str) -> bool:
     return game_id in load().get("depot_patched", {})
 
 
+@_updates
 def clear_depot_patched(game_id: str):
     config = load()
     dp = config.get("depot_patched", {})
@@ -581,12 +617,14 @@ def get_iw_pad(game_key: str) -> dict:
     return load().get("iw_pad", {}).get(game_key) or {}
 
 
+@_updates
 def set_iw_pad(game_key: str, info: dict):
     config = load()
     config.setdefault("iw_pad", {})[game_key] = info
     save(config)
 
 
+@_updates
 def complete_first_run(steam_root: str):
     """
     Call this at the end of the setup wizard to mark first run as done.

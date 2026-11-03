@@ -394,7 +394,9 @@ def _stash_user_storage(plut_dir: str, keep_root: str, prog):
             src = os.path.join(storage, store, part)
             dst = os.path.join(keep_root, store, part)
             # A keep dir left by an earlier failed run already holds the
-            # user's data; what's in the prefix now is a fresh copy.
+            # user's data; what's in the prefix now is a fresh copy. (The failed
+            # restore is the usual cause, right after the fresh copy, so the keep
+            # dir is the real one -- not worth guessing the other way.)
             if not os.path.isdir(src) or os.path.lexists(dst):
                 continue
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -421,10 +423,42 @@ def _restore_user_storage(plut_dir: str, keep_root: str, prog):
 
 
 def _copy_plut_fresh(src_plut_dir: str, dest_plut_dir: str, game_key: str, prog):
-    if os.path.exists(dest_plut_dir):
-        prog(f"  Removing existing Plutonium at {dest_plut_dir}...")
-        shutil.rmtree(dest_plut_dir)
+    """Build the prefix's Plutonium next to the old one and swap it in, so a missing
+    master, a full disk or a kill mid-copy leaves the working copy as it was."""
+    # The prefix links into the master's bin/: without it the new copy is empty shells
+    if not os.path.isdir(os.path.join(src_plut_dir, "bin")):
+        raise FileNotFoundError(f"Plutonium master copy is missing or incomplete: {src_plut_dir}")
 
+    base = dest_plut_dir.rstrip(os.sep)
+    staging, old = base + ".deckops_new", base + ".deckops_old"
+    for leftover in (staging, old):
+        if os.path.lexists(leftover):
+            shutil.rmtree(leftover, ignore_errors=True)
+    try:
+        _build_plut_copy(src_plut_dir, staging, game_key, prog)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    had_old = os.path.lexists(dest_plut_dir)
+    if had_old:
+        prog(f"  Replacing existing Plutonium at {dest_plut_dir}...")
+        os.replace(dest_plut_dir, old)
+    try:
+        os.replace(staging, dest_plut_dir)
+    except BaseException:
+        if had_old:
+            try:
+                os.replace(old, dest_plut_dir)
+            except OSError:
+                _log.error("Could not put the previous Plutonium back from %s", old)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    if had_old:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def _build_plut_copy(src_plut_dir: str, dest_plut_dir: str, game_key: str, prog):
     start = time.time()
 
     os.makedirs(dest_plut_dir, exist_ok=True)
@@ -475,11 +509,17 @@ def _write_config(plut_dir: str, game_keys: list, installed_games: dict):
     config_path = os.path.join(plut_dir, "config.json")
 
     # Read existing config (token etc.) from this prefix if present
+    data = {}
     if os.path.exists(config_path):
-        with open(config_path) as f:
-            data = json.load(f)
-    else:
-        data = {}
+        try:
+            with open(config_path) as f:
+                data = json.load(f)
+        except (OSError, ValueError) as ex:
+            # A cut-off or damaged file has no token left to keep; rewriting it beats
+            # aborting the whole install on it (plutonium_lcd does the same).
+            _log.warning("Plutonium config.json unreadable, rewriting it: %s", ex)
+        if not isinstance(data, dict):
+            data = {}
 
     # Write the path key for each game in this prefix
     for key in game_keys:
@@ -494,8 +534,10 @@ def _write_config(plut_dir: str, game_keys: list, installed_games: dict):
             install_dir = plut_game_dir(key, install_dir, game.get("source", "steam"))
             data[path_key] = _wine_path(install_dir)
 
-    with open(config_path, "w") as f:
+    tmp = config_path + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, config_path)
 
 
 # ── client-side menu mods ────────────────────────────────────────────────────
@@ -1326,8 +1368,16 @@ def _lan_download(dst: str, url: str, digest, prog):
         download(url, z, digest=digest)
         with zipfile.ZipFile(z) as zf:
             name = next(n for n in zf.namelist() if os.path.basename(n) == os.path.basename(dst))
-            with zf.open(name) as fi, open(dst, "wb") as fo:
-                shutil.copyfileobj(fi, fo)
+            # Never write dst itself: setup_lan skips a download whenever dst exists,
+            # so a copy cut off mid-way would be kept as if it were complete.
+            part = dst + ".part"
+            try:
+                with zf.open(name) as fi, open(part, "wb") as fo:
+                    shutil.copyfileobj(fi, fo)
+                os.replace(part, dst)
+            finally:
+                if os.path.exists(part):
+                    os.remove(part)
 
 
 def _lan_disk_check(prog):
@@ -1540,8 +1590,12 @@ def apply_offline_mode(on: bool, steam_root: str, prog=lambda pct, msg: None):
 def remove_lan(prog=lambda m: None):
     """Offline Mode removed. rmtree never follows the links into online folders."""
     for mode in {_plut_key(k) for k in LAN_KEYS}:
-        subprocess.run(["systemctl", "--user", "stop", f"deckops-lan-{mode}"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # No systemctl (non-systemd distro) or a hung user bus must not stop removal
+        try:
+            subprocess.run(["systemctl", "--user", "stop", f"deckops-lan-{mode}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError) as ex:
+            _log.warning("could not stop deckops-lan-%s: %s", mode, ex)
     if os.path.isdir(LAN_ROOT):
         shutil.rmtree(LAN_ROOT)
     prog("  ✓ Offline server folders removed")

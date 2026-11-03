@@ -68,6 +68,11 @@ def start(why="DeckOps is installing"):
     """Take the locks. Safe to call when they are already held."""
     global _proc, _cookie, _busy
     _busy = why
+    # systemd-inhibit that exited at once (polkit refused, no bus) left a dead _proc
+    # that made every later start() think the lock was held and never retry.
+    if _proc is not None and _proc.poll() is not None:
+        _log.debug("systemd-inhibit exited (%s), taking the lock again", _proc.returncode)
+        _proc = None
     if _proc is None:
         try:
             # Deliberately NOT detached. Every other subprocess here uses
@@ -85,7 +90,7 @@ def start(why="DeckOps is installing"):
             _proc = None
     if _cookie is None:
         _cookie = _ss_inhibit(why)
-    return bool(_proc or _cookie)
+    return bool((_proc is not None and _proc.poll() is None) or _cookie)
 
 
 def stop():

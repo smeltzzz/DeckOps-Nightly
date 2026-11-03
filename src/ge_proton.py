@@ -190,9 +190,9 @@ def _find_default_pfx(ge_version: str | None,
 
     # Fallback: newest GE-Proton that has a default_pfx
     if os.path.isdir(compat_dir):
-        for entry in sorted(os.listdir(compat_dir), reverse=True):
-            if not entry.startswith("GE-Proton"):
-                continue
+        # Numeric order: a plain string sort puts GE-Proton9-27 above GE-Proton10-34
+        names = [e for e in os.listdir(compat_dir) if e.startswith("GE-Proton")]
+        for entry in sorted(names, key=_version_key, reverse=True):
             candidate = os.path.join(compat_dir, entry, "files", "share", "default_pfx")
             if os.path.isdir(candidate):
                 return candidate
@@ -236,9 +236,7 @@ def install_ge_proton(on_progress=None, steam_root: str | None = None):
         if checksum_url:
             # Format: "<hash>  <filename>". net.download verifies it and
             # retries a mismatch instead of failing the install outright.
-            req = urllib.request.Request(checksum_url, headers=_BROWSER_UA)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                digest = _parse_sha512(resp.read())
+            digest = _fetch_checksum(checksum_url)
             if not digest:
                 _log.warning("%s checksum file unreadable, downloading unverified", dir_name)
         else:
@@ -253,6 +251,23 @@ def install_ge_proton(on_progress=None, steam_root: str | None = None):
         prog(100, f"GE-Proton {dir_name} installed.")
 
     return dir_name
+
+
+def _fetch_checksum(url: str, tries: int = 3):
+    """The tarball's sha512 digest from its .sha512sum file, or None. One failed
+    request aborted the whole install (a transient error on a tiny file), while an
+    unreadable file was already allowed to continue unverified: retry, then continue."""
+    import time
+    for attempt in range(tries):
+        try:
+            req = urllib.request.Request(url, headers=_BROWSER_UA)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return _parse_sha512(resp.read())
+        except (OSError, ValueError) as ex:         # URLError, timeouts, bad responses
+            _log.warning("checksum fetch failed (%d/%d): %s", attempt + 1, tries, ex)
+            if attempt + 1 < tries:
+                time.sleep(2 ** attempt)
+    return None
 
 
 def _safe_extractall(tar: tarfile.TarFile, dest: str):
@@ -296,6 +311,11 @@ def _extract_atomically(tarball_path: str, dir_name: str,
     import subprocess
 
     compat_dir = _compat_dir(steam_root)
+    # A run killed mid-extraction (power loss, window closed) leaves its staging folder,
+    # a copy of GE-Proton, behind for good: clear those before making a new one.
+    for name in os.listdir(compat_dir):
+        if name.startswith(".deckops_extract_"):
+            shutil.rmtree(os.path.join(compat_dir, name), ignore_errors=True)
     staging = tempfile.mkdtemp(prefix=".deckops_extract_", dir=compat_dir)
     try:
         # System tar first: much faster and lighter than tarfile on a
@@ -392,9 +412,65 @@ def _prefix_ready(pfx_dir: str) -> bool:
     already initialized — skipped Proton run" and never retried the step that
     had never succeeded. Wine writes these files on its first boot.
     """
+    # A finalize that timed out or was killed leaves this marker next to pfx/. Wine
+    # writes its registry and dosdevices/ early in the boot, so without the marker a
+    # half-built prefix looked ready forever (and was cloned to every other prefix).
+    if os.path.exists(os.path.join(os.path.dirname(pfx_dir), _FINALIZING_MARKER)):
+        return False
+    return _wine_files(pfx_dir)
+
+
+_FINALIZING_MARKER = ".deckops_finalizing"
+
+
+def _wine_files(pfx_dir: str) -> bool:
     return (any(os.path.isfile(os.path.join(pfx_dir, n))
                 for n in ("system.reg", "user.reg", "userdef.reg"))
             or os.path.isdir(os.path.join(pfx_dir, "dosdevices")))
+
+
+def _stop_wine(proton_path: str, pfx_dir: str):
+    """Best effort: end the wineserver a killed `proton run` leaves holding the prefix.
+    subprocess.run only kills the proton script on a timeout, not wine's children."""
+    import subprocess
+    wineserver = os.path.join(os.path.dirname(proton_path), "files", "bin", "wineserver")
+    if not os.path.isfile(wineserver):
+        return
+    try:
+        subprocess.run([wineserver, "-k"], env=dict(os.environ, WINEPREFIX=pfx_dir),
+                       capture_output=True, timeout=20)
+    except Exception as ex:
+        _log.debug(f"wineserver -k failed: {ex}")
+
+
+def _run_proton_finalize(proton_path: str, prefix_path: str, compat_install: str, timeout: int):
+    """`proton run cmd /c exit` on a new prefix. A marker covers the run, and it is
+    only cleared when the prefix really finished, so an interrupted run is retried.
+    Raises what subprocess.run raises (after stopping wine); returns the result."""
+    import subprocess
+    pfx_dir = os.path.join(prefix_path, "pfx")
+    marker = os.path.join(prefix_path, _FINALIZING_MARKER)
+    try:
+        open(marker, "w").close()
+    except OSError:
+        pass
+    env = os.environ.copy()
+    env["STEAM_COMPAT_DATA_PATH"] = prefix_path
+    env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = compat_install
+    try:
+        r = subprocess.run([proton_path, "run", "cmd", "/c", "exit"],
+                           env=env, capture_output=True, timeout=timeout)
+    except BaseException:
+        _stop_wine(proton_path, pfx_dir)
+        raise
+    if _finalized(r.returncode, pfx_dir):
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+    else:
+        _stop_wine(proton_path, pfx_dir)
+    return r
 
 
 def _finalized(returncode: int, pfx_dir: str) -> bool:
@@ -407,7 +483,8 @@ def _finalized(returncode: int, pfx_dir: str) -> bool:
     that held little more than the DLLs copied into it and the game failed
     on first launch instead of setup saying so.
     """
-    return returncode == 0 and _prefix_ready(pfx_dir)
+    # Wine's files, not _prefix_ready: the in-progress marker is still there here.
+    return returncode == 0 and _wine_files(pfx_dir)
 
 
 def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
@@ -509,15 +586,8 @@ def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
         prog("  ✓ Prefix already initialized — skipped Proton run")
         return True
 
-    import subprocess
     try:
-        env = os.environ.copy()
-        env["STEAM_COMPAT_DATA_PATH"]           = prefix_path
-        env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = _compat_install
-        r = subprocess.run(
-            [proton_path, "run", "cmd", "/c", "exit"],
-            env=env, capture_output=True, timeout=180,
-        )
+        r = _run_proton_finalize(proton_path, prefix_path, _compat_install, 180)
         if not _finalized(r.returncode, pfx_dir):
             prog(f"  ⚠ Proton could not finalize the prefix (exit {r.returncode})")
             return False
@@ -958,7 +1028,6 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
 
     Returns the number of prefixes that now have deps installed.
     """
-    import subprocess
     import time
 
     prog = on_progress or (lambda *a: None)
@@ -1052,14 +1121,8 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
         os.makedirs(donor_path, exist_ok=True)
 
         try:
-            env = os.environ.copy()
-            env["STEAM_COMPAT_DATA_PATH"]           = donor_path
-            env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = _compat_install
             start = time.time()
-            r = subprocess.run(
-                [proton_path, "run", "cmd", "/c", "exit"],
-                env=env, capture_output=True, timeout=600,
-            )
+            r = _run_proton_finalize(proton_path, donor_path, _compat_install, 600)
             elapsed = time.time() - start
             # A donor that never got its prefix would be cloned into every
             # remaining prefix, so its exit status has to count: fall back to

@@ -106,6 +106,10 @@ class _AppInfo:
             elif t == _T_WSTR:
                 end = pos
                 while buf[end:end + 2] != b"\x00\x00":
+                    # A truncated value never reaches the terminator: slicing past the
+                    # end gives b"", so without this bound the loop never ended.
+                    if end + 2 > len(buf):
+                        raise ValueError("unterminated wide string in appinfo")
                     end += 2
                 val = bytes(buf[pos:end]); pos = end + 2
             elif t in _FIXED:
@@ -254,26 +258,33 @@ def _relabel(launch, exe: bytes, text: bytes) -> bool:
 def _edit_launch(steam_root: str, appid: int, edit) -> bool:
     """Load appinfo.vdf, run edit(launch_node) on one app, write back if it changed."""
     path = appinfo_path(steam_root)
+    # A truncated or odd file raises IndexError/struct.error as well as ValueError.
+    # Every one of those means "can't safely edit this", never "crash the installer".
+    bad = (OSError, ValueError, IndexError, struct.error)
     try:
         with open(path, "rb") as f:
             raw = f.read()
         ai = _AppInfo(raw)
-    except (OSError, ValueError) as ex:
+    except bad as ex:
         _log.warning(f"appinfo.vdf unreadable: {ex}")
         return False
 
-    span = ai.find_app(int(appid))
-    if not span:
-        _log.info(f"appinfo: app {appid} not cached yet, launch menu skipped")
-        return False
-    start, end = span
-    header = _HDR.unpack_from(ai.data, start + 8)
-    kv = bytes(ai.data[start + 8 + _HDR.size:end])
-    node, used = ai.parse_kv(kv)
+    try:
+        span = ai.find_app(int(appid))
+        if not span:
+            _log.info(f"appinfo: app {appid} not cached yet, launch menu skipped")
+            return False
+        start, end = span
+        header = _HDR.unpack_from(ai.data, start + 8)
+        kv = bytes(ai.data[start + 8 + _HDR.size:end])
+        node, used = ai.parse_kv(kv)
 
-    # Refuse to write anything we can't reproduce byte for byte.
-    if used != len(kv) or ai.encode_kv(node) != kv:
-        _log.warning(f"appinfo: app {appid} did not round-trip, launch menu skipped")
+        # Refuse to write anything we can't reproduce byte for byte.
+        if used != len(kv) or ai.encode_kv(node) != kv:
+            _log.warning(f"appinfo: app {appid} did not round-trip, launch menu skipped")
+            return False
+    except bad as ex:
+        _log.warning(f"appinfo: app {appid} unreadable ({ex}), launch menu skipped")
         return False
 
     launch = _dict(_dict(_dict(node, "appinfo") or [], "config") or [], "launch")
@@ -295,6 +306,8 @@ def _edit_launch(steam_root: str, appid: int, edit) -> bool:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
         with os.fdopen(fd, "wb") as f:
             f.write(ai.data)
+            f.flush()
+            os.fsync(f.fileno())
         # mkstemp makes 0600. Leave appinfo.vdf with the permissions Steam gave
         # it instead of making one file in appcache/ owner-only.
         os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
@@ -314,17 +327,18 @@ def _edit_launch(steam_root: str, appid: int, edit) -> bool:
 
 def _record(appid, entries=None, remove=None):
     import config as cfg
-    c = cfg.load()
-    menus = copy.deepcopy(c.get("launch_menus", {}))
-    cur = [e for e in menus.get(str(appid), []) if e["executable"] not in (remove or ())]
-    for e in entries or []:
-        cur = [x for x in cur if x["executable"] != e["executable"]] + [dict(e)]
-    if cur:
-        menus[str(appid)] = cur
-    else:
-        menus.pop(str(appid), None)
-    c["launch_menus"] = menus
-    cfg.save(c)
+    with cfg.transaction():         # load -> change -> save as one step
+        c = cfg.load()
+        menus = copy.deepcopy(c.get("launch_menus", {}))
+        cur = [e for e in menus.get(str(appid), []) if e["executable"] not in (remove or ())]
+        for e in entries or []:
+            cur = [x for x in cur if x["executable"] != e["executable"]] + [dict(e)]
+        if cur:
+            menus[str(appid)] = cur
+        else:
+            menus.pop(str(appid), None)
+        c["launch_menus"] = menus
+        cfg.save(c)
 
 
 # --- public API
@@ -392,4 +406,9 @@ def reapply_all(steam_root: str):
     """Re-add every recorded menu; Steam may have refreshed appinfo since."""
     import config as cfg
     for appid, entries in cfg.load().get("launch_menus", {}).items():
-        add_launch_entries(steam_root, int(appid), entries, record=False)
+        # One bad record must not stop the rest being reapplied.
+        try:
+            entries = [e for e in entries if isinstance(e, dict) and e.get("executable")]
+            add_launch_entries(steam_root, int(appid), entries, record=False)
+        except (TypeError, ValueError, KeyError, AttributeError) as ex:
+            _log.warning(f"appinfo: skipping bad launch_menus record for {appid!r}: {ex}")

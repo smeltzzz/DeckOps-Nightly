@@ -15,7 +15,7 @@ There is no CI, pre-commit, or formatter config. Run the two checks above before
 ## Layout and wiring
 
 - `src/main.py` is the app entry point. It must recover interrupted updates before importing logging or Qt. `src/update_manifest.py` is deliberately standard-library-only because `launcher.sh` and `install.sh` run it with system Python before the venv exists.
-- `src/ui_qt.py` owns the window and screen stack. Screens live in `ui_setup.py`, `ui_install.py`, `ui_manage.py`, and `ui_manifest.py`; shared constants/helpers are in `ui_constants.py`.
+- `src/ui_qt.py` owns the window and screen stack. Screens live in `ui_setup.py`, `ui_install.py`, and `ui_manage.py`; shared constants/helpers are in `ui_constants.py`.
 - UI modules import Qt through `src/qt.py`, never PyQt directly; it intentionally supports PyQt6 with a PyQt5 fallback.
 - `src/identity.py` is the Python source of truth for branch, install paths, repo URLs, and branding. `deckops_identity.sh` is the shell counterpart. Hardcoded fallbacks in `launcher.sh`, `install.sh`, and `deckops_uninstall.sh` must stay in sync. Change branch only through `BRANCH`.
 - This fork's identity points at `smeltzzz/DeckOps-Nightly`; `upstream` is `GalvarinoDev/DeckOps-Nightly`. Do not "correct" URLs to upstream.

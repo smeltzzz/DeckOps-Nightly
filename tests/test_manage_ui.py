@@ -485,6 +485,90 @@ class ManagementUITests(unittest.TestCase):
         self.assertEqual(save.call_count, 2)
         self.assertFalse(settings._settings_running)
 
+    def test_volume_drag_saves_once_when_it_settles_and_not_per_step(self):
+        settings, _ = self.cap_settings({"steam_root": "/steam"})
+        with patch.object(ui_manage.cfg, "set_music_volume") as save:
+            for v in (10, 20, 30, 40):
+                settings._vol_slider.setValue(v)
+            save.assert_not_called()
+            settings._vol_save.timeout.emit()
+            save.assert_called_once_with(0.4)
+
+    def test_leaving_settings_mid_drag_still_saves_the_volume(self):
+        settings, _ = self.cap_settings({"steam_root": "/steam"})
+        self.stack.setCurrentWidget(settings); _APP.processEvents()
+        with patch.object(ui_manage.cfg, "set_music_volume") as save:
+            settings._vol_slider.setValue(55)
+            save.assert_not_called()
+            self.stack.setCurrentWidget(self.screen); _APP.processEvents()
+            save.assert_called_once_with(0.55)
+
+    def test_reinstalling_mw3_does_not_add_the_dedicated_server(self):
+        gd = next(g for g in ui_manage.ALL_GAMES if "iw5mp" in g["keys"])
+        self.screen.installed = {"iw5mp": {}, "iw5mp_ds": {}, "iw5sp": {}}
+        with patch.object(self.screen, "_setup") as setup:
+            self.screen._reinstall(gd)
+        keys = setup.call_args.kwargs["keys_to_setup"]
+        self.assertIn("iw5mp", keys)
+        self.assertNotIn("iw5mp_ds", keys)
+
+    def test_controller_layout_reason_is_not_replaced_by_the_generic_failure(self):
+        settings, _ = self.cap_settings({"deck_model": "other", "steam_root": "/steam"})
+        with patch.object(ui_manage.cfg, "get_deck_model", return_value="other"):
+            settings._apply_controller_profiles()
+        self.assertIn("Steam Deck controls only", settings.status.text())
+        self.assertFalse(settings._settings_running)
+
+    def test_settings_task_holds_the_sleep_lock_only_while_it_runs(self):
+        settings, _ = self.cap_settings({"steam_root": "/steam"})
+        with patch.object(ui_manage.inhibit, "busy", return_value=None), \
+             patch.object(ui_manage.inhibit, "start") as start, \
+             patch.object(ui_manage.inhibit, "stop") as stop:
+            s = ui_manage._Sigs()
+            self.assertTrue(settings._settings_task(s))
+            start.assert_called_once()
+            stop.assert_not_called()
+            s.done.emit(True)
+            stop.assert_called_once()
+            self.assertFalse(settings._settings_running)
+
+    def test_settings_task_does_not_take_over_a_lock_something_else_holds(self):
+        settings, _ = self.cap_settings({"steam_root": "/steam"})
+        with patch.object(ui_manage.inhibit, "busy", return_value="DeckOps is installing"), \
+             patch.object(ui_manage.inhibit, "start") as start, \
+             patch.object(ui_manage.inhibit, "stop") as stop:
+            s = ui_manage._Sigs()
+            settings._settings_task(s)
+            s.done.emit(True)
+        start.assert_not_called()
+        stop.assert_not_called()
+
+    def test_uninstall_is_refused_while_an_operation_is_running(self):
+        import tempfile
+        settings, _ = self.cap_settings({"steam_root": "/steam"})
+        with tempfile.TemporaryDirectory() as tmp:
+            open(os.path.join(tmp, "deckops_uninstall.sh"), "w").close()
+            with patch.object(ui_manage, "PROJECT_ROOT", tmp), \
+                 patch.object(ui_manage.inhibit, "busy", return_value="DeckOps is installing."), \
+                 patch.object(ui_manage.subprocess, "Popen") as popen, \
+                 patch.object(ui_manage.QApplication, "instance") as app:
+                settings._run_uninstaller()
+        popen.assert_not_called()
+        app.return_value.quit.assert_not_called()
+        self.assertIn("installing", settings.status.text())
+
+    def test_reset_config_clears_what_the_old_setup_remembered(self):
+        settings, _ = self.cap_settings({"steam_root": "/steam"})
+
+        setup = ui_manage.get_screen(self.stack, "SetupScreen")     # a stand-in from setUp
+        setup.reset_state = unittest.mock.MagicMock()
+        self.screen.installed = {"t4mp": {}}
+        with patch.object(ui_manage.cfg, "reset"), \
+             patch.object(ui_manage.QTimer, "singleShot"):
+            settings._reset_deckops()
+        setup.reset_state.assert_called_once()
+        self.assertEqual(self.screen.installed, {})
+
     def test_successful_cap_toggle_and_regular_repair_results(self):
         state = {"dxvk_frame_cap": True, "steam_root": "/steam"}
         settings, save = self.cap_settings(state)
@@ -532,7 +616,7 @@ class ManagementUITests(unittest.TestCase):
                  patch.object(ui_manage.cfg, "is_lcd", return_value=True), \
                  patch.object(ui_manage.cfg, "get_setup_games", return_value=setup), \
                  patch.object(ui_manage.cfg, "is_game_setup_for_source", return_value=True), \
-                 patch("save_backup.has_backups", return_value=True):
+                 patch("save_backup.restore_offer_pending", return_value=True):
                 stack = QStackedWidget(); stack.resize(width, height)
                 guide = ui_manage.SetupCompleteScreen(stack)
                 stack.addWidget(guide)
@@ -575,6 +659,28 @@ class ManagementUITests(unittest.TestCase):
                 self.assertEqual(guide._heading.text(), "SETUP COMPLETE")
                 self.assertEqual(guide._continue_btn.text(), "Continue to My Games")
                 stack.close()
+
+    def test_setup_complete_restore_section_recovers_and_records_the_answer(self):
+        with patch.object(ui_manage.cfg, "is_lcd", return_value=False), \
+             patch.object(ui_manage.cfg, "get_setup_games", return_value={}), \
+             patch.object(ui_manage.cfg, "is_game_setup_for_source", return_value=False), \
+             patch("save_backup.restore_offer_pending", return_value=True), \
+             patch("save_backup.mark_restore_offer_handled") as handled:
+            stack = QStackedWidget(); stack.resize(800, 500)
+            guide = ui_manage.SetupCompleteScreen(stack)
+            stack.addWidget(guide)
+            other = Destination("ManagementScreen"); stack.addWidget(other)
+            stack.show(); _APP.processEvents()
+            # Left disabled by an earlier restore attempt
+            guide._restore_btn.setEnabled(False); guide._restore_skip.setEnabled(False)
+            stack.setCurrentWidget(other); _APP.processEvents()
+            stack.setCurrentWidget(guide); _APP.processEvents()
+            self.assertTrue(guide._restore_btn.isEnabled() and guide._restore_skip.isEnabled())
+            self.assertTrue(guide._restore_btn.isVisible())
+            guide._restore_skip.click()
+            handled.assert_called_once()
+            self.assertFalse(guide._restore_btn.isVisible())
+            stack.close()
 
     def test_update_selection_uses_configured_client_and_detected_source(self):
         installed = {"iw4sp": {"source": "steam"}, "iw5sp": {"source": "own"},

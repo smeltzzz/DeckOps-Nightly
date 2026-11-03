@@ -13,6 +13,8 @@ and then refusing to install based on it is worse than not checking.
 
 import os
 import socket
+import threading
+import time
 from collections import namedtuple
 
 from log import get_logger
@@ -28,12 +30,14 @@ DOWNGRADE_KEYS = {"iw5mp", "iw5mp_ds", "iw5sp"}
 DOWNGRADE_GAME = {"iw5mp": "iw5", "iw5mp_ds": "iw5", "iw5sp": "iw5"}
 
 
-def free_gb(path: str) -> float:
+def free_gb(path: str):
+    """Free space in GB, or None when it can't be read. Zero would mean "full", and
+    a failed statvfs said "Not enough disk space" and blocked the install."""
     try:
         st = os.statvfs(path)
         return (st.f_bavail * st.f_frsize) / (1024 ** 3)
     except OSError:
-        return 0.0
+        return None
 
 
 def _probe(path: str):
@@ -73,12 +77,54 @@ def _on_ac() -> bool:
     return not seen
 
 
-def _online() -> bool:
+# The check runs when a button is clicked, on the UI thread. create_connection's
+# timeout does not cover the DNS lookup, so an offline click could freeze the window
+# for far longer than 5 s. The probe runs in a worker instead; the caller waits a
+# short while at most (so the worst case is a couple of seconds, not a frozen window),
+# and a recent result is reused.
+_ONLINE_WAIT = 2.0          # longest a check waits for the probe
+_ONLINE_FRESH = 60.0        # how long a probe result is reused
+_online_lock = threading.Lock()
+_online_result = None       # (time.monotonic(), bool) of the last finished probe
+_online_thread = None
+
+
+def _probe_online():
+    global _online_result
     try:
         socket.create_connection(("api.github.com", 443), timeout=5).close()
-        return True
+        ok = True
     except OSError:
-        return False
+        ok = False
+    with _online_lock:
+        _online_result = (time.monotonic(), ok)
+
+
+def start_online_probe():
+    """Begin the connectivity probe in the background if none is running or fresh."""
+    global _online_thread
+    with _online_lock:
+        if _online_thread is not None and _online_thread.is_alive():
+            return _online_thread
+        if _online_result and time.monotonic() - _online_result[0] < _ONLINE_FRESH:
+            return None
+        _online_thread = threading.Thread(target=_probe_online, daemon=True)
+        _online_thread.start()
+        return _online_thread
+
+
+def _online() -> bool:
+    with _online_lock:
+        cached = _online_result
+    if cached and time.monotonic() - cached[0] < _ONLINE_FRESH:
+        return cached[1]
+    t = start_online_probe()
+    if t is not None:
+        t.join(_ONLINE_WAIT)
+    with _online_lock:
+        cached = _online_result
+    # Still unanswered after the wait (a hung lookup): treat as offline, which only warns
+    return bool(cached and time.monotonic() - cached[0] < _ONLINE_FRESH and cached[1])
 
 
 def check(selected, iw4x_dlc=False, downgrade_keys=()):
@@ -123,6 +169,10 @@ def check(selected, iw4x_dlc=False, downgrade_keys=()):
     out = []
     for want, path in sorted(need.values(), key=lambda e: e[1]):
         have = free_gb(path)
+        if have is None:
+            out.append(Check(WARN, "Could not check disk space",
+                             f"{path}: free space unreadable, {want:.0f} GB needed"))
+            continue
         detail = f"{path}: {have:.1f} GB free, {want:.0f} GB needed"
         if have < want:
             out.append(Check(BLOCK, "Not enough disk space", detail))

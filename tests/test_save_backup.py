@@ -1,6 +1,5 @@
 """Save backup regressions: a partial copy is never a usable backup."""
 
-import json
 from pathlib import Path
 import sys
 import tempfile
@@ -109,6 +108,41 @@ class SaveBackupTests(unittest.TestCase):
         self.assertEqual(failures, ["backup list"])
         self.assertFalse(sb.has_backups())
         self.assertTrue(any("backup incomplete" in m.lower() for m in messages))
+
+    def test_restore_is_offered_once_per_backup(self):
+        self._backup()
+        self.assertTrue(sb.restore_offer_pending())
+        sb.mark_restore_offer_handled()
+        self.assertFalse(sb.restore_offer_pending())
+        self.assertTrue(sb.has_backups())           # still there to restore by hand
+        (self.storage / "players" / "stats.cfg").write_text("newer")
+        import time
+        time.sleep(0.01)                            # a new backup gets a new timestamp
+        self._backup()
+        self.assertTrue(sb.restore_offer_pending())
+
+    def test_valid_json_of_the_wrong_shape_does_not_crash_meta_handling(self):
+        self.backup.mkdir()
+        (self.backup / "backup_info.json").write_text("[1, 2, 3]")
+        self.assertFalse(sb.restore_offer_pending())
+        self.assertEqual(sb.restore_saves(steam_root=str(self.root)), {})
+        result, failures, _ = self._backup()
+        self.assertEqual((list(result), failures), (["t6"], []))
+
+    def test_a_second_restore_keeps_the_first_ones_pre_restore_copy(self):
+        live = self.root / "live"
+        live.mkdir()
+        (live / "stats.cfg").write_text("v1")
+        sb._keep_pre_restore(str(live))
+        (live / "stats.cfg").write_text("v2")
+        sb._keep_pre_restore(str(live))
+        self.assertEqual((Path(str(live) + ".pre-restore") / "stats.cfg").read_text(), "v2")
+        self.assertEqual((Path(str(live) + ".pre-restore.1") / "stats.cfg").read_text(), "v1")
+
+    def test_mw3_dedicated_server_saves_are_in_the_mw3_group(self):
+        group = sb.SAVE_GROUPS["iw5"]
+        self.assertIn("iw5mp_ds", group["keys"])
+        self.assertIn("42750", group["appids"])
 
 
 if __name__ == "__main__":

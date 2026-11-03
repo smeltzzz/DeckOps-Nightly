@@ -12,7 +12,7 @@ import shutil
 
 from log import get_logger
 from steam_common import (
-    PROJECT_ROOT, STEAM_ROOT,
+    PROJECT_ROOT, default_steam_root,
     calc_shortcut_appid, find_all_steam_uids, get_deck_serial,
     patch_configset, shortcut_title_key, keep_original,
 )
@@ -123,8 +123,9 @@ def _shortcut_appids(prog):
 def _write_layout(uid, appid, names=(), numbered=True):
     """Write per-account layout and activate it in the Deck's configsets."""
     src = os.path.join(ASSETS_DIR, TEMPLATE)
-    userdata_dir = os.path.join(STEAM_ROOT, "userdata", uid, "241100", "remote", "controller_config", appid)
-    steam_cfg = os.path.join(STEAM_ROOT, "steamapps", "common", "Steam Controller Configs", uid, "config")
+    steam_root = default_steam_root()
+    userdata_dir = os.path.join(steam_root, "userdata", uid, "241100", "remote", "controller_config", appid)
+    steam_cfg = os.path.join(steam_root, "steamapps", "common", "Steam Controller Configs", uid, "config")
     os.makedirs(userdata_dir, exist_ok=True)
     shutil.copy2(src, os.path.join(userdata_dir, TEMPLATE))
     if numbered:

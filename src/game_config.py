@@ -408,8 +408,10 @@ def _replace_player_name(filepath, player_name):
         return
 
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        # Bytes in and out (surrogateescape): text mode turned CRLF into LF and invalid
+        # bytes into U+FFFD, so a rename rewrote more of the config than the name.
+        with open(filepath, "rb") as f:
+            content = f.read().decode("utf-8", "surrogateescape")
 
         import re as _re
         pattern = r'seta name ".*?"'
@@ -425,8 +427,8 @@ def _replace_player_name(filepath, player_name):
         if new_content == content:
             return
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(new_content)
+        from steam_common import atomic_write
+        atomic_write(filepath, new_content.encode("utf-8", "surrogateescape"))
     except (IOError, OSError):
         pass  # Non-fatal — config still works with current name
 
@@ -593,6 +595,9 @@ def apply_game_configs(selected_keys, installed_games, steam_root,
         "iw5mp_ds": "iw5sp",   # MW3 DS  → MW3 SP
     }
     expanded_keys = list(selected_keys)
+    # A copy: the SP entries added below borrow the MP game's exe and install dir, and
+    # must not leak into the caller's dict as if they were separate detected games.
+    installed_games = dict(installed_games)
     for mp_key, sp_key in _SIBLING_MAP.items():
         if mp_key in selected_keys and sp_key not in expanded_keys:
             expanded_keys.append(sp_key)
@@ -869,6 +874,8 @@ def _rename_in_lan_scripts(player_name, installed_games, prog):
     new = bash_name_arg(player_name)
     updated = 0
     for key, entry in cfg.get_setup_games().items():
+        if not isinstance(entry, dict):     # a damaged deckops.json
+            continue
         lan = entry.get("lan_wrapper_path")
         if not lan:
             continue
@@ -893,8 +900,9 @@ def _rename_in_lan_scripts(player_name, installed_games, prog):
             # Replaced game exes are padded to the original size for Steam validation
             if len(body) < len(raw) and len(out) < len(raw):
                 out += b"\x00" * (len(raw) - len(out))
-            with open(p, "wb") as f:
-                f.write(out)
+            # All at once, keeping the file's permissions (these are executable scripts)
+            from steam_common import atomic_write
+            atomic_write(p, out)
             updated += 1
             prog(f"  + {key}: renamed in {os.path.basename(p)}")
     return updated

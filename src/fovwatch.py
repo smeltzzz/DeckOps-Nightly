@@ -137,15 +137,26 @@ class ProcMem:
 
 # ── finding the dvars ────────────────────────────────────────────────────────
 
+_PAGE = 4096
+_OVERLAP = 256      # longer than any needle searched for (a name string, an 8-byte pointer)
+
+
 def _chunks(mem, start, end, size=16 * 1024 * 1024):
+    """(address, bytes) pieces of the region. Consecutive pieces overlap by _OVERLAP
+    bytes, so a needle that straddles a boundary is still seen whole (callers record
+    matches by address, so a match inside the overlap twice is harmless). An unreadable
+    page is skipped, not the end of the region."""
     pos = start
     while pos < end:
         n = min(size, end - pos)
         data = mem.read(pos, n)
         if not data:
-            break
+            pos += _PAGE
+            continue
         yield pos, data
-        pos += len(data)
+        if pos + len(data) >= end:
+            break
+        pos += len(data) - _OVERLAP if len(data) > _OVERLAP else len(data)
 
 
 def find_dvars(mem, maps, exe_name, names, log=_log.info, heap=True):

@@ -69,8 +69,25 @@ def default_steam_root() -> str:
     return found or STEAM_ROOT
 
 
+# Classic-path defaults only. Code that reads Steam's folders must use the functions
+# below: these constants are fixed at import to ~/.local/share/Steam, so on a Flatpak
+# Steam (or one that moved) they point at a directory that does not exist.
 USERDATA_DIR = os.path.join(STEAM_ROOT, "userdata")
 STEAM_CONFIG = os.path.join(STEAM_ROOT, "config", "config.vdf")
+
+
+def userdata_dir() -> str:
+    """Steam's userdata folder for the Steam install DeckOps is set up for."""
+    return os.path.join(default_steam_root(), "userdata")
+
+
+def steam_config_path() -> str:
+    return os.path.join(default_steam_root(), "config", "config.vdf")
+
+
+def compat_root() -> str:
+    """Internal-drive compatdata folder of that Steam install."""
+    return os.path.join(default_steam_root(), "steamapps", "compatdata")
 
 # Steam user IDs below this are system/placeholder folders, not accounts.
 MIN_UID = 10000
@@ -218,13 +235,14 @@ def find_all_steam_uids() -> list[str]:
     Deduplicates symlinked entries by realpath and skips non-numeric or
     sub-MIN_UID folders.
     """
-    if not os.path.isdir(USERDATA_DIR):
+    userdata = userdata_dir()
+    if not os.path.isdir(userdata):
         return []
     seen, uids = set(), []
-    for entry in os.listdir(USERDATA_DIR):
+    for entry in os.listdir(userdata):
         if not entry.isdigit() or int(entry) < MIN_UID:
             continue
-        real = os.path.realpath(os.path.join(USERDATA_DIR, entry))
+        real = os.path.realpath(os.path.join(userdata, entry))
         if real in seen:
             continue
         seen.add(real)
@@ -241,7 +259,7 @@ def get_deck_serial() -> str | None:
     the built-in controller (Deck-verified 2026-10-21).
     """
     try:
-        with open(STEAM_CONFIG, "r", encoding="utf-8", errors="replace") as f:
+        with open(steam_config_path(), "r", encoding="utf-8", errors="replace") as f:
             match = re.search(r'"SteamDeckRegisteredSerialNumber"\s+"([^"]+)"', f.read())
         if match:
             return match.group(1)
@@ -301,6 +319,15 @@ def patch_configset(configset_path: str, key: str, template_name: str):
         content = f.read()
     before = content
 
+    if not content.strip():
+        # Empty (e.g. cut off by an earlier crash): nothing in it to preserve, and the
+        # code below would refuse it forever as "unexpected format"
+        keep_original(configset_path)
+        backup_file(configset_path)
+        atomic_write(configset_path, ('"controller_config"\n{\n' + entry + '}\n').encode("utf-8"))
+        record_configset_edit(configset_path, key, template_name)
+        return
+
     # This regex works because configset entries are shallow (one level of
     # braces). [^}]* matches everything inside the block without crossing
     # into nested blocks. Do NOT reuse this pattern for deeper VDF
@@ -319,6 +346,9 @@ def patch_configset(configset_path: str, key: str, template_name: str):
             return
 
     if content != before:
+        # The player's own layout choices live here: keep the first version for good
+        # (.bak is replaced on every edit, so after two it no longer holds theirs)
+        keep_original(configset_path)
         backup_file(configset_path)
         atomic_write(configset_path, content.encode("utf-8", "surrogateescape"))
     record_configset_edit(configset_path, key, template_name)
@@ -335,7 +365,7 @@ def prelaunch_prefix(key: str) -> str:
 
 def nvme_compatdata(appid) -> str:
     """Internal-drive compatdata path for appid."""
-    return os.path.join(STEAM_ROOT, "steamapps", "compatdata", str(appid))
+    return os.path.join(compat_root(), str(appid))
 
 
 def linux_to_wine_path(linux_path: str) -> str:

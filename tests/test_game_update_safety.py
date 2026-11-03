@@ -168,6 +168,66 @@ class StagedInstallTests(unittest.TestCase):
             self.assertEqual((root / t6sp_mod.MOD_EXE).read_bytes(), b"old exe")
             self.assertEqual((root / "t6sp-mod.dll").read_bytes(), b"old dll")
 
+    def test_cod4r_failed_swap_restores_every_replaced_file(self):
+        import cod4r
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = {"a.dll": b"new a", "b.dll": b"new b"}
+            for n in data:
+                (root / n).write_bytes(b"old " + n.encode())
+            manifest = {"client": {"version": "1", "path": "c.exe", "size": 1, "sha256": "0" * 64},
+                        "dedi": {"path": "d.exe", "size": 1, "sha256": "0" * 64},
+                        "assets": [{"name": n, "path": n, "dest": "root", "size": len(b),
+                                    "sha256": hashlib.sha256(b).hexdigest()} for n, b in data.items()]}
+            files = [(str(root / n), e) for n, e in zip(data, manifest["assets"])]
+            def download(url, dest, *a, **k):
+                Path(dest).write_bytes(data[Path(dest).name[:-len(".new")]])
+            original = os.replace
+            def fail(source, dest):
+                if str(dest) == str(root / "b.dll") and str(source).endswith(".new"):
+                    raise OSError("swap failed")
+                return original(source, dest)
+            with patch.object(cod4r, "_fetch_manifest", return_value=manifest), \
+                 patch.object(cod4r, "_manifest_files", return_value=files), \
+                 patch.object(cod4r, "_download", side_effect=download), \
+                 patch.object(cod4r.os, "replace", side_effect=fail):
+                with self.assertRaisesRegex(OSError, "swap failed"):
+                    cod4r.sync_files(str(root), "")
+            self.assertEqual((root / "a.dll").read_bytes(), b"old a.dll")
+            self.assertEqual((root / "b.dll").read_bytes(), b"old b.dll")
+            self.assertFalse(any(p.name.endswith(".deckops_old") for p in root.iterdir()))
+
+    def _iw3(self, root, fail_on=None):
+        manifest = [("iw3sp_mod.exe", 7, "a" * 40), ("game.dll", 7, "b" * 40)]
+        def download(url, dest, *args, **kwargs):
+            if fail_on and dest.endswith(fail_on):
+                raise IOError(f"{fail_on} failed")
+            Path(dest).write_bytes(b"new exe" if dest.endswith(".exe") else b"new dll")
+        with patch.object(iw3sp, "_get_manifest", return_value=manifest), \
+             patch.object(iw3sp, "_download", side_effect=download):
+            iw3sp.install_iw3sp({"install_dir": str(root)}, "", "", "", source="own")
+
+    def test_iw3sp_failed_second_download_preserves_installed_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "iw3sp_mod.exe").write_bytes(b"old exe")
+            (root / "game.dll").write_bytes(b"old dll")
+            with self.assertRaisesRegex(IOError, "game.dll failed"):
+                self._iw3(root, fail_on="game.dll")
+            self.assertEqual((root / "iw3sp_mod.exe").read_bytes(), b"old exe")
+            self.assertEqual((root / "game.dll").read_bytes(), b"old dll")
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["game.dll", "iw3sp_mod.exe"])
+
+    def test_iw3sp_success_replaces_both_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "iw3sp_mod.exe").write_bytes(b"old exe")
+            self._iw3(root)
+            self.assertEqual((root / "iw3sp_mod.exe").read_bytes(), b"new exe")
+            self.assertEqual((root / "game.dll").read_bytes(), b"new dll")
+            self.assertFalse(any(p.name.startswith(".deckops_") for p in root.iterdir()))
+
     def _iw4x(self, root, release=None, launcher=None, failure=None):
         release = release if release is not None else self._zip({
             "iw4x/old.dat": b"new asset", "iw4x/new.iwd": b"new iwd",

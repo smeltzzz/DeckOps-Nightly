@@ -78,12 +78,14 @@ def _iwpad(key, cmd):
 
 def _lan(key, args):
     # Offline launch (lan_server.sh): relink the offline copies, then hand it the
-    # Steam Linux Runtime and the library mounts on stdout
+    # Steam Linux Runtime and the library mounts on stdout. The separator is the ASCII
+    # unit separator, not a tab: tab is IFS whitespace in the shell's `read`, so an empty
+    # runtime field collapsed and the mounts landed in the runtime variable.
     from plutonium import refresh_lan, lan_runtime
     try:
         refresh_lan(args[0])
     finally:
-        print(*lan_runtime(), sep="\t")
+        print(*lan_runtime(), sep="\x1f")
 
 
 _HANDLERS = {"cod4mp": _cod4mp, "lan": _lan, "iw4sp": _iwpad, "iw5sp": _iwpad}

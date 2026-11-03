@@ -12,7 +12,21 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 J="$PROJECT_ROOT/deckops.json"
-read -r GE SR < <(python3 -c "import json;d=json.load(open('$J'));print(d.get('ge_proton_version',''),d.get('steam_root',''))" 2>/dev/null)
+# The path goes in as an argument, not into the Python source (a ' in it broke the
+# program), a null value must read as empty rather than the text "None", and the
+# fields are split on a character that is not shell whitespace (a Steam folder
+# with a space in its name used to split in two).
+IFS=$'\037' read -r GE SR < <(python3 - "$J" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(d.get('ge_proton_version') or '', d.get('steam_root') or '', sep='\x1f')
+except Exception:
+    pass
+PY
+)
+[ -n "$GE" ] && [ -n "$SR" ] || { echo "Could not read ge_proton_version or steam_root from deckops.json"; exit 1; }
 PR="$SR/compatibilitytools.d/$GE/proton"
 # Game and server need different prefixes: the game's waitforexitandrun waits for
 # every wineserver on its prefix. The server uses the Offline launcher's prefix.
@@ -59,7 +73,7 @@ echo "$(date +%T) start $MODE $GAME${PORT:+, server on port $PORT: $*}"
 # Relink the offline copies so mods added and Plutonium files updated since the install
 # show up, and get the Steam Linux Runtime and the library mounts back.
 # Steam's launch environment is meant for the game, not the host Python (as in prelaunch.sh).
-IFS=$'\t' read -r SLR MOUNTS < <(timeout 60 env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
+IFS=$'\037' read -r SLR MOUNTS < <(timeout 60 env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
   "$PROJECT_ROOT/.venv/bin/python3" "$PROJECT_ROOT/src/prelaunch.py" lan "$MODE" 2>/dev/null)
 echo "runtime: ${SLR:-none, running on the host}  mounts: ${MOUNTS:-none}"
 [ -d "$CL" ] && { [ -z "$PORT" ] || [ -d "$SV" ]; } || { echo "Offline folders missing, add Offline Mode again in DeckOps"; exit 1; }

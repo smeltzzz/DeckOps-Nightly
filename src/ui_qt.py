@@ -200,7 +200,13 @@ def run():
     crash.install()     # no-op if main.py already did
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    _load_font()
+    try:
+        _load_font()
+    except FileNotFoundError as ex:
+        # Same fallback as BootstrapScreen._proceed: the app works without the
+        # bundled font (it uses the system one), so don't die before the window opens
+        from log import get_logger
+        get_logger(__name__).warning("bundled font missing, using the system font: %s", ex)
     app.setFont(font(11))
     app.setStyleSheet(_app_style())
     win = DeckOpsWindow()

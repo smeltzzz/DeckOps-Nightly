@@ -48,7 +48,7 @@ def fetch(timeout: int = 30, tries: int = 3):
             info = json.load(f)
     for e in info["files"]:
         n = e["name"]
-        if os.path.isabs(n) or ".." in n.split("/"):
+        if os.path.isabs(n) or "\\" in n or ".." in n.split("/"):
             raise RuntimeError(f"Unsafe path in Plutonium manifest: {n}")
     return prod, info
 
@@ -65,10 +65,15 @@ def _yeet(plut_dir: str, patterns: list, keep: set, log) -> int:
     # One directory level per pattern, the way the updater was seen
     # to behave; if Plutonium starts yeeting nested files, recurse here.
     n = 0
+    root = os.path.realpath(plut_dir)
     for pat in patterns:
+        # The patterns come from the CDN's prod.json: only ever delete inside plut_dir
+        if not isinstance(pat, str) or os.path.isabs(pat) or "\\" in pat or ".." in pat.split("/"):
+            log(f"Plutonium: ignoring unsafe yeet pattern {pat!r}")
+            continue
         d = os.path.dirname(pat)
         full = os.path.join(plut_dir, d)
-        if not os.path.isdir(full):
+        if not os.path.isdir(full) or os.path.commonpath((root, os.path.realpath(full))) != root:
             continue
         for name in os.listdir(full):
             rel = f"{d}/{name}" if d else name
@@ -83,6 +88,37 @@ def _yeet(plut_dir: str, patterns: list, keep: set, log) -> int:
 
 class OutOfTime(Exception):
     """The update's time budget ran out (see update())."""
+
+
+def _swap_in(plut_dir: str, names: list):
+    """Rename each <name>.new over <name>, as one unit: every replaced file is set
+    aside next to itself first, and a failure part-way puts them all back, so the
+    folder never holds a mix of two revisions."""
+    swapped = []
+    try:
+        for name in names:
+            p = os.path.join(plut_dir, name)
+            had = os.path.lexists(p)
+            if had:
+                os.replace(p, p + ".deckops_old")
+            swapped.append((p, had))
+            os.replace(p + ".new", p)
+    except BaseException:
+        for p, had in reversed(swapped):
+            try:
+                if had:
+                    os.replace(p + ".deckops_old", p)
+                elif os.path.lexists(p):
+                    os.remove(p)
+            except OSError:
+                _log.error("could not restore %s (previous copy: %s.deckops_old)", p, p)
+        raise
+    for p, had in swapped:
+        if had:
+            try:
+                os.remove(p + ".deckops_old")
+            except OSError:
+                pass
 
 
 def sync_master(plut_dir: str, prod: dict, info: dict, log=None, deadline: float = None) -> int:
@@ -121,14 +157,17 @@ def sync_master(plut_dir: str, prod: dict, info: dict, log=None, deadline: float
                  tries=3 if deadline is None else 1,
                  digest=f"sha1:{e['hash']}", on_progress=_check_time)
     _check_time()
-    for e in todo:
-        p = os.path.join(plut_dir, e["name"])
-        os.replace(p + ".new", p)
+    _swap_in(plut_dir, [e["name"] for e in todo])
     _yeet(plut_dir, prod.get("yeet", []), {e["name"] for e in files}, log)
-    with open(os.path.join(plut_dir, "info.json"), "w") as f:
+    # Written whole: a cut-off info.json reads as "no revision" and forces a full re-sync
+    info_path = os.path.join(plut_dir, "info.json")
+    with open(info_path + ".tmp", "w") as f:
         json.dump({"revision": info["revision"],
                    "launchTarget": prod.get("launchTarget", "bin/plutonium-launcher-win32.exe")},
                   f, separators=(",", ":"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(info_path + ".tmp", info_path)
     if todo:
         log(f"Plutonium: updated {len(todo)} file(s) to r{info['revision']}")
     return len(todo)

@@ -110,6 +110,9 @@ else
     warn "Could not pin a version; DeckOps will verify it on the next update."
 fi
 TMPZIP="$(mktemp /tmp/deckops_XXXXXX.zip)"
+TMPDIR_EXTRACT=""
+# `die` exits from many places below: don't leave the archive and its extraction in /tmp
+trap 'rm -f "$TMPZIP"; [ -n "$TMPDIR_EXTRACT" ] && rm -rf "$TMPDIR_EXTRACT"' EXIT
 curl -fL --progress-bar "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$ARCHIVE_REF.zip" -o "$TMPZIP" \
     || die "Download failed. Check your internet connection, or try again in about an hour (GitHub may be limiting downloads)."
 success "Download complete."
@@ -209,7 +212,11 @@ else
     info "Installing PyQt6 (this will take about a minute)..."
     if "$VENV_DIR/bin/pip" install --quiet --disable-pip-version-check PyQt6; then
         # A wheel that installs but can't load its platform plugin here would crash the app
-        if ("$VENV_PYTHON" -c "from PyQt6.QtWidgets import QApplication; QApplication([])"; exit $?) &>/dev/null; then
+        # With no display (an SSH or TTY install) opening a real window can't work
+        # whatever the wheel is like, which used to uninstall PyQt6 for good. Check
+        # against Qt's offscreen platform then: it still catches a wheel that can't load.
+        if ( [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || export QT_QPA_PLATFORM=offscreen
+             "$VENV_PYTHON" -c "from PyQt6.QtWidgets import QApplication; QApplication([])"; exit $?) &>/dev/null; then
             QT6_OK=1
             success "PyQt6 installed."
         else

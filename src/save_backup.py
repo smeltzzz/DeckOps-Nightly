@@ -95,9 +95,10 @@ SAVE_GROUPS = {
         "plut_store": "t6",
     },
     "iw5": {
-        "keys": ["iw5mp"],
+        # The Dedicated Server keeps its stats in the same storage/iw5 (appid 42750)
+        "keys": ["iw5mp", "iw5mp_ds"],
         "type": "plutonium_prefix",
-        "appids": ["42690"],
+        "appids": ["42690", "42750"],
         "plut_store": "iw5",
     },
 }
@@ -128,19 +129,19 @@ def _find_all_compatdata_dirs(steam_root: str) -> list:
     if os.path.isfile(lf_vdf):
         try:
             import re
-            with open(lf_vdf, "r") as f:
+            with open(lf_vdf, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             for match in re.finditer(r'"path"\s+"([^"]+)"', content):
                 cd = os.path.join(match.group(1), "steamapps", "compatdata")
                 if os.path.isdir(cd) and cd not in dirs:
                     dirs.append(cd)
-        except OSError:
+        except (OSError, ValueError):
             pass
 
-    # SD card brute-force
+    # SD card brute-force: /run/media/<user>/<label>, whatever the user is called
     import glob
-    for pattern in ["/run/media/deck/*/steamapps/compatdata",
-                    "/run/media/deck/*/SteamLibrary/steamapps/compatdata"]:
+    for pattern in ["/run/media/*/*/steamapps/compatdata",
+                    "/run/media/*/*/SteamLibrary/steamapps/compatdata"]:
         for d in glob.glob(pattern):
             if os.path.isdir(d) and d not in dirs:
                 dirs.append(d)
@@ -201,12 +202,12 @@ def _find_plutonium_storages(steam_root: str, group: dict, setup_games: dict) ->
 
 def _legacy_waw_mp_prefix(steam_root: str, game: dict) -> str | None:
     try:
-        from shortcut import OWN_SHORTCUTS, COMPAT_ROOT
-        from steam_common import calc_shortcut_appid
+        from shortcut import OWN_SHORTCUTS
+        from steam_common import calc_shortcut_appid, compat_root
     except ImportError:
         return None
     appid = calc_shortcut_appid(f'"{game["exe_path"]}"', OWN_SHORTCUTS["t4mp"]["name"])
-    return os.path.join(COMPAT_ROOT, str(appid))
+    return os.path.join(compat_root(), str(appid))
 
 
 def _plut_restore_dst(steam_root: str, group: dict, tag: str) -> str | None:
@@ -386,6 +387,8 @@ def _write_meta(groups: dict):
             old = json.load(f)
     except (OSError, ValueError):
         old = {}
+    if not isinstance(old, dict):       # valid JSON, wrong shape
+        old = {}
     now = datetime.now().isoformat()
     times = dict(old.get("group_times") or {})
     names = [g for g in old.get("groups", []) if isinstance(g, str)
@@ -409,7 +412,12 @@ def _keep_pre_restore(path: str):
         if not os.path.isdir(path) or not any(True for _ in os.scandir(path)):
             return
         keep = path.rstrip(os.sep) + ".pre-restore"
-        shutil.rmtree(keep, ignore_errors=True)
+        if os.path.isdir(keep):
+            # A second restore must not destroy what the first one set aside: keep
+            # that one generation back (it holds the newest stats from before).
+            older = keep + ".1"
+            shutil.rmtree(older, ignore_errors=True)
+            os.replace(keep, older)
         shutil.copytree(path, keep)
     except OSError as ex:
         _log.warning("save restore: could not keep %s: %s", path, ex)
@@ -576,6 +584,8 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
             meta = json.load(f)
     except (json.JSONDecodeError, IOError):
         return {}
+    if not isinstance(meta, dict):
+        return {}
 
     groups_to_restore = meta.get("groups", [])
     if not groups_to_restore:
@@ -687,6 +697,40 @@ def has_backups() -> bool:
     """Return True if any save backups exist."""
     meta_path = os.path.join(BACKUP_ROOT, "backup_info.json")
     return os.path.isfile(meta_path)
+
+
+def _read_meta() -> dict | None:
+    try:
+        with open(os.path.join(BACKUP_ROOT, "backup_info.json")) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def restore_offer_pending() -> bool:
+    """True if there is a backup the player has not answered yet (restored or skipped).
+    The Setup Complete screen offered "Restore saves" whenever any backup existed, so
+    it came back after every install and after the player had already chosen."""
+    meta = _read_meta()
+    return bool(meta) and meta.get("restore_offer_handled") != meta.get("backed_up_at")
+
+
+def mark_restore_offer_handled():
+    """Remember that the current backup was restored or skipped. A newer backup
+    (a different backed_up_at) is offered again."""
+    meta = _read_meta()
+    if not meta:
+        return
+    meta["restore_offer_handled"] = meta.get("backed_up_at")
+    meta_path = os.path.join(BACKUP_ROOT, "backup_info.json")
+    tmp = meta_path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(meta, f, indent=2)
+        os.replace(tmp, meta_path)
+    except OSError as ex:
+        _log.warning("save backup: could not record the restore answer: %s", ex)
 
 
 def clear_backups(on_progress=None):

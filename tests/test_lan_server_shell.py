@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +40,7 @@ fi
             }))
             prelaunch = root / ".venv" / "bin" / "python3"
             prelaunch.parent.mkdir(parents=True)
-            prelaunch.write_text("#!/bin/sh\nprintf '\\t\\n'\n")
+            prelaunch.write_text("#!/bin/sh\nprintf '\\037\\n'\n")
             prelaunch.chmod(0o755)
             home = base / "home"
             game_root = home / ".local" / "share" / "deckops" / "lan" / "t6mp"
@@ -117,6 +118,39 @@ exec /usr/bin/timeout "$@"
                     if proc is not None and proc.poll() is None:
                         proc.kill()
                         proc.wait()
+
+
+class LanRuntimeHandoffTests(unittest.TestCase):
+    """prelaunch.py -> lan_server.sh handoff of (runtime, mounts)."""
+
+    def _printed(self, runtime, mounts):
+        import io
+        from contextlib import redirect_stdout
+        sys.path.insert(0, str(ROOT / "src"))
+        try:
+            import plutonium
+            import prelaunch
+        finally:
+            sys.path.pop(0)
+        buf = io.StringIO()
+        with unittest.mock.patch.object(plutonium, "refresh_lan"), \
+             unittest.mock.patch.object(plutonium, "lan_runtime", return_value=(runtime, mounts)), \
+             redirect_stdout(buf):
+            prelaunch._lan("lan", ["t6mp"])
+        return buf.getvalue()
+
+    def test_separator_is_not_shell_whitespace(self):
+        out = self._printed("", "/run/media/sd/steamapps")
+        self.assertEqual(out, "\x1f/run/media/sd/steamapps\n")
+        self.assertNotIn("\t", out)
+
+    @unittest.skipUnless(sys.platform == "linux" and shutil.which("bash"), "requires Linux bash")
+    def test_empty_runtime_keeps_mounts_in_the_mounts_variable(self):
+        out = self._printed("", "/run/media/sd/steamapps")
+        script = "IFS=$'\\037' read -r SLR MOUNTS <<< \"$1\"; printf '[%s][%s]' \"$SLR\" \"$MOUNTS\""
+        got = subprocess.run(["bash", "-c", script, "_", out.rstrip("\n")],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertEqual(got, "[][/run/media/sd/steamapps]")
 
 
 if __name__ == "__main__":

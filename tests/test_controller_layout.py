@@ -24,7 +24,7 @@ class BundledLayoutTests(unittest.TestCase):
 
     def test_fresh_install_assigns_same_layout_to_game_and_shortcut(self):
         with tempfile.TemporaryDirectory() as folder, \
-             patch.object(profiles, "STEAM_ROOT", folder), \
+             patch.object(profiles, "default_steam_root", return_value=folder), \
              patch.object(profiles, "TEMPLATES_DIR", os.path.join(folder, "templates")), \
              patch.object(profiles, "_is_steam_deck", return_value=True), \
              patch.object(profiles, "find_all_steam_uids", return_value=["12345"]), \
@@ -52,7 +52,7 @@ class BundledLayoutTests(unittest.TestCase):
 
     def test_assignment_preserves_existing_canonical_layout_for_uninstall(self):
         with tempfile.TemporaryDirectory() as folder, \
-             patch.object(profiles, "STEAM_ROOT", folder), \
+             patch.object(profiles, "default_steam_root", return_value=folder), \
              patch.object(profiles, "get_deck_serial", return_value=None), \
              patch.object(profiles, "patch_configset"):
             canonical = Path(folder, "steamapps", "common", "Steam Controller Configs", "12345",

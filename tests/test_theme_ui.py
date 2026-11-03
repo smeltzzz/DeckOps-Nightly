@@ -69,8 +69,11 @@ class ThemeUITests(unittest.TestCase):
         self.addCleanup(_APP.setFont, previous_font)
         _APP.setFont(font(11))
         _APP.setStyleSheet(_app_style())
+        # The splash screen's 300 ms timer sends the window to the first-run flow; on a
+        # slow machine it fired mid-test and replaced the screen being checked.
         with patch.object(ui_manage.ManagementCard, "_fetch", lambda *args: None), \
-             patch.object(ui_manage.ManagementScreen, "_refresh", lambda *args: None):
+             patch.object(ui_manage.ManagementScreen, "_refresh", lambda *args: None), \
+             patch.object(ui_qt.BootstrapScreen, "_proceed", lambda *args: None):
             win = ui_qt.DeckOpsWindow()
             self.addCleanup(win.close)
             win.resize(800, 500)

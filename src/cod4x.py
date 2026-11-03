@@ -31,7 +31,8 @@ import subprocess
 import tempfile
 
 from net import download as _download, DownloadError
-from steam_common import nvme_compatdata as _nvme_compatdata, linux_to_wine_path as _linux_to_wine_path, write_json
+from steam_common import (nvme_compatdata as _nvme_compatdata, linux_to_wine_path as _linux_to_wine_path,
+                          write_json, atomic_write)
 
 from log import get_logger
 
@@ -234,8 +235,10 @@ def _write_registry_keys(compatdata_path: str, on_progress=None):
         prog("  ⚠ user.reg not found — registry keys will be written after prefix init")
         return False
 
-    with open(user_reg, "r", errors="replace") as f:
-        content = f.read()
+    # Bytes in and out (surrogateescape): the registry is rewritten whole, so text mode
+    # would also have changed any byte that is not valid UTF-8.
+    with open(user_reg, "rb") as f:
+        content = f.read().decode("utf-8", "surrogateescape")
 
     key_path = r"[Software\\Valve\\Steam\\Apps\\7940]"
 
@@ -280,8 +283,8 @@ def _write_registry_keys(compatdata_path: str, on_progress=None):
         )
         content += block
 
-    with open(user_reg, "w", errors="replace") as f:
-        f.write(content)
+    # All at once: a kill mid-write would leave the prefix with a cut-off registry
+    atomic_write(user_reg, content.encode("utf-8", "surrogateescape"))
 
     prog("  ✓ Registry keys written (skip Punkbuster/DirectX first-launch)")
     return True
@@ -316,8 +319,8 @@ def _write_install_path_registry(compatdata_path: str, install_dir: str,
         prog("  ⚠ system.reg not found — install path registry key skipped")
         return False
 
-    with open(system_reg, "r", errors="replace") as f:
-        content = f.read()
+    with open(system_reg, "rb") as f:
+        content = f.read().decode("utf-8", "surrogateescape")
 
     # Convert Linux path to Wine Z: drive path with doubled backslashes
     # for the .reg file format. Wine's system.reg uses \\\\ as separator.
@@ -375,8 +378,7 @@ def _write_install_path_registry(compatdata_path: str, install_dir: str,
             block = f"\n{key_path}\n{values_text}"
             content += block
 
-    with open(system_reg, "w", errors="replace") as f:
-        f.write(content)
+    atomic_write(system_reg, content.encode("utf-8", "surrogateescape"))
 
     prog(f"  ✓ Install path registry key written ({wine_path})")
     return True
@@ -726,6 +728,10 @@ def install_cod4x(game: dict, steam_root: str, proton_path: str,
         if result.returncode != 0:
             log(f"  ℹ setup.exe exit code: {result.returncode} (non-zero is normal for Inno Setup)")
     except subprocess.TimeoutExpired:
+        # subprocess.run only killed the proton script: setup.exe and the wineserver
+        # would otherwise keep running while its folder is deleted underneath them
+        from ge_proton import _stop_wine
+        _stop_wine(proton_path, os.path.join(compatdata_path, "pfx"))
         shutil.rmtree(setup_dir, ignore_errors=True)
         raise RuntimeError("CoD4x installer timed out after 10 minutes")
     except Exception as e:

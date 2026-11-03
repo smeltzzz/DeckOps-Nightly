@@ -15,12 +15,16 @@ Its launcher prefers iw4x-sp.exe / iw5-mod.exe when present and passes
 -singleplayer itself, so the shortcut only swaps in iw-pad.exe.
 """
 
+import glob
 import json
 import os
+import shutil
+import stat
+import tempfile
 import zipfile
 
 from log import get_logger
-from net import download, github_asset
+from net import download, github_asset, commit_staged_files
 
 _log = get_logger(__name__)
 
@@ -96,14 +100,46 @@ def install_sp_mod(game_key: str, install_dir: str, on_progress=None,
     prog(100, "IW-Pad installed.")
 
 
-def _fetch_iw_pad(game_key, install_dir, arch, prog, release=None):
+def _stage_zip(archive: str, staged: str) -> list:
+    """Extract an archive's regular files into staged, validating every name first.
+    Returns their relative paths."""
+    from net import safe_manifest_path
+    files = []
+    with zipfile.ZipFile(archive) as zf:
+        entries = []
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if stat.S_ISLNK(info.external_attr >> 16):
+                raise ValueError(f"symlink in IW-Pad archive: {info.filename!r}")
+            safe_manifest_path(staged, info.filename)
+            entries.append(info)
+        for info in entries:
+            dest = safe_manifest_path(staged, info.filename)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with zf.open(info) as source, open(dest, "wb") as output:
+                shutil.copyfileobj(source, output)
+            files.append(info.filename)
+    return files
+
+
+def _fetch_iw_pad(game_key, install_dir, arch, prog, release=None, tries=3, timeout=60):
     url, dg = release or github_asset("GalvarinoDev/IW-Pad", f"iw-pad-{arch}.zip",
                                       fallback=_IW_PAD_URL.format(arch))
-    zip_dest = os.path.join(install_dir, f"iw-pad-{arch}.zip")
-    download(url, zip_dest, prog, "IW-Pad", digest=dg)
-    with zipfile.ZipFile(zip_dest) as zf:
-        zf.extractall(install_dir)
-    os.remove(zip_dest)
+    # Download and extract off to the side, then swap the files in as one set: a kill
+    # mid-extraction (the pre-launch update has a time limit) used to leave a mixed
+    # iw-pad.exe / iw-pad.dll pair that ran until the next launch retried.
+    for old in glob.glob(os.path.join(install_dir, ".deckops_iwpad_*")):
+        shutil.rmtree(old, ignore_errors=True)
+    staging = tempfile.mkdtemp(prefix=".deckops_iwpad_", dir=install_dir)
+    try:
+        zip_dest = os.path.join(staging, f"iw-pad-{arch}.zip")
+        download(url, zip_dest, prog, "IW-Pad", timeout=timeout, digest=dg, tries=tries)
+        staged = os.path.join(staging, "files")
+        os.makedirs(staged)
+        commit_staged_files(install_dir, staged, _stage_zip(zip_dest, staged))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     # .../releases/download/<tag>/iw-pad-x64.zip; the unverified fallback saves
     # no version, so the next launch fetches a verified copy.
     from config import set_iw_pad
@@ -125,7 +161,9 @@ def update_iw_pad(game_key: str, install_dir: str, log=_log.info):
         log(f"IW-Pad {game_key}: {tag} is current")
         return
     log(f"IW-Pad {game_key}: {saved.get('tag', 'unknown')} -> {tag}")
-    _fetch_iw_pad(game_key, install_dir, arch, lambda p, m: None, release=(url, dg))
+    # Launch path: one short attempt, since the game start waits on this
+    _fetch_iw_pad(game_key, install_dir, arch, lambda p, m: None, release=(url, dg),
+                  tries=1, timeout=10)
 
 
 # DXVK frame limit (setting dxvk_frame_cap, on by default): MW2 (2009) and MW3 (2011)

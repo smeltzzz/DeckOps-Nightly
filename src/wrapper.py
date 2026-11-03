@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import shutil
 import subprocess
 
 from identity import LEDGER_PATH
@@ -650,9 +649,15 @@ def kill_steam(on_progress=None):
     """
     import time
 
+    # The Steam client itself, not its helpers: a bare "ubuntu12_32/steam" substring
+    # also matches steam-launch-wrapper and steam-runtime-* (the wrappers around a
+    # running game), so closing Steam would SIGTERM those and the wait below could
+    # never see "no Steam process" while a game was open.
+    steam_pattern = r"ubuntu12_32/steam( |$)"
+
     # Check if Steam is even running
     r = subprocess.run(
-        ["pgrep", "-f", "ubuntu12_32/steam"],
+        ["pgrep", "-f", steam_pattern],
         capture_output=True
     )
     if r.returncode != 0:
@@ -660,7 +665,7 @@ def kill_steam(on_progress=None):
         return  # Steam is not running
 
     # SIGTERM to the main Steam process triggers graceful shutdown + config write
-    subprocess.run(["pkill", "-TERM", "-f", "ubuntu12_32/steam"], capture_output=True)
+    subprocess.run(["pkill", "-TERM", "-f", steam_pattern], capture_output=True)
 
     if on_progress:
         on_progress("Waiting for Steam to safely close itself...")
@@ -670,7 +675,7 @@ def kill_steam(on_progress=None):
     elapsed = 0
     while time.time() < deadline:
         r = subprocess.run(
-            ["pgrep", "-f", "ubuntu12_32/steam"],
+            ["pgrep", "-f", steam_pattern],
             capture_output=True
         )
         if r.returncode != 0:
@@ -804,7 +809,8 @@ def set_compat_tool(appids, version, steam_root=None):
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Steam config not found: {config_path}")
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    # surrogateescape both ways, like localconfig.vdf: bytes that aren't UTF-8 survive
+    with open(config_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         data = f.read()
 
     def _entry(appid_str):
@@ -817,45 +823,67 @@ def set_compat_tool(appids, version, steam_root=None):
             f'\t\t\t\t}}\n'
         )
 
-    has_mapping = '"CompatToolMapping"' in data
+    try:
+        steam = _config_block(data, _CONFIG_STEAM_PATH)
+        if steam is None:
+            _log.warning("config.vdf has no InstallConfigStore/Software/Valve/Steam block; "
+                         "compat tool for %s not set", list(appids))
+            return False
 
-    if not has_mapping:
-        # Create the entire CompatToolMapping block and all entries at once
-        block = '\t\t\t"CompatToolMapping"\n\t\t\t{\n'
-        for appid in appids:
-            block += _entry(str(appid))
-        block += '\t\t\t}\n'
-        data = re.sub(
-            r'("Steam"\s*\{)',
-            r'\1\n' + block,
-            data,
-            count=1,
-        )
-    else:
-        # CompatToolMapping exists — replace or insert each appid entry
-        for appid in appids:
-            appid_str = str(appid)
-            entry = _entry(appid_str)
-            # Use re.DOTALL so [^}] correctly spans multiple lines inside the block.
-            # The entry block is 4 lines, so [^}]* with DOTALL is required.
-            pattern = rf'(\t+"{re.escape(appid_str)}"\n\t+\{{[^}}]*\}})'
-            if re.search(pattern, data, re.MULTILINE | re.DOTALL):
-                # Replace existing block
-                data = re.sub(pattern, entry.rstrip('\n'), data, flags=re.MULTILINE | re.DOTALL)
-            else:
-                # Insert after CompatToolMapping opening brace
-                data = re.sub(
-                    r'("CompatToolMapping"\s*\{)',
-                    r'\1\n' + entry,
-                    data,
-                    count=1,
-                )
+        if _vdf_child_block(data, steam, "CompatToolMapping") is None:
+            # Create the entire CompatToolMapping block and all entries at once
+            block = '\t\t\t"CompatToolMapping"\n\t\t\t{\n'
+            for appid in appids:
+                block += _entry(str(appid))
+            block += '\t\t\t}\n'
+            data = _insert_after_open_brace(data, steam[0], block)
+        else:
+            # CompatToolMapping exists -- replace or insert each appid entry, always
+            # inside that block (the same quoted number can sit in other sections).
+            for appid in appids:
+                appid_str = str(appid)
+                steam = _config_block(data, _CONFIG_STEAM_PATH)
+                mapping = _vdf_child_block(data, steam, "CompatToolMapping")
+                existing = next((c for c in _vdf_children(data, mapping[0] + 1, mapping[1])
+                                 if c[4] and c[0] == appid_str), None)
+                if existing:
+                    _, key_start, _, close, _ = existing
+                    data = data[:key_start] + _entry(appid_str).lstrip("\t").rstrip("\n") + data[close + 1:]
+                else:
+                    data = _insert_after_open_brace(data, mapping[0], _entry(appid_str))
+    except ValueError as ex:
+        _log.warning("config.vdf not parsed, compat tool not set: %s", ex)
+        return False
 
-    if not _write_and_validate_vdf(config_path, data):
+    if not _write_and_validate_vdf(config_path, data, errors="surrogateescape"):
         return False
     for appid in appids:
         _record_config_vdf(str(appid), "CompatToolMapping", version)
     return True
+
+
+# Steam's config.vdf nests the per-app compat tool choices here.
+_CONFIG_STEAM_PATH = ("InstallConfigStore", "Software", "Valve", "Steam")
+
+
+def _config_block(data, path):
+    """(open, close) of the block at path in config.vdf, or None."""
+    block = (-1, len(data))             # virtual root around the whole file
+    for key in path:
+        block = _vdf_child_block(data, block, key)
+        if not block:
+            return None
+    return block
+
+
+def _insert_after_open_brace(data, open_brace, text):
+    """Insert text on the line after the '{' at open_brace."""
+    pos = open_brace + 1
+    if data[pos:pos + 1] == "\n":
+        pos += 1
+    else:
+        text = "\n" + text
+    return data[:pos] + text + data[pos:]
 
 
 def clear_compat_tool(appids, steam_root=None):
@@ -882,20 +910,36 @@ def clear_compat_tool(appids, steam_root=None):
     if not os.path.exists(config_path):
         return
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8", errors="surrogateescape") as f:
         data = f.read()
 
     modified = False
-    for appid in appids:
-        appid_str = str(appid)
-        # Same pattern as shortcut._clear_compat_tool — matches the appid
-        # block including its trailing newline so the file stays clean.
-        pattern = rf'\t+"{re.escape(appid_str)}"\n\t+\{{[^}}]*\}}\n?'
-        if re.search(pattern, data, re.MULTILINE | re.DOTALL):
-            data = re.sub(pattern, "", data, flags=re.MULTILINE | re.DOTALL)
+    try:
+        for appid in appids:
+            appid_str = str(appid)
+            # Only inside CompatToolMapping: the same quoted number can be a block
+            # key in other sections, and those must never be touched.
+            steam = _config_block(data, _CONFIG_STEAM_PATH)
+            mapping = _vdf_child_block(data, steam, "CompatToolMapping") if steam else None
+            if not mapping:
+                break
+            hit = next((c for c in _vdf_children(data, mapping[0] + 1, mapping[1])
+                        if c[4] and c[0] == appid_str), None)
+            if not hit:
+                continue
+            _, start, _, close, _ = hit
+            while start > 0 and data[start - 1] in "\t ":
+                start -= 1                      # the entry's own indentation
+            end = close + 1
+            if data[end:end + 1] == "\n":
+                end += 1                        # and its line break, so the file stays clean
+            data = data[:start] + data[end:]
             modified = True
+    except ValueError as ex:
+        _log.warning("config.vdf not parsed, compat tool not cleared: %s", ex)
+        return
 
-    if modified and _write_and_validate_vdf(config_path, data):
+    if modified and _write_and_validate_vdf(config_path, data, errors="surrogateescape"):
         for appid in appids:
             _remove_config_vdf(str(appid), "CompatToolMapping")
 

@@ -185,9 +185,7 @@ def _migrate_old_layout(install_dir: str):
     iw4mp_bak = os.path.join(install_dir, "iw4mp.exe.bak")
     if os.path.exists(iw4mp_bak):
         iw4mp = os.path.join(install_dir, "iw4mp.exe")
-        if os.path.exists(iw4mp):
-            os.remove(iw4mp)
-        os.rename(iw4mp_bak, iw4mp)
+        os.replace(iw4mp_bak, iw4mp)  # atomic: no gap with no iw4mp.exe
         _log.info("Restored iw4mp.exe from backup")
 
     _moves = [

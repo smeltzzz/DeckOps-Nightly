@@ -483,6 +483,41 @@ class PrefixFinalizeTests(unittest.TestCase):
         self.assertTrue(ge_proton._finalized(0, str(pfx)))
         self.assertFalse(ge_proton._finalized(1, str(pfx)))       # failed even though it booted
 
+    def test_a_timed_out_finalize_leaves_the_prefix_not_ready(self):
+        """Wine writes its registry early, so a run killed by the timeout left files
+        that made _prefix_ready() true and the next run skipped Proton for good."""
+        import ge_proton
+        prefix = self.root / "compatdata" / "10090"
+        pfx = prefix / "pfx"
+        prefix.mkdir(parents=True)
+
+        def boot_then_hang(*a, **k):
+            pfx.mkdir(parents=True, exist_ok=True)
+            (pfx / "system.reg").write_text("")
+            raise subprocess.TimeoutExpired(a[0], 1)
+
+        with patch("subprocess.run", side_effect=boot_then_hang):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                ge_proton._run_proton_finalize(str(self.tool / "proton"), str(prefix), str(self.root), 1)
+        self.assertTrue((pfx / "system.reg").exists())
+        self.assertFalse(ge_proton._prefix_ready(str(pfx)))
+
+    def test_a_clean_finalize_clears_the_marker(self):
+        import ge_proton
+        prefix = self.root / "compatdata" / "10091"
+        pfx = prefix / "pfx"
+        prefix.mkdir(parents=True)
+
+        def boot(*a, **k):
+            pfx.mkdir(parents=True, exist_ok=True)
+            (pfx / "system.reg").write_text("")
+            return subprocess.CompletedProcess(a[0], 0)
+
+        with patch("subprocess.run", side_effect=boot):
+            r = ge_proton._run_proton_finalize(str(self.tool / "proton"), str(prefix), str(self.root), 1)
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(ge_proton._prefix_ready(str(pfx)))
+
 
 class ShellSyntaxTests(unittest.TestCase):
     """The updater refuses any .sh file that fails `bash -n`, so a syntax error
@@ -553,6 +588,50 @@ class SteamRootGeProtonTests(unittest.TestCase):
         self.wrapper.clear_compat_tool([10090], steam_root=str(self.override))
         self.assertNotIn('"10190"', (self.selected / "config" / "config.vdf").read_text())
         self.assertNotIn('"10090"', (self.override / "config" / "config.vdf").read_text())
+
+    def test_compat_edits_stay_inside_compat_tool_mapping(self):
+        """The same quoted number can be a block key elsewhere in config.vdf; set and
+        clear used to rewrite or delete every block with that key."""
+        cfg = self.selected / "config" / "config.vdf"
+        decoy = '\t\t\t"10190"\n\t\t\t{\n\t\t\t\t"name"\t\t"not a compat tool"\n\t\t\t}\n'
+        cfg.write_text('"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+                       + decoy +
+                       '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+        self.assertTrue(self.wrapper.set_compat_tool([10190], "GE-Proton10-2"))
+        text = cfg.read_text()
+        self.assertIn(decoy, text)
+        self.assertEqual(text.count("GE-Proton10-2"), 1)
+        self.assertTrue(self.wrapper.set_compat_tool([10190], "GE-Proton10-3"))   # replaced in place
+        text = cfg.read_text()
+        self.assertIn(decoy, text)
+        self.assertNotIn("GE-Proton10-2", text)
+        self.assertEqual(text.count("GE-Proton10-3"), 1)
+        self.wrapper.clear_compat_tool([10190])
+        text = cfg.read_text()
+        self.assertIn(decoy, text)
+        self.assertNotIn("GE-Proton10-3", text)
+
+    def test_config_without_a_steam_block_is_left_alone_and_not_recorded(self):
+        cfg = self.selected / "config" / "config.vdf"
+        cfg.write_text('"SomethingElse"\n{\n}\n')
+        self.assertFalse(self.wrapper.set_compat_tool([10190], "GE-Proton10-2"))
+        self.assertEqual(cfg.read_text(), '"SomethingElse"\n{\n}\n')
+        ledger = Path(self.tmp.name, "ledger.json")
+        self.assertNotIn("10190", ledger.read_text() if ledger.exists() else "")
+
+    def test_non_utf8_bytes_in_config_vdf_survive_a_compat_edit(self):
+        cfg = self.selected / "config" / "config.vdf"
+        cfg.write_bytes(b'"InstallConfigStore" { "Software" { "Valve" { "Steam" { "name" "caf\xe9" } } } }')
+        self.assertTrue(self.wrapper.set_compat_tool([10190], "GE-Proton10-2"))
+        self.assertIn(b"caf\xe9", cfg.read_bytes())
+
+    def test_default_pfx_fallback_picks_the_numerically_newest_ge(self):
+        # A string sort ranks GE-Proton9-27 and GE-Proton10-4 above GE-Proton10-34
+        for name in ("GE-Proton9-27", "GE-Proton10-4", "GE-Proton10-34"):
+            self.tool(self.selected, name)
+        newest = self.selected / "compatibilitytools.d" / "GE-Proton10-34"
+        self.assertEqual(self.ge._find_default_pfx("GE-Proton10-99"),
+                         str(newest / "files" / "share" / "default_pfx"))
 
     def test_explicit_root_without_ge_uses_its_vanilla_proton_not_other_roots_ge(self):
         self.tool(self.selected, "GE-Proton10-99")
@@ -978,6 +1057,42 @@ class AppInfoWriteTests(unittest.TestCase):
         self.assertEqual([p.name for p in self.path.parent.iterdir()
                           if p.name.endswith(".tmp")], [])
 
+    def _app_with_kv(self, kv: bytes) -> bytes:
+        import steam_appinfo as a
+        body = a._HDR.pack(2, 0, 0, b"\0" * 20, 1, b"\0" * 20) + kv
+        return (struct.pack("<II", a.APPINFO_V28, 1) +
+                struct.pack("<II", self.APPID, len(body)) + body +
+                struct.pack("<II", 0, 0))
+
+    def test_unterminated_wide_string_is_skipped_not_an_endless_loop(self):
+        import threading
+        # type 5 (wide string), key "k", value "ab" with no 00 00 terminator
+        self.path.write_bytes(self._app_with_kv(b"\x05k\x00a\x00b\x00"))
+        result = []
+        t = threading.Thread(target=lambda: result.append(self._add("x")), daemon=True)
+        t.start()
+        t.join(5)
+        self.assertFalse(t.is_alive(), "parse_kv never returned on a truncated wide string")
+        self.assertEqual(result, [False])
+
+    def test_truncated_app_block_is_skipped_not_raised(self):
+        # type byte promises a key and value that are not there
+        self.path.write_bytes(self._app_with_kv(b"\x01"))
+        self.assertFalse(self._add("x"))
+
+    def test_a_truncated_file_is_skipped_not_raised(self):
+        self.path.write_bytes(self.original[:10])
+        self.assertFalse(self._add("x"))
+
+    def test_reapply_all_skips_a_bad_record(self):
+        import steam_appinfo as a
+        import config as cfg
+        menus = {"not-an-appid": [{"executable": "x.exe"}],
+                 str(self.APPID): [{"executable": "deckops_x.exe", "description": "d"}]}
+        with patch.object(cfg, "load", return_value={"launch_menus": menus}):
+            a.reapply_all(str(self.root))
+        self.assertIn(b"deckops_x.exe", self.path.read_bytes())
+
 
 class ArchiveSafetyTests(unittest.TestCase):
     """The DepotDownloader zip is the one download with no digest to check, so
@@ -1129,6 +1244,37 @@ class SteamRootResolutionTests(unittest.TestCase):
         with patch("steam_common.default_steam_root", return_value="/flatpak/Steam"):
             self.assertEqual(cache_cleanup._shadercache_dir(),
                              os.path.join("/flatpak/Steam", "steamapps", "shadercache"))
+
+    def test_configset_keeps_the_players_original_and_repairs_an_empty_file(self):
+        import steam_common
+        with tempfile.TemporaryDirectory() as tmp, patch("steam_common.record_configset_edit"):
+            path = Path(tmp) / "configset_controller_neptune.vdf"
+            original = '"controller_config"\n{\n\t"7940"\n\t{\n\t\t"template"\t\t"mine.vdf"\n\t}\n}\n'
+            path.write_text(original)
+            steam_common.patch_configset(str(path), "10090", "controller_neptune_deckops_cod.vdf")
+            steam_common.patch_configset(str(path), "42690", "controller_neptune_deckops_cod.vdf")
+            kept = Path(str(path) + steam_common.ORIGINAL_SUFFIX)
+            self.assertEqual(kept.read_text(), original)
+            self.assertIn('"42690"', path.read_text())
+
+            empty = Path(tmp) / "configset_empty.vdf"
+            empty.write_text("")
+            steam_common.patch_configset(str(empty), "10090", "controller_neptune_deckops_cod.vdf")
+            self.assertIn('"10090"', empty.read_text())
+
+    def test_steam_users_and_compatdata_follow_the_resolved_root(self):
+        """find_all_steam_uids / nvme_compatdata used module constants fixed to
+        ~/.local/share/Steam, so a Flatpak Steam gave no users and shortcuts,
+        layouts and artwork were silently skipped."""
+        import steam_common
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "userdata" / "123456789").mkdir(parents=True)
+            (Path(tmp) / "userdata" / "0").mkdir()          # placeholder, not an account
+            with patch("steam_common.default_steam_root", return_value=tmp):
+                self.assertEqual(steam_common.find_all_steam_uids(), ["123456789"])
+                self.assertEqual(steam_common.nvme_compatdata(10090),
+                                 os.path.join(tmp, "steamapps", "compatdata", "10090"))
+                self.assertEqual(steam_common.userdata_dir(), os.path.join(tmp, "userdata"))
 
 
 class DepotMergeSafetyTests(unittest.TestCase):
@@ -1940,6 +2086,534 @@ class SteamFileSafetyTests(unittest.TestCase):
         orig = Path(str(self.vdf) + ".deckops-original")
         self.assertEqual(orig.read_bytes(), original)
         self.assertEqual(Path(str(self.vdf) + ".bak").read_bytes(), after_first)
+
+
+class PreflightProbeTests(unittest.TestCase):
+    def setUp(self):
+        import preflight
+        self.pf = preflight
+        for p in (patch.object(preflight, "_online_result", None),
+                  patch.object(preflight, "_online_thread", None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_hung_lookup_costs_the_wait_not_the_hang(self):
+        import time
+        release = __import__("threading").Event()
+        self.addCleanup(release.set)
+
+        def hang(*a, **k):
+            release.wait(30)
+            raise OSError("never reached")
+
+        with patch.object(self.pf, "_ONLINE_WAIT", 0.2), \
+             patch.object(self.pf.socket, "create_connection", side_effect=hang):
+            t0 = time.monotonic()
+            self.assertFalse(self.pf._online())
+            self.assertLess(time.monotonic() - t0, 3)
+
+    def test_a_fresh_result_is_reused_without_another_probe(self):
+        conn = unittest.mock.MagicMock()
+        with patch.object(self.pf.socket, "create_connection", return_value=conn) as cc:
+            self.assertTrue(self.pf._online())
+            self.assertTrue(self.pf._online())
+        self.assertEqual(cc.call_count, 1)
+
+    def test_unreadable_free_space_warns_instead_of_blocking(self):
+        with patch.object(os, "statvfs", side_effect=OSError("no such device"), create=True):
+            self.assertIsNone(self.pf.free_gb("/definitely/not/a/real/path"))
+        with patch.object(self.pf, "free_gb", return_value=None), \
+             patch.object(self.pf, "_on_ac", return_value=True), \
+             patch.object(self.pf, "_online", return_value=True), \
+             patch("depot_downgrade.estimate_space_gb", return_value=5), \
+             patch("steam_common.default_steam_root", return_value="/x"):
+            checks = self.pf.check([("iw5mp", "steam", tempfile.gettempdir())], downgrade_keys=["iw5mp"])
+        self.assertNotIn(self.pf.BLOCK, [c.level for c in checks])
+        self.assertTrue(any("Could not check disk space" in c.title for c in checks))
+
+
+class ConfigConcurrentUpdateTests(unittest.TestCase):
+    """Two threads each doing load -> change -> save used to lose one change."""
+
+    def setUp(self):
+        import config
+        self.cfg = config
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for p in (patch.object(config, "CONFIG_PATH", str(Path(self.tmp.name, "deckops.json"))),
+                  patch.object(config, "_cache", None), patch.object(config, "_cache_key", None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_parallel_setters_keep_every_change(self):
+        import threading
+        keys = [f"game{i}" for i in range(40)]
+        start = threading.Barrier(len(keys) + 1)
+
+        def mark(k):
+            start.wait()
+            self.cfg.mark_game_setup(k, "client")
+
+        def ui_setting():
+            start.wait()
+            for i in range(20):
+                self.cfg.set_music_volume(i / 20)
+
+        threads = [threading.Thread(target=mark, args=(k,)) for k in keys] + \
+                  [threading.Thread(target=ui_setting)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(sorted(self.cfg.get_setup_games()), sorted(keys))
+
+    def test_transaction_is_reentrant(self):
+        with self.cfg.transaction():
+            self.cfg.set_os_type("steamos")
+            with self.cfg.transaction():
+                self.cfg.set_deck_model("oled")
+        self.assertEqual(self.cfg.get_deck_model(), "oled")
+
+
+class PlutoniumCopySafetyTests(unittest.TestCase):
+    def setUp(self):
+        import plutonium
+        self.pl = plutonium
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.master = self.root / "master"
+        (self.master / "bin").mkdir(parents=True)
+        (self.master / "bin" / "plutonium.exe").write_text("exe")
+        (self.master / "config.json").write_text("{}")
+        self.dest = self.root / "prefix" / "Plutonium"
+        self.dest.mkdir(parents=True)
+        (self.dest / "old.txt").write_text("working copy")
+
+    def _fresh(self, key="t4mp"):
+        self.pl._copy_plut_fresh(str(self.master), str(self.dest), key, lambda m: None)
+
+    def test_missing_master_leaves_the_working_copy_alone(self):
+        import shutil
+        shutil.rmtree(self.master / "bin")
+        with self.assertRaises(FileNotFoundError):
+            self._fresh()
+        self.assertEqual((self.dest / "old.txt").read_text(), "working copy")
+
+    def test_failed_build_keeps_the_working_copy_and_leaves_no_staging(self):
+        with patch.object(self.pl, "_build_plut_copy", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self._fresh()
+        self.assertEqual((self.dest / "old.txt").read_text(), "working copy")
+        self.assertEqual(sorted(p.name for p in self.dest.parent.iterdir()), ["Plutonium"])
+
+    @unittest.skipUnless(hasattr(os, "symlink") and sys.platform != "win32", "needs symlinks")
+    def test_success_swaps_in_the_new_copy_and_drops_the_old_one(self):
+        self._fresh()
+        self.assertFalse((self.dest / "old.txt").exists())
+        self.assertTrue((self.dest / "config.json").is_file())
+        self.assertEqual(sorted(p.name for p in self.dest.parent.iterdir()), ["Plutonium"])
+
+    def test_corrupt_plutonium_config_is_rewritten_not_fatal(self):
+        cfg = self.dest / "config.json"
+        cfg.write_text('{"token": "abc"')   # cut off mid-write
+        self.pl._write_config(str(self.dest), [], {})
+        self.assertEqual(json.loads(cfg.read_text()), {})
+        self.assertFalse((self.dest / "config.json.tmp").exists())
+
+    def test_zip_download_never_leaves_a_partial_final_file(self):
+        import zipfile
+        zpath = self.root / "src.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("pack/z_svr_bots.iwd", b"payload")
+        dst = self.root / "server" / "z_svr_bots.iwd"
+        dst.parent.mkdir()
+
+        def fake_download(url, path, digest=None):
+            Path(path).write_bytes(zpath.read_bytes())
+
+        with patch.object(self.pl, "download", side_effect=fake_download):
+            self.pl._lan_download(str(dst), "http://x/pack.zip", None, lambda m: None)
+            self.assertEqual(dst.read_bytes(), b"payload")
+            self.assertFalse(Path(str(dst) + ".part").exists())
+            dst.unlink()
+            with patch("shutil.copyfileobj", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    self.pl._lan_download(str(dst), "http://x/pack.zip", None, lambda m: None)
+        self.assertFalse(dst.exists(), "a failed copy must not leave a file setup_lan would skip")
+        self.assertFalse(Path(str(dst) + ".part").exists())
+
+
+class PlutoniumUpdateSafetyTests(unittest.TestCase):
+    def setUp(self):
+        import plutonium_update
+        self.pu = plutonium_update
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.plut = self.root / "plut"
+        (self.plut / "bin").mkdir(parents=True)
+
+    def _info(self, files):
+        import hashlib
+        return {"revision": 9, "baseUrl": "http://cdn/",
+                "files": [{"name": n, "hash": hashlib.sha1(b).hexdigest()} for n, b in files.items()]}
+
+    def test_a_failed_swap_restores_the_whole_previous_revision(self):
+        files = {"bin/a.exe": b"new a", "bin/b.dll": b"new b"}
+        for n in files:
+            (self.plut / n).write_bytes(b"old " + n.encode())
+        (self.plut / "info.json").write_text('{"revision":8}')
+        by_hash = {e["hash"]: files[e["name"]] for e in self._info(files)["files"]}
+
+        def download(url, dest, *a, **k):
+            Path(dest).write_bytes(by_hash[url.rsplit("/", 1)[1]])
+
+        original = os.replace
+
+        def fail(source, dest):
+            if os.path.normpath(dest) == os.path.normpath(self.plut / "bin" / "b.dll") \
+                    and str(source).endswith(".new"):
+                raise OSError("swap failed")
+            return original(source, dest)
+
+        with patch.object(self.pu, "download", side_effect=download), \
+             patch.object(self.pu.os, "replace", side_effect=fail):
+            with self.assertRaisesRegex(OSError, "swap failed"):
+                self.pu.sync_master(str(self.plut), {}, self._info(files))
+        self.assertEqual((self.plut / "bin" / "a.exe").read_bytes(), b"old bin/a.exe")
+        self.assertEqual((self.plut / "bin" / "b.dll").read_bytes(), b"old bin/b.dll")
+        self.assertEqual(self.pu.local_revision(str(self.plut)), 8)
+
+    def test_info_json_is_written_whole(self):
+        self.pu.sync_master(str(self.plut), {}, {"revision": 9, "baseUrl": "x", "files": []})
+        self.assertEqual(self.pu.local_revision(str(self.plut)), 9)
+        self.assertFalse((self.plut / "info.json.tmp").exists())
+
+    def test_yeet_patterns_cannot_delete_outside_the_plutonium_folder(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        victim = outside / "keep.txt"
+        victim.write_text("mine")
+        (self.plut / "bin" / "old.dll").write_text("stale")
+        logs = []
+        n = self.pu._yeet(str(self.plut), ["../outside/*", str(outside) + "/*", "bin/*.dll"], set(), logs.append)
+        self.assertEqual(victim.read_text(), "mine")
+        self.assertFalse((self.plut / "bin" / "old.dll").exists())
+        self.assertEqual(n, 1)
+
+
+class IwPadStagingTests(unittest.TestCase):
+    """IW-Pad is updated before every launch; it must not be half-applied."""
+
+    def setUp(self):
+        import sp_mod
+        self.sp = sp_mod
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.game = Path(self.tmp.name, "game")
+        self.game.mkdir()
+        (self.game / "iw-pad.exe").write_bytes(b"old exe")
+        (self.game / "iw-pad.dll").write_bytes(b"old dll")
+
+    def _zip(self, members):
+        import zipfile
+        path = Path(self.tmp.name, "src.zip")
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, data in members.items():
+                zf.writestr(name, data)
+        return path
+
+    def _fetch(self, zpath, **kw):
+        def fake_download(url, dest, *a, **k):
+            fake_download.kw = k
+            Path(dest).write_bytes(Path(zpath).read_bytes())
+        with patch.object(self.sp, "download", side_effect=fake_download), \
+             patch("config.set_iw_pad"):
+            self.sp._fetch_iw_pad("iw4sp", str(self.game), "x64", lambda p, m: None,
+                                  release=("https://h/r/download/v1/iw-pad-x64.zip", "sha256:a"), **kw)
+        return fake_download.kw
+
+    def test_both_files_are_replaced_and_nothing_is_left_behind(self):
+        self._fetch(self._zip({"iw-pad.exe": b"new exe", "iw-pad.dll": b"new dll"}))
+        self.assertEqual((self.game / "iw-pad.exe").read_bytes(), b"new exe")
+        self.assertEqual((self.game / "iw-pad.dll").read_bytes(), b"new dll")
+        self.assertEqual(sorted(p.name for p in self.game.iterdir()), ["iw-pad.dll", "iw-pad.exe"])
+
+    def test_a_bad_archive_leaves_the_installed_pair_untouched(self):
+        with self.assertRaises(ValueError):
+            self._fetch(self._zip({"iw-pad.exe": b"new exe", "../escape.txt": b"x"}))
+        self.assertEqual((self.game / "iw-pad.exe").read_bytes(), b"old exe")
+        self.assertEqual((self.game / "iw-pad.dll").read_bytes(), b"old dll")
+        self.assertEqual(sorted(p.name for p in self.game.iterdir()), ["iw-pad.dll", "iw-pad.exe"])
+        self.assertFalse(Path(self.tmp.name, "escape.txt").exists())
+        self.assertFalse((self.game.parent / "escape.txt").exists())
+
+    def test_prelaunch_update_makes_one_short_attempt(self):
+        import config
+        seen = {}
+        with patch.object(self.sp, "github_asset", return_value=("https://h/r/download/v2/iw-pad-x64.zip", "sha256:b")), \
+             patch.object(config, "get_iw_pad", return_value={}), \
+             patch.object(config, "get_setup_games", return_value={}), \
+             patch.object(self.sp, "_fetch_iw_pad", side_effect=lambda *a, **k: seen.update(k)):
+            self.sp.update_iw_pad("iw4sp", str(self.game))
+        self.assertEqual((seen["tries"], seen["timeout"]), (1, 10))
+
+
+class Cod4xRegistryTests(unittest.TestCase):
+    def test_registry_files_are_rewritten_whole_and_keep_foreign_bytes(self):
+        import cod4x
+        with tempfile.TemporaryDirectory() as tmp:
+            pfx = Path(tmp) / "pfx"
+            pfx.mkdir()
+            (pfx / "user.reg").write_bytes(b'WINE REGISTRY Version 2\n[Software\\\\Other]\n"k"="caf\xe9"\n')
+            (pfx / "system.reg").write_bytes(b'WINE REGISTRY Version 2\n')
+            self.assertTrue(cod4x._write_registry_keys(tmp))
+            self.assertTrue(cod4x._write_install_path_registry(tmp, "/games/CoD4"))
+            user = (pfx / "user.reg").read_bytes()
+            self.assertIn(b'"k"="caf\xe9"', user)
+            self.assertIn(b'"Installed"=dword:00000001', user)
+            self.assertIn(b'"InstallPath"="Z:', (pfx / "system.reg").read_bytes())
+            self.assertEqual(sorted(p.name for p in pfx.iterdir()), ["system.reg", "user.reg"])
+
+
+class GeProtonInstallHousekeepingTests(unittest.TestCase):
+    def test_checksum_fetch_retries_then_continues_unverified(self):
+        import ge_proton
+        import urllib.error
+        digest = "a" * 128
+        good = unittest.mock.MagicMock()
+        good.__enter__.return_value.read.return_value = f"{digest}  GE-Proton10-1.tar.gz\n".encode()
+        with patch.object(ge_proton.urllib.request, "urlopen",
+                          side_effect=[urllib.error.URLError("blip"), good]) as op, \
+             patch("time.sleep"):
+            self.assertEqual(ge_proton._fetch_checksum("http://x/sum"), "sha512:" + digest)
+        self.assertEqual(op.call_count, 2)
+        with patch.object(ge_proton.urllib.request, "urlopen", side_effect=OSError("down")) as op, \
+             patch("time.sleep"):
+            self.assertIsNone(ge_proton._fetch_checksum("http://x/sum"))
+        self.assertEqual(op.call_count, 3)
+
+    def test_leftover_extraction_staging_is_cleared(self):
+        import ge_proton
+        with tempfile.TemporaryDirectory() as tmp:
+            compat = Path(tmp)
+            (compat / ".deckops_extract_old" / "GE-Proton9-1").mkdir(parents=True)
+            (compat / "GE-Proton10-1").mkdir()      # an installed tool is not staging
+            archive = Path(tmp).parent / f"{compat.name}-empty.tar.gz"
+            import tarfile
+            tarfile.open(archive, "w:gz").close()
+            self.addCleanup(lambda: archive.exists() and archive.unlink())
+            with patch.object(ge_proton, "_compat_dir", return_value=str(compat)), \
+                 patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "x")):
+                with self.assertRaises(RuntimeError):       # an empty archive: nothing complete in it
+                    ge_proton._extract_atomically(str(archive), "GE-Proton10-2")
+            self.assertEqual(sorted(p.name for p in compat.iterdir()), ["GE-Proton10-1"])
+
+
+class FovwatchChunkTests(unittest.TestCase):
+    class Mem:
+        def __init__(self, base, data, holes=()):
+            self.base, self.data, self.holes = base, data, holes   # holes: (start, end) unreadable
+
+        def read(self, addr, n):
+            if any(s <= addr < e for s, e in self.holes):
+                return b""
+            off = addr - self.base
+            if off < 0 or off >= len(self.data):
+                return b""
+            out = self.data[off:off + n]
+            for s, e in self.holes:              # a read stops at the first unreadable byte
+                if addr < s < addr + len(out):
+                    out = out[:s - addr]
+            return out
+
+    def test_a_needle_across_a_chunk_boundary_is_found(self):
+        import fovwatch
+        needle = b"\x00com_maxfps\x00"
+        size = 1 << 12
+        data = bytearray(b"A" * (size * 3))
+        at = size - 5                           # straddles the first boundary
+        data[at:at + len(needle)] = needle
+        mem = self.Mem(0x1000, bytes(data))
+        hits = set()
+        for pos, chunk in fovwatch._chunks(mem, 0x1000, 0x1000 + len(data), size=size):
+            i = chunk.find(needle)
+            while i != -1:
+                hits.add(pos + i)
+                i = chunk.find(needle, i + 1)
+        self.assertEqual(hits, {0x1000 + at})
+
+    def test_an_unreadable_page_does_not_end_the_region(self):
+        import fovwatch
+        page = fovwatch._PAGE
+        data = b"x" * (page * 8)
+        mem = self.Mem(0, data, holes=[(page * 2, page * 3)])
+        covered = set()
+        for pos, chunk in fovwatch._chunks(mem, 0, len(data), size=page * 2):
+            covered.update(range(pos, pos + len(chunk)))
+        self.assertIn(page * 6, covered)         # past the hole
+        self.assertNotIn(page * 2, covered)      # the hole itself
+
+
+class InhibitAndSteamCloseTests(unittest.TestCase):
+    def test_a_dead_inhibit_process_is_retaken_not_trusted(self):
+        import inhibit
+        dead = unittest.mock.MagicMock(); dead.poll.return_value = 1; dead.returncode = 1
+        live = unittest.mock.MagicMock(); live.poll.return_value = None
+        # _busy is module-global and start() sets it: restore it, or a later UI test's
+        # window asks "quit while busy?" in a modal dialog and the run never ends
+        with patch.object(inhibit, "_proc", dead), patch.object(inhibit, "_cookie", None), \
+             patch.object(inhibit, "_busy", None), \
+             patch.object(inhibit, "_ss_inhibit", return_value=None), \
+             patch.object(inhibit.subprocess, "Popen", return_value=live) as popen:
+            self.assertTrue(inhibit.start("test"))
+            self.assertIs(inhibit._proc, live)
+        popen.assert_called_once()
+
+    def test_start_reports_false_when_the_only_lock_has_already_exited(self):
+        import inhibit
+        dead = unittest.mock.MagicMock(); dead.poll.return_value = 1
+        with patch.object(inhibit, "_proc", None), patch.object(inhibit, "_cookie", None), \
+             patch.object(inhibit, "_busy", None), \
+             patch.object(inhibit, "_ss_inhibit", return_value=None), \
+             patch.object(inhibit.subprocess, "Popen", return_value=dead):
+            self.assertFalse(inhibit.start("test"))
+
+    def test_steam_close_matches_the_client_not_its_game_wrappers(self):
+        import re
+        import wrapper
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1)      # "not running": returns at once
+
+        with patch.object(wrapper.subprocess, "run", side_effect=fake_run), \
+             patch.object(wrapper, "_reapply_launch_menus"):
+            wrapper.kill_steam()
+        pattern = next(c[2] for c in calls if c[0] == "pgrep")
+        client = "/home/deck/.local/share/Steam/ubuntu12_32/steam -srt-logger-opened"
+        self.assertRegex(client, pattern)
+        self.assertRegex("/home/deck/.local/share/Steam/ubuntu12_32/steam", pattern)
+        for helper in ("/x/ubuntu12_32/steam-launch-wrapper -- /x/reaper SteamLaunch AppId=1",
+                       "/x/ubuntu12_32/steam-runtime-launcher-service --alongside-steam"):
+            self.assertIsNone(re.search(pattern, helper), helper)
+
+
+class GameConfigRenameTests(unittest.TestCase):
+    def test_player_rename_changes_only_the_name(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config_mp.cfg"
+            path.write_bytes(b'seta name "Old"\r\nseta sensitivity "1.5"\r\nbind x "caf\xe9"\r\n')
+            with patch("config.clean_player_name", side_effect=lambda n: n):
+                gc._replace_player_name(str(path), "NewName")
+            self.assertEqual(path.read_bytes(),
+                             b'seta name "NewName"\r\nseta sensitivity "1.5"\r\nbind x "caf\xe9"\r\n')
+            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["config_mp.cfg"])
+
+    def test_lan_script_rename_survives_a_damaged_setup_entry(self):
+        import game_config as gc
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "t6mp-lan.sh"
+            script.write_bytes(b'#!/bin/bash\nexec game +name "Old" +x\n')
+            games = {"t4mp": "not a dict", "t6mp": {"lan_wrapper_path": str(script), "source": "own"}}
+            with patch("config.get_setup_games", return_value=games), \
+                 patch("plutonium.bash_name_arg", side_effect=lambda n: f'+name "{n}"'):
+                self.assertEqual(gc._rename_in_lan_scripts("New", {}, lambda m: None), 1)
+            self.assertIn(b'+name "New"', script.read_bytes())
+
+    def test_applying_configs_does_not_add_sibling_games_to_the_callers_dict(self):
+        import game_config as gc
+        games = {"iw5mp": {"install_dir": "/g", "exe_path": "/g/iw5mp.exe"}}
+        with patch.object(gc, "_build_config_map", return_value={}), \
+             patch("config.get_player_name", return_value=None), \
+             patch("config.get_model_config_dir", return_value="Other/1920x1200"):
+            gc.apply_game_configs(["iw5mp"], games, "/steam", "other")
+        self.assertEqual(list(games), ["iw5mp"])
+
+
+class ShortcutIndexAndArtworkTests(unittest.TestCase):
+    def test_next_index_reads_entries_whose_first_field_is_not_the_appid(self):
+        import shortcut as sc
+        # An entry written by another tool: AppName first, appid later
+        entry = lambda i: (b"\x00" + str(i).encode() + b"\x00\x01AppName\x00Game\x00"
+                           b"\x02appid\x00\x01\x00\x00\x00\x08")
+        self.assertEqual(sc._get_next_index(entry(0) + entry(1) + entry(4)), 5)
+        self.assertEqual(sc._get_next_index(b""), 0)
+
+    def test_artwork_cleanup_only_removes_this_appids_files(self):
+        import shortcut as sc
+        with tempfile.TemporaryDirectory() as tmp:
+            grid = Path(tmp)
+            mine = ["10090.png", "10090p.jpg", "10090_hero.png", "10090_logo.png", "10090_icon.ico"]
+            others = ["100900p.jpg", "100901.png", "10090abc.png", "210090.png"]
+            for n in mine + others:
+                (grid / n).write_bytes(b"x")
+            with patch.object(sc, "ThreadPoolExecutor", create=True):
+                sc._download_artwork(str(grid), 10090, {"icon_ext": "ico", "grid_ext": "jpg",
+                                                         "wide_ext": "png", "hero_ext": "png",
+                                                         "logo_ext": "png"}, lambda m: None,
+                                     clean_stale=True)
+            left = sorted(p.name for p in grid.iterdir())
+            self.assertEqual(left, sorted(others))
+
+
+class LauncherShortcutIdempotenceTests(unittest.TestCase):
+    """create_launcher_shortcut runs on install, repair and the Offline toggle.
+    A launcher shortcut that is already correct must be left exactly as it is,
+    not stripped and rewritten (which reset launch options and LastPlayTime)."""
+
+    def setUp(self):
+        import shortcut
+        self.sc = shortcut
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.install = root / "DeckOps"
+        for rel in (shortcut._LAUNCHER_SH_REL, shortcut._LAUNCHER_EXE_REL):
+            p = self.install / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("")
+        self.userdata = root / "userdata"
+        self.vdf = self.userdata / "42" / "config" / "shortcuts.vdf"
+        self.vdf.parent.mkdir(parents=True)
+        for p in (patch.object(shortcut, "INSTALL_DIR", str(self.install)),
+                  patch.object(shortcut, "_userdata_dir", return_value=str(self.userdata)),
+                  patch.object(shortcut, "_find_all_steam_uids", return_value=["42"]),
+                  patch.object(shortcut, "_download_artwork"),
+                  patch.object(shortcut, "_assign_controller_config"),
+                  patch("wrapper.clear_compat_tool"),
+                  patch.object(shortcut, "_clear_compat_tool")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_current_launcher_shortcut_is_not_rewritten(self):
+        self.sc.create_launcher_shortcut(lambda m: None)
+        first = self.vdf.read_bytes()
+        self.assertIn(self.sc.LAUNCHER_TITLE.encode(), first)
+        # A user edit Steam keeps (hidden from the library); a rewrite would reset it
+        hidden_off = b"\x02IsHidden\x00\x00\x00\x00\x00"
+        self.assertIn(hidden_off, first)
+        edited = first.replace(hidden_off, b"\x02IsHidden\x00\x01\x00\x00\x00")
+        self.vdf.write_bytes(edited)
+        self.sc.create_launcher_shortcut(lambda m: None)
+        self.assertEqual(self.vdf.read_bytes(), edited)
+        self.assertEqual(first.count(self.sc.LAUNCHER_TITLE.encode()), 1)
+
+    def test_a_launcher_shortcut_under_an_old_appid_is_replaced(self):
+        sc = self.sc
+        old_exe = f'"{sc._OLD_LAUNCHER_EXE_DIRECT}"'
+        old_appid = sc._calc_shortcut_appid(old_exe, sc.LAUNCHER_TITLE)
+        entry = sc._make_shortcut_entry(0, sc._shortcut_entry(
+            old_appid, sc.LAUNCHER_TITLE, old_exe, '"/old"', "", ""))
+        sc._write_shortcuts_vdf(str(self.vdf), b"", [entry])
+        sc.create_launcher_shortcut(lambda m: None)
+        raw = sc._read_shortcuts_raw(str(self.vdf))
+        new_exe = f'"{self.install / sc._LAUNCHER_SH_REL}"'
+        self.assertEqual(sc._entry_appids(raw, sc.LAUNCHER_TITLE),
+                         [sc._calc_shortcut_appid(new_exe, sc.LAUNCHER_TITLE)])
 
 
 class LaunchOptionRestoreTests(unittest.TestCase):

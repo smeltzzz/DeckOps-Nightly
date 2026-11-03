@@ -136,6 +136,21 @@ STEAM_ROOTS=(
     "/home/deck/.local/share/Steam"
 )
 
+# The Steam folder DeckOps was set up with comes first. The list above is only a
+# guess: with Steam somewhere else it found nothing and the uninstaller refused to
+# run ("Install kept") for anyone with a custom location.
+CONFIGURED_STEAM_ROOT=$(python3 - "$INSTALL_DIR/deckops.json" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        root = json.load(f).get("steam_root")
+    print(root if isinstance(root, str) else "")
+except Exception:
+    pass
+PY
+)
+[ -z "$CONFIGURED_STEAM_ROOT" ] || STEAM_ROOTS=("${CONFIGURED_STEAM_ROOT/#\~/$HOME}" "${STEAM_ROOTS[@]}")
+
 STEAM_ROOT=""
 for r in "${STEAM_ROOTS[@]}"; do
     if [ -d "$r/steamapps" ]; then
@@ -220,8 +235,15 @@ def shortcut_strings(data):
 # Where DeckOps scripts can be: what this branch recorded, every Steam library,
 # and the folders non-Steam shortcuts start from (own copies)
 dirs, scripts = set(), set()
-with open(os.path.join(ours, "deckops.json"), encoding="utf-8") as f:
-    ours_config = json.load(f)
+try:
+    with open(os.path.join(ours, "deckops.json"), encoding="utf-8") as f:
+        ours_config = json.load(f)
+except FileNotFoundError:
+    ours_config = {}  # never configured: nothing of ours to repoint
+except (OSError, ValueError) as ex:
+    raise ValueError(f"Nightly deckops.json is unreadable ({ex}); install kept for retry")
+if not isinstance(ours_config, dict):
+    raise ValueError("Nightly deckops.json is damaged; install kept for retry")
 sg = ours_config.get("setup_games") or {}
 if not isinstance(sg, dict):
     raise ValueError("Nightly setup_games is damaged; install kept for retry")
@@ -573,6 +595,34 @@ a title with one of DeckOps' (a user's own Call of Duty shortcut, say) is not.
 """
 
 import os
+
+
+def write_file(path, data):
+    """Replace path with data (bytes) all at once: a temp file next to it, flushed to
+    disk, then renamed over it, keeping the file's permissions. A crash or a full disk
+    leaves the old file or the new one, never a cut-off Steam config."""
+    import tempfile
+    folder = os.path.dirname(path) or "."
+    try:
+        mode = os.stat(path).st_mode & 0o7777
+    except OSError:
+        mode = None
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".deckops-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 
 # Where DeckOps' shortcuts point: its install dirs (Stable and Nightly), its data
 # dir, and the launchers and wrappers it generates.
@@ -1743,9 +1793,12 @@ for uid, apps in lc_edits.items():
                 shutil.copy2(vdf_path, bak)
             except Exception:
                 pass
-        with open(vdf_path, "w", errors="replace") as f:
-            f.write(content)
-        if not validate_vdf(content):
+        import deckops_vdf
+        deckops_vdf.write_file(vdf_path, content.encode("utf-8", "replace"))
+        # Check the file as it is on disk, not the string that was just validated
+        with open(vdf_path, errors="replace") as f:
+            on_disk = f.read()
+        if not validate_vdf(on_disk):
             print(f"  uid {uid}: [ledger] VDF validation FAILED — restoring backup")
             if os.path.exists(bak):
                 try:
@@ -1777,13 +1830,16 @@ if compat_edits:
         if cv_modified:
             if not validate_vdf(data):
                 raise ValueError("config.vdf invalid after compat cleanup")
-            bak = config_vdf + ".bak"
-            try:
-                shutil.copy2(config_vdf, bak)
-            except Exception:
-                pass
-            with open(config_vdf, "w", encoding="utf-8") as f:
-                f.write(data)
+            # Keep the first copy: overwriting it each run leaves a backup that already
+            # holds our edits, just when someone would reach for it.
+            bak = config_vdf + ".deckops_uninstall.bak"
+            if not os.path.exists(bak):
+                try:
+                    shutil.copy2(config_vdf, bak)
+                except Exception:
+                    pass
+            import deckops_vdf
+            deckops_vdf.write_file(config_vdf, data.encode("utf-8"))
 
 # ── configset VDF edits ───────────────────────────────────────────────────
 cs_edits = ledger.get("configsets", {})
@@ -1819,8 +1875,8 @@ for cs_filename, keys in cs_edits.items():
         if cs_modified:
             if not validate_vdf(cs_content):
                 raise ValueError(f"invalid configset after cleanup: {cs_path}")
-            with open(cs_path, "w", encoding="utf-8") as f:
-                f.write(cs_content)
+            import deckops_vdf
+            deckops_vdf.write_file(cs_path, cs_content.encode("utf-8"))
 
 # Clean up the ledger file itself
 try:
@@ -1940,11 +1996,13 @@ for uid in os.listdir(userdata):
             except Exception:
                 pass
 
-        with open(vdf_path, "w", errors="replace") as f:
-            f.write(new_content)
+        import deckops_vdf
+        deckops_vdf.write_file(vdf_path, new_content.encode("utf-8", "replace"))
 
-        # Validate — if corrupt, restore backup and leave edits in place
-        if not validate_vdf(new_content):
+        # Validate the file as written -- if corrupt, restore backup and leave edits in place
+        with open(vdf_path, errors="replace") as f:
+            on_disk = f.read()
+        if not validate_vdf(on_disk):
             print(f"  uid {uid}: VDF validation FAILED — restoring backup")
             if os.path.exists(bak):
                 try:
@@ -2166,11 +2224,13 @@ for uid in os.listdir(userdata):
             except Exception:
                 pass
 
-        with open(vdf_path, "w", errors="replace") as f:
-            f.write(content)
+        import deckops_vdf
+        deckops_vdf.write_file(vdf_path, content.encode("utf-8", "replace"))
 
-        # Validate — if corrupt, restore backup and leave edits in place
-        if not validate_vdf(content):
+        # Validate the file as written -- if corrupt, restore backup and leave edits in place
+        with open(vdf_path, errors="replace") as f:
+            on_disk = f.read()
+        if not validate_vdf(on_disk):
             print(f"  uid {uid}: VDF validation FAILED — restoring backup")
             if os.path.exists(bak):
                 try:
@@ -3195,8 +3255,8 @@ def clean_configset(configset_path, keys_to_remove):
                          content, flags=re.MULTILINE)
 
     if content != original:
-        with open(configset_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        import deckops_vdf
+        deckops_vdf.write_file(configset_path, content.encode("utf-8"))
         return True
     return False
 
@@ -3599,8 +3659,7 @@ for uid in os.listdir(userdata):
         with open(bak, "wb") as f:
             f.write(data)
 
-    with open(vdf, "wb") as f:
-        f.write(new_data)
+    deckops_vdf.write_file(vdf, new_data)
     removed_total += removed_here
     print(f"  uid {uid}: removed {removed_here} LCD shortcut(s)")
 

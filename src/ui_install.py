@@ -5,7 +5,7 @@ Screens: WelcomeScreen, SetupScreen, InstallScreen
 Extracted from ui_qt.py — all hardcoded stack indices replaced with named lookups.
 """
 
-import html, os, subprocess, threading, time
+import html, os, threading, time
 
 from qt import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLayout,
@@ -259,6 +259,13 @@ class SetupScreen(QWidget):
         brow.addWidget(back); brow.addWidget(self._folder_btn)
         brow.addWidget(self.inst_btn, stretch=1); clay.addLayout(brow)
         lay.addWidget(content, stretch=1)
+
+    def reset_state(self):
+        """Forget everything chosen or found this session (after Reset Config): the folder
+        scans and ticks of the old setup must not reappear in the next one."""
+        self.steam_installed = {}; self.own_installed = {}
+        self._choices = {}; self._extra_choices = {}
+        self._extra_paths = []; self._folder_found = {}
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -819,10 +826,20 @@ class _BaseInstallScreen(QWidget):
         self.plut_btn.setVisible(False)
 
     def _show_iw5_dg_wait(self, cmd, step_label):
-        from depot_downgrade import copy_to_clipboard
-        copy_to_clipboard(cmd)
-        self.manual_step.setText(f"{step_label}: command copied. Paste it in Steam Console, "
-                                 "wait for the download to finish, then continue.")
+        # The worker is waiting for the Continue button this shows: a failure here
+        # must still end up showing it (with the command in view), never hang.
+        copied = True
+        try:
+            from depot_downgrade import copy_to_clipboard
+            copy_to_clipboard(cmd)
+        except Exception as ex:
+            copied = False
+            _log_to_file(f"[InstallScreen] could not copy the Steam console command: {ex}")
+        self.manual_step.setText(
+            f"{step_label}: command copied. Paste it in Steam Console, "
+            "wait for the download to finish, then continue." if copied else
+            f"{step_label}: copy this into Steam Console, wait for the download to finish, "
+            f"then continue.\n{cmd}")
         self.manual_step.setVisible(True)
         self.iw5_dg_btn.setText(f"{step_label} complete, continue  ✓")
         self.iw5_dg_btn.setVisible(True)
@@ -835,8 +852,12 @@ class _BaseInstallScreen(QWidget):
         self._iw5_dg_event.set()
 
     def _show_iw5_qr(self, qr_text):
-        from depot_downgrade import qr_text_to_pixmap
-        pm = qr_text_to_pixmap(qr_text, scale=8)
+        try:
+            from depot_downgrade import qr_text_to_pixmap
+            pm = qr_text_to_pixmap(qr_text, scale=8)
+        except Exception as ex:             # fall back to the text QR
+            _log_to_file(f"[InstallScreen] QR image failed: {ex}")
+            pm = None
         if pm:
             pm = pm.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
             self.iw5_qr_lbl.setPixmap(pm)
@@ -850,45 +871,59 @@ class _BaseInstallScreen(QWidget):
         self.iw5_qr_box.setVisible(False)
         self.log.setMaximumHeight(16777215)
 
+    # The ask/show slots below run on the UI thread while a worker blocks on an event
+    # they set. Each sets it in `finally` with a safe default (cancel / keep / skip),
+    # so a slot that raises can't leave the install hanging forever.
+
     def _ask_iw5_dg_method(self):
-        _games = self._dg_game_title or "selected games"
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Depot Downgrade")
-        msg.setText(
-            f"These games need older depot files so the community clients work:\n\n"
-            f"  {_games}\n\n"
-            "This downloads several GB per game (free space was checked). "
-            "One QR scan covers all the games above.\n\n"
-            "How do you want to sign in for the download?"
-        )
-        qr_btn = msg.addButton("QR Code Scan (recommended)", QMessageBox.ButtonRole.AcceptRole)
-        manual_btn = msg.addButton("Steam Console (manual)", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == qr_btn:
-            self._iw5_method = "qr"
-        elif clicked == manual_btn:
-            self._iw5_method = "manual"
-        else:
+        self._iw5_method = ""
+        try:
+            _games = self._dg_game_title or "selected games"
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Depot Downgrade")
+            msg.setText(
+                f"These games need older depot files so the community clients work:\n\n"
+                f"  {_games}\n\n"
+                "This downloads several GB per game (free space was checked). "
+                "One QR scan covers all the games above.\n\n"
+                "How do you want to sign in for the download?"
+            )
+            qr_btn = msg.addButton("QR Code Scan (recommended)", QMessageBox.ButtonRole.AcceptRole)
+            manual_btn = msg.addButton("Steam Console (manual)", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked == qr_btn:
+                self._iw5_method = "qr"
+            elif clicked == manual_btn:
+                self._iw5_method = "manual"
+        except Exception as ex:
             self._iw5_method = ""
-        self._iw5_dg_event.set()
+            _log_to_file(f"[InstallScreen] depot method dialog failed: {ex}")
+        finally:
+            self._iw5_dg_event.set()
 
     def _ask_iw5_trim(self):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("MW3 Install")
-        msg.setText(
-            "Trim your MW3 install?\n\n"
-            "This removes duplicate 64-bit files that the 32-bit downgrade already "
-            "replaces, saving about 5-6 GB.\n\n"
-            "Only choose this if you won't play the MW3 campaign through Steam. "
-            "(Steam's Verify Integrity restores the files.)"
-        )
-        trim_btn = msg.addButton("Trim Install", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Keep Both", QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-        self._iw5_trim_accept = msg.clickedButton() == trim_btn
-        self._iw5_trim_event.set()
+        self._iw5_trim_accept = False
+        try:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("MW3 Install")
+            msg.setText(
+                "Trim your MW3 install?\n\n"
+                "This removes duplicate 64-bit files that the 32-bit downgrade already "
+                "replaces, saving about 5-6 GB.\n\n"
+                "Only choose this if you won't play the MW3 campaign through Steam. "
+                "(Steam's Verify Integrity restores the files.)"
+            )
+            trim_btn = msg.addButton("Trim Install", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton("Keep Both", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            self._iw5_trim_accept = msg.clickedButton() == trim_btn
+        except Exception as ex:
+            self._iw5_trim_accept = False
+            _log_to_file(f"[InstallScreen] trim dialog failed: {ex}")
+        finally:
+            self._iw5_trim_event.set()
 
     def _ask_iw5_verify(self):
         msg = QMessageBox(self)
@@ -1034,6 +1069,9 @@ class _BaseInstallScreen(QWidget):
                         # depot_id, not depot: the loop variable is only
                         # meaningful inside the loop that broke out of.
                         failed_ids[game_id] = f"depot {depot_id} download failed"
+                        # Kept on purpose: a retry resumes from it instead of starting the
+                        # download over. Say where it is, since it can be many GB.
+                        self._s.log.emit(f"  Partial download kept in {staging} so a retry can resume it.")
                         continue
                     if not os.path.isdir(staging):
                         self._s.log.emit(f"✗  No depot files were downloaded for {game_name}.")
@@ -1143,6 +1181,7 @@ class _BaseInstallScreen(QWidget):
         self.steam_selected = [(k, gd, g) for k, gd, g in (self.steam_selected or [])
                                if k in keys]
         self.own_selected = {k: g for k, g in self.own_selected.items() if k in keys}
+        self.force_downgrade_ids = set(getattr(self, "_last_force_downgrade_ids", ()))
         # Entry flags were consumed by the first run; preserve them for a retry.
         self._return_to_management = self._from_manage
         self._selection_entry = self._from_setup_selection
@@ -1160,73 +1199,91 @@ class _BaseInstallScreen(QWidget):
         self._plut_event.set()
 
     def _show_retry_dl_dialog(self, label, error_msg):
-        msg = QMessageBox(self)
-        msg.setWindowTitle(f"{label} — Download Failed")
-        msg.setTextFormat(Qt.TextFormat.RichText)
-        msg.setText(
-            f"<b>{html.escape(label)}</b> download failed after multiple attempts.<br><br>"
-            f"{html.escape(error_msg)}<br><br>"
-            "Retry now, download the file yourself, or skip this game. "
-            "A skipped game will appear in the final results and can be retried."
-        )
-        retry_btn = msg.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
-        manual_btn = msg.addButton("Download Manually", QMessageBox.ButtonRole.ActionRole)
-        msg.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == retry_btn:
-            self._retry_dl_choice = "retry"
-        elif clicked == manual_btn:
-            self._retry_dl_choice = "manual"
-        else:
+        self._retry_dl_choice = "skip"
+        try:
+            msg = QMessageBox(self)
+            msg.setWindowTitle(f"{label} — Download Failed")
+            msg.setTextFormat(Qt.TextFormat.RichText)
+            msg.setText(
+                f"<b>{html.escape(label)}</b> download failed after multiple attempts.<br><br>"
+                f"{html.escape(error_msg)}<br><br>"
+                "Retry now, download the file yourself, or skip this game. "
+                "A skipped game will appear in the final results and can be retried."
+            )
+            retry_btn = msg.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
+            manual_btn = msg.addButton("Download Manually", QMessageBox.ButtonRole.ActionRole)
+            msg.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked == retry_btn:
+                self._retry_dl_choice = "retry"
+            elif clicked == manual_btn:
+                self._retry_dl_choice = "manual"
+        except Exception as ex:
             self._retry_dl_choice = "skip"
-        self._retry_dl_event.set()
+            _log_to_file(f"[InstallScreen] retry dialog failed: {ex}")
+        finally:
+            self._retry_dl_event.set()
 
     def _show_manual_dl_dialog(self, url, dest_folder, filename, label):
         """
         Show a dialog telling the user to manually download a file.
         Runs on the main thread (called via signal from worker).
         """
-        os.makedirs(dest_folder, exist_ok=True)
-        dest_path = os.path.join(dest_folder, filename)
+        # The worker waits on _manual_dl_event: whatever happens here, it is set
+        # (in `finally`), with "not placed" as the result unless the file was confirmed.
+        self._manual_dl_ok = False
+        try:
+            try:
+                os.makedirs(dest_folder, exist_ok=True)
+            except OSError as ex:
+                _log_to_file(f"[InstallScreen] could not create {dest_folder}: {ex}")
+            dest_path = os.path.join(dest_folder, filename)
 
-        msg = QMessageBox(self)
-        msg.setWindowTitle(f"{label} — Download Failed")
-        msg.setTextFormat(Qt.TextFormat.RichText)
-        msg.setText(
-            f"<b>{html.escape(label)}</b> could not be downloaded automatically.<br><br>"
-            f'Download it manually here:<br>'
-            f'<a href="{html.escape(url, quote=True)}">{html.escape(url)}</a><br><br>'
-            f'Then place <b>{html.escape(filename)}</b> in:<br>'
-            f'<code>{html.escape(dest_folder)}</code><br><br>'
-            f'Click <b>Open Folder</b> to open the destination, then '
-            f'<b>I\'ve Placed It</b> when the file is in place.'
-        )
-        open_btn = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
-        done_btn = msg.addButton("I've Placed It", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
+            msg = QMessageBox(self)
+            msg.setWindowTitle(f"{label} — Download Failed")
+            msg.setTextFormat(Qt.TextFormat.RichText)
+            msg.setText(
+                f"<b>{html.escape(label)}</b> could not be downloaded automatically.<br><br>"
+                f'Download it manually here:<br>'
+                f'<a href="{html.escape(url, quote=True)}">{html.escape(url)}</a><br><br>'
+                f'Then place <b>{html.escape(filename)}</b> in:<br>'
+                f'<code>{html.escape(dest_folder)}</code><br><br>'
+                f'Click <b>Open Folder</b> to open the destination, then '
+                f'<b>I\'ve Placed It</b> when the file is in place.'
+            )
+            open_btn = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+            done_btn = msg.addButton("I've Placed It", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
 
-        while True:
-            msg.exec()
-            clicked = msg.clickedButton()
-            if clicked == open_btn:
-                subprocess.Popen(["xdg-open", dest_folder])
-                continue
-            elif clicked == done_btn:
-                if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-                    self._manual_dl_ok = True
-                    self._manual_dl_event.set()
+            while True:
+                msg.exec()
+                clicked = msg.clickedButton()
+                if clicked == open_btn:
+                    # Detached, and a missing xdg-open is not a reason to abandon the dialog
+                    from ui_constants import _detached_open
+                    try:
+                        _detached_open(["xdg-open", dest_folder])
+                    except OSError as ex:
+                        _log_to_file(f"[InstallScreen] xdg-open failed: {ex}")
+                    continue
+                elif clicked == done_btn:
+                    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                        self._manual_dl_ok = True
+                        return
+                    QMessageBox.warning(
+                        self, "File Not Found",
+                        f"{filename} was not found in:\n{dest_folder}\n\n"
+                        "Make sure the file is downloaded and placed in the correct folder.",
+                    )
+                    continue
+                else:
                     return
-                QMessageBox.warning(
-                    self, "File Not Found",
-                    f"{filename} was not found in:\n{dest_folder}\n\n"
-                    "Make sure the file is downloaded and placed in the correct folder.",
-                )
-                continue
-            else:
-                self._manual_dl_ok = False
-                self._manual_dl_event.set()
-                return
+        except Exception as ex:
+            self._manual_dl_ok = False
+            _log_to_file(f"[InstallScreen] manual download dialog failed: {ex}")
+        finally:
+            self._manual_dl_event.set()
 
     def _finish_run(self, has_own):
         """Finalize only a fully successful selection; a skip is not completion."""
@@ -1734,6 +1791,9 @@ class _BaseInstallScreen(QWidget):
                 _dg_jobs.append(("iw5", _gcfg["name"], _dir, _depots, _cmds))
                 _dg_job_keys["iw5"] = set(_has_mp)
 
+        # Consumed by this run; remembered so Retry can ask for the same forced downgrade
+        # (a retry would otherwise take the receipt path and say "already 32-bit")
+        self._last_force_downgrade_ids = set(self.force_downgrade_ids)
         self.force_downgrade_ids = set()
 
         # Clean up whenever the QR method ran -- also after a failure or an
@@ -2143,7 +2203,10 @@ class _BaseInstallScreen(QWidget):
                 if not cfg.is_game_setup_for_source(key, source):
                     cfg.mark_game_setup(key, "steam", source=source)
                     self._s.log.emit(f"✓  {gd['base']} ({key}) ready")
-                self._mark(key, "ok")
+                # The game stays vanilla, but an earlier phase (IW-Pad) may have
+                # failed it: keep that visible so the summary and Retry see it.
+                if not any(r["key"] == key and r["status"] == "failed" for r in self._results):
+                    self._mark(key, "ok")
 
         # --- Game display configs
         self._phase("finalize")

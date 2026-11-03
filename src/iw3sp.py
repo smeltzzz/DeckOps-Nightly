@@ -13,10 +13,12 @@ Progress is reported via a callback:
 import os
 import json
 import re
+import shutil
+import tempfile
 import urllib.parse
 import urllib.request
 
-from net import download as _download, BROWSER_UA as _BROWSER_UA, safe_manifest_path
+from net import download as _download, BROWSER_UA as _BROWSER_UA, safe_manifest_path, commit_staged_files
 from steam_common import sha1_file as _sha1
 
 # The Gitea releases lag behind this: v4.1.5's game.dll breaks right stick
@@ -106,23 +108,30 @@ def install_iw3sp(game: dict, steam_root: str,
             if not (os.path.isfile(dest) and _sha1(dest) == h.lower())]
     total = sum(sz for _, sz, _, _ in todo) or 1
     done = 0
-    for n, sz, h, dest in todo:
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        _download(
-            f"{_CDN}/{urllib.parse.quote(n, safe='/')}", dest,
-            lambda p, m, _d=done, _s=sz: prog(5 + int((_d + _s * p / 100) / total * 55), m),
-            f"Downloading IW3SP-MOD {os.path.basename(n)}...",
-            digest=f"sha1:{h}",
-        )
-        done += sz
+    if todo:
+        # Every file is downloaded and verified before any is swapped in, so a failure
+        # part-way can't leave a game.dll from one build next to the exe of another.
+        staging = tempfile.mkdtemp(prefix=".deckops_iw3sp_", dir=install_dir)
+        try:
+            for n, sz, h, dest in todo:
+                staged = safe_manifest_path(staging, n)
+                os.makedirs(os.path.dirname(staged), exist_ok=True)
+                _download(
+                    f"{_CDN}/{urllib.parse.quote(n, safe='/')}", staged,
+                    lambda p, m, _d=done, _s=sz: prog(5 + int((_d + _s * p / 100) / total * 55), m),
+                    f"Downloading IW3SP-MOD {os.path.basename(n)}...",
+                    digest=f"sha1:{h}",
+                )
+                done += sz
+            commit_staged_files(install_dir, staging, [n for n, _, _, _ in todo])
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     # Restore iw3sp.exe from legacy backup if the old exe-swap is present
     iw3sp_bak = os.path.join(install_dir, "iw3sp.exe.bak")
     if os.path.exists(iw3sp_bak):
         iw3sp = os.path.join(install_dir, "iw3sp.exe")
-        if os.path.exists(iw3sp):
-            os.remove(iw3sp)
-        os.rename(iw3sp_bak, iw3sp)
+        os.replace(iw3sp_bak, iw3sp)  # replaces atomically; no gap with no iw3sp.exe
 
     # Set launch option (Steam only) — redirects iw3sp.exe to iw3sp_mod.exe.
     # Safe on shared appid 7940: substitution only matches when Steam

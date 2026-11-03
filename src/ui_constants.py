@@ -264,10 +264,13 @@ def _start_audio():
     except Exception:
         _log.debug("audio start failed", exc_info=True)
 
-def _set_audio_volume(vol: float):
+def _set_audio_volume(vol: float, persist: bool = True):
+    """Apply the music volume; persist=False for a slider drag, which saves once when
+    it settles instead of rewriting deckops.json on every step."""
     global _music_volume
     _music_volume = vol
-    cfg.set_music_volume(vol)
+    if persist:
+        cfg.set_music_volume(vol)
     if _player:
         _player.audioOutput().setVolume(vol)
 

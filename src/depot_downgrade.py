@@ -544,7 +544,14 @@ def copy_to_clipboard(text: str):
             if proc.returncode == 0:
                 _log.debug("Copied to clipboard via %s", cmd[0])
                 return
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
+            # A helper that didn't finish must not be left running
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
             continue
     _log.warning("Could not copy to clipboard (no wl-copy or xclip)")
 
@@ -847,6 +854,9 @@ def run_depot_download_qr(
         try:
             proc = subprocess.Popen(
                 cmd,
+                # Never DeckOps' own stdin: a password or Steam Guard prompt would wait
+                # on whatever terminal started it. With nothing to read it fails fast.
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1200,6 +1210,10 @@ def trim_iw5_duplicates(install_dir: str, on_progress=None) -> int:
     # Clean empty dirs left behind in the game root
     for dirpath, dirnames, filenames in os.walk(install_dir, topdown=False):
         if dirpath == install_dir:
+            continue
+        # Nothing inside downgrade/ itself: the check above only spared that folder, so
+        # empty folders the game or Plutonium expects in it (players/, admin/) went too
+        if dirpath == dg_dir or dirpath.startswith(dg_dir + os.sep):
             continue
         if os.path.basename(dirpath) == _IW5_SUBDIR:
             continue

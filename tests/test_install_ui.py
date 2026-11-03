@@ -454,6 +454,60 @@ class InstallUITests(unittest.TestCase):
         self.assertIn("complete", self.install.cur.text())
         self.assertIn("ready", self.install.summary.text())
 
+    def test_a_dialog_slot_that_raises_still_releases_the_waiting_worker(self):
+        """The worker blocks on these events with no timeout: a slot that raised
+        before setting its event hung the whole install (and the sleep inhibitor)."""
+        boom = patch.object(ui_install, "QMessageBox", side_effect=RuntimeError("no display"))
+        inst = self.install
+        with boom:
+            for slot, args, event, check in (
+                    (inst._ask_iw5_dg_method, (), inst._iw5_dg_event, lambda: inst._iw5_method == ""),
+                    (inst._ask_iw5_trim, (), inst._iw5_trim_event, lambda: inst._iw5_trim_accept is False),
+                    (inst._show_retry_dl_dialog, ("Game", "failed"), inst._retry_dl_event,
+                     lambda: inst._retry_dl_choice == "skip"),
+                    (inst._show_manual_dl_dialog, ("http://x", "/tmp/none", "f.bin", "Game"),
+                     inst._manual_dl_event, lambda: inst._manual_dl_ok is False)):
+                with self.subTest(slot=slot.__name__):
+                    event.clear()
+                    slot(*args)
+                    self.assertTrue(event.is_set(), "the worker would wait forever")
+                    self.assertTrue(check())
+
+    def test_retry_asks_for_the_same_forced_downgrade(self):
+        inst = self.install
+        inst._last_force_downgrade_ids = {"iw5"}
+        inst.force_downgrade_ids = set()            # consumed by the first run
+        inst._results = [{"key": "iw5mp", "name": "MW3", "status": "failed", "reason": ""}]
+        inst.steam_selected = [("iw5mp", {"base": "MW3"}, {})]
+        inst.own_selected = {}
+        inst._last_offline_mode = None              # set by a real run
+        with patch.object(inst, "_reset_and_run"):
+            inst._retry_failed()
+        self.assertEqual(inst.force_downgrade_ids, {"iw5"})
+
+    def test_setup_screen_forgets_the_old_session_on_reset(self):
+        setup = self.setup
+        setup._choices = {"t4mp": True}; setup._extra_paths = ["/old/folder"]
+        setup._folder_found = {"t4mp": {}}; setup.own_installed = {"t4mp": {}}
+        setup.reset_state()
+        self.assertEqual((setup._choices, setup._extra_paths, setup._folder_found, setup.own_installed),
+                         ({}, [], {}, {}))
+
+    def test_manual_download_dialog_survives_an_unwritable_destination(self):
+        inst = self.install
+        inst._manual_dl_event.clear()
+        with patch.object(ui_install.os, "makedirs", side_effect=PermissionError("denied")), \
+             patch.object(ui_install, "QMessageBox", side_effect=RuntimeError("stop here")):
+            inst._show_manual_dl_dialog("http://x", "/root/none", "f.bin", "Game")
+        self.assertTrue(inst._manual_dl_event.is_set())
+
+    def test_iw5_wait_screen_still_shows_continue_when_the_clipboard_fails(self):
+        inst = self.install
+        with patch("depot_downgrade.copy_to_clipboard", side_effect=OSError("no clipboard")):
+            inst._show_iw5_dg_wait("download_depot 1 2 3", "Step 1")
+        self.assertFalse(inst.iw5_dg_btn.isHidden())
+        self.assertIn("download_depot 1 2 3", inst.manual_step.text())
+
 
 @unittest.skipIf(QApplication is None, "PyQt is not installed")
 class StyledSelectionUITests(unittest.TestCase):

@@ -303,8 +303,33 @@ def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
                 digest=f"sha256:{e['sha256']}",
             )
         done += e["size"]
-    for p, _ in todo:
-        os.replace(p + ".new", p)
+    # Swap the set in as a unit: each old file is set aside next to itself first, so a
+    # failure part-way puts them all back instead of leaving a mix of builds
+    # (iw3mp.exe from one release with mss32.dll from another).
+    swapped = []
+    try:
+        for p, _ in todo:
+            had = os.path.lexists(p)
+            if had:
+                os.replace(p, p + ".deckops_old")
+            swapped.append((p, had))
+            os.replace(p + ".new", p)
+    except BaseException:
+        for p, had in reversed(swapped):
+            try:
+                if had:
+                    os.replace(p + ".deckops_old", p)
+                elif os.path.lexists(p):
+                    os.remove(p)
+            except OSError as ex:
+                log(f"  Could not restore {os.path.basename(p)}: {ex} (previous copy: {p}.deckops_old)")
+        raise
+    for p, had in swapped:
+        if had:
+            try:
+                os.remove(p + ".deckops_old")
+            except OSError:
+                pass
     if todo:
         log(f"  Updated {len(todo)} CoD4R file(s): {', '.join(os.path.basename(p) for p, _ in todo)}")
     return len(todo)
@@ -360,8 +385,10 @@ def install_cod4r(game: dict, steam_root: str, proton_path: str,
     prog(80, "Verifying installation...")
     verified = _verify_cod4r_files(install_dir, on_progress=log)
     if not verified:
+        # Reporting success here (and writing the metadata below) made the game
+        # look installed with files missing. Fail so the install says so and can retry.
         log("  CoD4R files not fully present")
-        log("  Try running DeckOps install again")
+        raise RuntimeError("CoD4R files are not fully present after install; try running the install again")
 
     # -- Step 5: Delete servercache.dat --------------------------------------
     # Force a fresh server list on first launch.

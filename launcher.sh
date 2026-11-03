@@ -29,7 +29,10 @@ GITHUB_USER="smeltzzz"
 GITHUB_REPO="DeckOps-Nightly"
 
 GITHUB_RAW="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main"
-LOCKFILE="$HOME/.deckops_installing"
+# Named after this install: Stable and Nightly can be installed side by side, and a
+# shared marker made one branch's launcher finish (and then clear) the other's
+# interrupted install.
+LOCKFILE="$HOME/.$(basename "$INSTALL_DIR")_installing"
 VERSION_FILE="$INSTALL_DIR/VERSION"
 UPDATE_DIR="$INSTALL_DIR/.update"
 
@@ -127,6 +130,16 @@ if command -v flock >/dev/null 2>&1; then
     UPDATE_LOCKED=true
 fi
 
+# DeckOps checks this lock itself when it starts, so the launcher lets go of it
+# before anything that starts DeckOps.
+release_update_lock() {
+    if $UPDATE_LOCKED; then
+        flock -u 9
+        exec 9>&-
+        UPDATE_LOCKED=false
+    fi
+}
+
 # Roll back an update interrupted by a crash or power loss before reading its
 # version or starting the app. Never erase .update while its journal is live.
 if [ -f "$UPDATE_DIR/transaction.json" ]; then
@@ -188,6 +201,12 @@ check_for_updates() {
 
     # Ask user (skip if triggered from in-app update button)
     if [ "$FORCE" != "force" ]; then
+        # No zenity means no way to ask: zenity's "command not found" (127) used to read
+        # as the player choosing Skip, so such systems silently never updated.
+        if ! command -v zenity >/dev/null 2>&1; then
+            echo "DeckOps: an update is available. Use Check for Updates inside DeckOps to install it." >&2
+            return 0
+        fi
         zenity --question \
             --title="$APP_TITLE Update" \
             --text="${UPDATE_TEXT}\n\nUpdate now?" \
@@ -211,7 +230,9 @@ check_for_updates() {
         TMPZIP="$(mktemp /tmp/deckops_update_XXXXXX.zip)"
         # The commit itself, not main: it is the version recorded below
         # -f: an HTTP error must fail here, not be saved as the "zip"
-        curl -fsL --max-time 120 \
+        # A fixed 120 s cap failed every time on a slow connection (the archive is tens
+        # of MB). Give up on a stalled transfer instead: under 1 KB/s for 30 s.
+        curl -fsL --connect-timeout 15 --speed-limit 1024 --speed-time 30 --max-time 1800 \
             "https://github.com/$GITHUB_USER/$GITHUB_REPO/archive/$REMOTE_SHA.zip" \
             -o "$TMPZIP"
 
@@ -254,8 +275,11 @@ check_for_updates() {
                 logs/*|deckops.json|VERSION|assets/music/background.mp3) continue ;;
             esac
             mkdir -p "$UPDATE_DIR/files/$(dirname "$filepath")"
+            # Percent-encoded: a name with a space, #, ? or % would otherwise fail the update
+            ENCODED_PATH=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/"))' "$filepath") \
+                || { FAILED=1; break; }
             if ! curl -fLsS --retry 2 --max-time 120 \
-                "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$REMOTE_SHA/$filepath" \
+                "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$REMOTE_SHA/$ENCODED_PATH" \
                 -o "$UPDATE_DIR/files/$filepath" || \
                ! python3 "$INSTALL_DIR/src/update_manifest.py" verify \
                 "$UPDATE_DIR/files/$filepath" "$blob_sha"; then
@@ -367,6 +391,9 @@ case "$choice" in
                 --text="DeckOps needs to repair its window components.\n\nIt downloads in the terminal window and can take several minutes.\n\nDo not close the terminal. DeckOps opens when it is done." \
                 2>/dev/null
             touch "$LOCKFILE"
+            # install.sh starts DeckOps just before it ends; DeckOps must not find the
+            # launcher still holding the update lock
+            release_update_lock
             if run_remote_script install.sh; then
                 rm -f "$LOCKFILE"
                 exit 0
@@ -381,10 +408,7 @@ case "$choice" in
             check_for_updates || exit 1
         fi
         # Release the launcher lock before main.py checks for a running update.
-        if $UPDATE_LOCKED; then
-            flock -u 9
-            exec 9>&-
-        fi
+        release_update_lock
 
         VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3"
         ENTRY_POINT="$INSTALL_DIR/src/main.py"

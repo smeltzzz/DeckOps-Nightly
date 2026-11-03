@@ -14,10 +14,11 @@ STEAM_PATHS = [
     os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
 ]
 
-# Known SD card mount point patterns on Steam Deck
+# Known SD card mount point patterns: /run/media/<user>/<label>. The user is "deck" on
+# a Steam Deck but anything on Bazzite, CachyOS and other desktops, so it is a wildcard.
 SD_CARD_PATTERNS = [
-    "/run/media/deck/*/SteamLibrary",
-    "/run/media/deck/*",
+    "/run/media/*/*/SteamLibrary",
+    "/run/media/*/*",
     "/run/media/mmcblk0p1/SteamLibrary",
     "/run/media/mmcblk0p1",
 ]
@@ -194,9 +195,12 @@ def parse_library_folders(steam_root):
     Kept for backwards compatibility -- callers pass this to find_installed_games.
     """
     dirs = []
-    if steam_root:
-        dirs.append(steam_root)
-    vdf_path = os.path.join(steam_root or "", "steamapps", "libraryfolders.vdf")
+    if not steam_root:
+        # With no root this used to read "steamapps/libraryfolders.vdf" from whatever
+        # directory the process happened to be in
+        return dirs
+    dirs.append(steam_root)
+    vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
     if os.path.exists(vdf_path):
         with open(vdf_path, "r", errors="replace") as f:
             content = f.read()

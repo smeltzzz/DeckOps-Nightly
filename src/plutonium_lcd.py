@@ -35,6 +35,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 
 from identity import VENV_PYTHON
 from depot_downgrade import plut_game_dir
@@ -45,7 +46,8 @@ _log = get_logger(__name__)
 
 
 from shortcut import add_shortcut
-from steam_common import calc_shortcut_appid as _calc_shortcut_appid, heroic_app_name as _heroic_app_name
+from steam_common import (calc_shortcut_appid as _calc_shortcut_appid, heroic_app_name as _heroic_app_name,
+                          write_json as _write_json)
 
 
 # ── Heroic Flatpak paths ────────────────────────────────────────────────────
@@ -637,8 +639,7 @@ def _write_heroic_game_config(game_key: str, ge_proton_version: str,
         "explicit": True,
     }
 
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
+    _write_json(config_path, config)
 
     prog(f"  HGL game config written for {game_key}")
 
@@ -732,8 +733,7 @@ def _write_plutonium_config_lcd(plut_dir: str, selected_keys: list,
             data[PLUT_CONFIG_KEYS[key]] = _wine_path_lcd(install_dir)
 
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    with open(config_path, "w") as f:
-        json.dump(data, f, indent=2)
+    _write_json(config_path, data)
     prog(f"  Wrote Plutonium config.json with {len(selected_keys)} game path(s)")
 
 
@@ -747,8 +747,7 @@ def _write_metadata_lcd(install_dir: str, data: dict):
         return
     path = os.path.join(install_dir, "deckops_plutonium.json")
     try:
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        _write_json(path, data)
     except OSError:
         _log.debug("operation failed", exc_info=True)
 
@@ -925,8 +924,7 @@ def _ensure_bootstrap_sideload_entry(plutonium_exe: str,
         "explicit": True,
     }
 
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
+    _write_json(config_path, config)
     prog("  Bootstrap GamesConfig written.")
 
 
@@ -1039,8 +1037,7 @@ def _set_heroic_minimize_on_launch(on_progress=None):
     default_settings["minimizeOnLaunch"] = True
 
     try:
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        _write_json(config_path, data)
         prog("  HGL minimizeOnLaunch set to true")
     except OSError as ex:
         prog(f"  Could not write HGL config.json: {ex}")
@@ -1135,7 +1132,7 @@ def launch_bootstrapper_lcd(on_progress=None):
         f"heroic://launch?appName={BOOTSTRAP_APP_NAME}&runner=sideload"
     )
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [
                 "flatpak", "run", HEROIC_FLATPAK_ID,
                 "--no-gui", "--no-sandbox",
@@ -1144,6 +1141,9 @@ def launch_bootstrapper_lcd(on_progress=None):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Fire and forget, but collect its exit status when it ends: an unreaped
+        # child stays a zombie for as long as DeckOps runs
+        threading.Thread(target=proc.wait, daemon=True).start()
     except FileNotFoundError:
         raise RuntimeError("flatpak command not found -- cannot launch HGL.")
     except Exception as ex:
