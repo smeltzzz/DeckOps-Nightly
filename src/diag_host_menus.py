@@ -16,13 +16,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as c
 import steam_appinfo as a
 from detect_games import parse_library_folders, find_installed_games, find_steam_root
+from log import redact
 
 OUT = os.path.expanduser("~/deckops-diag.txt")
 LINES = []
 
 
 def say(*parts):
-    line = " ".join(str(p) for p in parts)
+    # Users paste this report publicly: mask user names, Steam IDs etc. as the log does
+    line = redact(" ".join(str(p) for p in parts))
     print(line)
     LINES.append(line)
 

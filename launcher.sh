@@ -119,15 +119,22 @@ fi
 
 # A running DeckOps update owns .update. A second launch must not delete its
 # staging area or mistake its live journal for an interrupted update.
+# A lock file left root-owned (a `sudo` run) can't be opened for writing; flock works
+# on a read-only descriptor too. With neither, carry on unlocked as without flock: the
+# old `|| exit 1` closed the launcher without a word on every start.
 UPDATE_LOCKED=false
 if command -v flock >/dev/null 2>&1; then
-    exec 9> "$INSTALL_DIR/.deckops_update.lock" || exit 1
-    if ! flock -n 9; then
-        zenity --warning --title="$APP_TITLE" \
-            --text="DeckOps is updating in another window. Wait for it to finish before launching again." 2>/dev/null
-        exit 1
+    LOCK_FILE="$INSTALL_DIR/.deckops_update.lock"
+    if { exec 9> "$LOCK_FILE"; } 2>/dev/null || { exec 9< "$LOCK_FILE"; } 2>/dev/null; then
+        if ! flock -n 9; then
+            zenity --warning --title="$APP_TITLE" \
+                --text="DeckOps is updating in another window. Wait for it to finish before launching again." 2>/dev/null
+            exit 1
+        fi
+        UPDATE_LOCKED=true
+    else
+        echo "DeckOps: could not open $LOCK_FILE; continuing without the update lock." >&2
     fi
-    UPDATE_LOCKED=true
 fi
 
 # DeckOps checks this lock itself when it starts, so the launcher lets go of it
@@ -158,7 +165,6 @@ fi
 # ── Update check ──────────────────────────────────────────────────────────────
 check_for_updates() {
     local LOCAL_SHA REMOTE_SHA CHANGED_FILES PARSED FILE_COUNT RESET_HINT="" UPDATE_TEXT=""
-    local FORCE="${1:-}"
 
     # Read local version (commit SHA). "0" means never updated.
     LOCAL_SHA="0"
@@ -199,24 +205,21 @@ check_for_updates() {
         fi
     fi
 
-    # Ask user (skip if triggered from in-app update button)
-    if [ "$FORCE" != "force" ]; then
-        # No zenity means no way to ask: zenity's "command not found" (127) used to read
-        # as the player choosing Skip, so such systems silently never updated.
-        if ! command -v zenity >/dev/null 2>&1; then
-            echo "DeckOps: an update is available. Use Check for Updates inside DeckOps to install it." >&2
-            return 0
-        fi
-        zenity --question \
-            --title="$APP_TITLE Update" \
-            --text="${UPDATE_TEXT}\n\nUpdate now?" \
-            --ok-label="Update" \
-            --cancel-label="Skip" \
-            --width=300 \
-            2>/dev/null
-
-        [ $? -ne 0 ] && return 0
+    # Ask the player. No zenity means no way to ask: zenity's "command not found" (127)
+    # used to read as the player choosing Skip, so such systems silently never updated.
+    if ! command -v zenity >/dev/null 2>&1; then
+        echo "DeckOps: an update is available. Use Check for Updates inside DeckOps to install it." >&2
+        return 0
     fi
+    zenity --question \
+        --title="$APP_TITLE Update" \
+        --text="${UPDATE_TEXT}\n\nUpdate now?" \
+        --ok-label="Update" \
+        --cancel-label="Skip" \
+        --width=300 \
+        2>/dev/null
+
+    [ $? -ne 0 ] && return 0
 
     # ── Download changed files to staging dir ─────────────────────────────
     rm -rf "$UPDATE_DIR"

@@ -414,6 +414,18 @@ def _read_shortcuts_or_skip(path: str, uid, prog):
         return None
 
 
+def _entries_parse(body: bytes, uid, prog) -> bool:
+    """False (after telling the user) when a non-empty body passed the
+    header/footer check but its entries don't parse. Stripping the old entry
+    is impossible then, so appending would leave a duplicate shortcut."""
+    if not body or _split_entries(body):
+        return True
+    _log.warning("shortcuts.vdf skipped for uid %s: entries not parsed", uid)
+    prog(f"  ⚠ Skipped Steam user {uid}: shortcuts.vdf entries couldn't be read safely, "
+         f"left untouched")
+    return False
+
+
 def _entry_end(body: bytes, pos: int) -> int:
     """
     Index just past the shortcut entry that starts at pos
@@ -736,9 +748,12 @@ def _clear_compat_tool(appid_str: str):
 
     Delegates to wrapper.clear_compat_tool() so the write goes through
     _write_and_validate_vdf() with brace-balance checking and auto-restore.
+
+    Returns False when the entry may still be there (config.vdf did not parse
+    or could not be written), True otherwise.
     """
     from wrapper import clear_compat_tool
-    clear_compat_tool([appid_str])
+    return clear_compat_tool([appid_str]) is not False
 
 
 # ── Shortcut appid lookup ────────────────────────────────────────────────────
@@ -915,7 +930,7 @@ def add_shortcut(
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
-        if existing_raw is None:
+        if existing_raw is None or not _entries_parse(existing_raw, uid, prog):
             continue
         existing_names = _read_existing_shortcuts(shortcuts_path)
 
@@ -962,10 +977,12 @@ def add_shortcut(
     # Compat tool handling (config.vdf is global, outside UID loop)
     if clear_compat_tool:
         try:
-            _clear_compat_tool(str(shortcut_appid))
-            prog("    Cleared compat tool for shortcut")
+            if _clear_compat_tool(str(shortcut_appid)) is False:
+                prog("    ⚠ Could not clear compat tool: Steam's config.vdf was not changed")
+            else:
+                prog("    Cleared compat tool for shortcut")
         except Exception as ex:
-            prog(f"    Could not clear compat tool: {ex}")
+            prog(f"    ⚠ Could not clear compat tool: {ex}")
     elif compat_tool:
         try:
             from wrapper import set_compat_tool as _set_compat
@@ -1187,6 +1204,16 @@ def mp_on_main_tile(key: str) -> bool:
     return False
 
 
+def _is_lcd_safe() -> bool:
+    """config.is_lcd(), False when the config can't be read."""
+    try:
+        import config as cfg
+        return cfg.is_lcd()
+    except Exception:
+        _log.debug("is_lcd() failed", exc_info=True)
+        return False
+
+
 def remove_merged_mp_shortcuts(steam_root: str = None, on_progress=None) -> list:
     """Remove the old CoD4 MP / WaW MP shortcuts (Steam-sourced games only)
     once their main tile can launch MP. Also clears each shortcut's compat
@@ -1242,6 +1269,11 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
     steam_root -- path to Steam root, used to dynamically resolve the game's
                   compatdata prefix (internal or SD card). Falls back to
                   the configured/detected Steam root if not provided.
+
+    Returns the set of game keys whose shortcut is in shortcuts.vdf for at
+    least one Steam user and whose write failed for none. Empty when nothing
+    could be written (no user, every user skipped, every write failed, or
+    nothing to create).
     """
     prog = on_progress or (lambda *a: None)
 
@@ -1260,6 +1292,11 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
             continue
         if mp_on_main_tile(key):
             continue
+        if key == "t4mp" and not _is_lcd_safe():
+            # Only LCD keeps a WaW MP shortcut (Heroic launch). If
+            # mp_on_main_tile could not read the config, writing one here
+            # would bring back the shortcut the main tile replaced.
+            continue
         game = installed_games[key]
         install_dir = game.get("install_dir") or game.get("path")
         if not install_dir:
@@ -1268,13 +1305,14 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
     
     if not to_create:
         prog("No shortcuts to create.")
-        return
+        return set()
     
     uids = _find_all_steam_uids()
     if not uids:
         prog("⚠ No Steam user accounts found — shortcuts skipped.")
-        return
-    
+        return set()
+
+    written, failed, skipped_users = set(), set(), 0
     for uid in uids:
         prog(f"Creating shortcuts for user {uid}...")
         
@@ -1282,7 +1320,8 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
         
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
-        if existing_raw is None:
+        if existing_raw is None or not _entries_parse(existing_raw, uid, prog):
+            skipped_users += 1
             continue
 
         # Strip any existing entries whose AppName matches a shortcut we're
@@ -1302,6 +1341,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
         next_idx = _get_next_index(existing_raw)
         
         new_entries = []
+        new_keys = set()
         
         for key, shortcut_def, install_dir in to_create:
             name = shortcut_def["name"]
@@ -1326,55 +1366,30 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
 
             # For t4mp (WaW Multiplayer), plutonium.py has replaced CoDWaWmp.exe
             # with a bash wrapper -- Proton cannot run it as a Windows binary.
-            # OLED / Other: point at the launcher with a protocol URL for
-            #               online play.
-            # LCD: create a Heroic flatpak shortcut for online play. Uses the
-            #      same LD_PRELOAD pattern as Steam library launch options to
-            #      work around Steam's pinned libcurl conflict with flatpak.
+            # Only LCD gets here (OLED / Other play WaW MP from the main tile,
+            # see mp_on_main_tile): a Heroic flatpak shortcut for online play.
             # exe_path (CoDWaWmp.exe) is still used for appid calculation so any
             # existing shortcut entry in Steam is not invalidated.
             if key == "t4mp":
-                import config as _cfg
-                if _cfg.uses_oled_path():
-                    plut_dir = os.path.join(
-                        compatdata_path,
-                        "pfx", "drive_c", "users", "steamuser",
-                        "AppData", "Local", "Plutonium",
-                    )
-                    plut_launcher  = os.path.join(plut_dir, "bin", "plutonium-launcher-win32.exe")
-                    actual_exe     = plut_launcher
-                    start_dir      = install_dir
-                    from steam_common import prelaunch_prefix
-                    launch_options = (
-                        f'STEAM_COMPAT_DATA_PATH="{compatdata_path}" '
-                        f'{prelaunch_prefix("t4mp")}%command% "plutonium://play/t4mp"'
-                    )
-                else:
-                    # LCD: non-Steam shortcut for online play via cache_cleanup.py.
-                    # t4mp shares appid 10090 with t4sp so it can't use
-                    # set_launch_options on the Steam library entry — it
-                    # gets its own non-Steam shortcut instead.
-                    # cache_cleanup.py cleans the Fossilize shader cache and
-                    # then execs the Heroic flatpak launch.
-                    _cleanup_script = os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)), "cache_cleanup.py"
-                    )
-                    _venv_python = VENV_PYTHON
-                    actual_exe     = _venv_python
-                    start_dir      = os.path.dirname(_cleanup_script)
-                    launch_options = f'"{_cleanup_script}" t4mp steam'
+                # Non-Steam shortcut for online play via cache_cleanup.py.
+                # t4mp shares appid 10090 with t4sp so it can't use
+                # set_launch_options on the Steam library entry — it
+                # gets its own non-Steam shortcut instead.
+                # cache_cleanup.py cleans the Fossilize shader cache and
+                # then execs the Heroic flatpak launch.
+                _cleanup_script = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "cache_cleanup.py"
+                )
+                _venv_python = VENV_PYTHON
+                actual_exe     = _venv_python
+                start_dir      = os.path.dirname(_cleanup_script)
+                launch_options = f'"{_cleanup_script}" t4mp steam'
             else:
+                # cod4mp here is CoD4x (CoD4R runs from the main tile, see
+                # mp_on_main_tile), so no pre-launch update hooks in.
                 actual_exe     = exe_path
                 start_dir      = install_dir
-                # Steam CoD4 MP is played through this shortcut, not appid
-                # 7940, so CoD4R's pre-launch update has to hook in here.
-                pre = ""
-                if key == "cod4mp":
-                    import config as _cfg
-                    if _cfg.get_setup_games().get("cod4mp", {}).get("client") == "cod4r":
-                        from steam_common import prelaunch_prefix
-                        pre = prelaunch_prefix("cod4mp")
-                launch_options = f'STEAM_COMPAT_DATA_PATH="{compatdata_path}" {pre}%command%'
+                launch_options = f'STEAM_COMPAT_DATA_PATH="{compatdata_path}" %command%'
 
             shortcut_appid = _calc_shortcut_appid(exe_path, name)
 
@@ -1391,6 +1406,7 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
 
                 entry_bytes = _make_shortcut_entry(next_idx, entry)
                 new_entries.append(entry_bytes)
+                new_keys.add(key)
                 next_idx += 1
                 prog("    ✓ Shortcut created")
 
@@ -1404,8 +1420,10 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
             try:
                 import config as cfg
                 if key == "t4mp" and cfg.is_lcd():
-                    _clear_compat_tool(str(shortcut_appid))
-                    prog("    ✓ Cleared compat tool (LCD HGL shortcut)")
+                    if _clear_compat_tool(str(shortcut_appid)) is False:
+                        prog("    ⚠ Could not clear compat tool: Steam's config.vdf was not changed")
+                    else:
+                        prog("    ✓ Cleared compat tool (LCD HGL shortcut)")
                 else:
                     from wrapper import set_compat_tool
                     ge_version = cfg.get_ge_proton_version()
@@ -1423,16 +1441,26 @@ def create_shortcuts(installed_games: dict, selected_keys: list,
                               force=True, clean_stale=True)
             _assign_controller_config(uid, shortcut_appid, shortcut_def, gyro_mode, prog, name)
         
+        user_keys = {key for key, _, _ in to_create}
         if new_entries:
             try:
                 _write_shortcuts_vdf(shortcuts_path, existing_raw, new_entries)
                 prog("  ✓ shortcuts.vdf saved")
+                written |= user_keys
             except Exception as e:
                 prog(f"  ⚠ Failed to write shortcuts.vdf: {e}")
+                failed |= new_keys
+                written |= user_keys - new_keys
         else:
             prog("  ✓ No new shortcuts needed")
-    
-    prog("✓ Non-Steam shortcuts created.")
+            written |= user_keys
+
+    ok = written - failed
+    if skipped_users or failed or ok != {key for key, _, _ in to_create}:
+        prog("⚠ Non-Steam shortcuts not created for every Steam user; see above.")
+    else:
+        prog("✓ Non-Steam shortcuts created.")
+    return ok
 
 
 def apply_steam_artwork(selected_keys: list, on_progress=None):
@@ -1479,7 +1507,13 @@ def apply_steam_artwork(selected_keys: list, on_progress=None):
 
     for uid in uids:
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
-        os.makedirs(grid_dir, exist_ok=True)
+        try:
+            os.makedirs(grid_dir, exist_ok=True)
+        except OSError as ex:
+            # One account's folder must not stop the artwork for the others
+            _log.warning("artwork skipped for uid %s: %s", uid, ex)
+            prog(f"  ⚠ Artwork skipped for Steam user {uid}: {ex}")
+            continue
 
         for key, steam_appid, art_def in to_apply:
             prog(f"  Downloading artwork for {key} (appid {steam_appid})...")
@@ -1695,6 +1729,11 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
     selected_keys — list of game keys the user selected
     gyro_mode     — "on" or "off"
     on_progress   — optional callback(msg: str)
+
+    Returns the set of game keys whose shortcut was written for at least one
+    Steam user and whose write failed for none. Empty when nothing could be
+    written (no user, every user skipped, every write failed, or nothing to
+    write -- LCD Plutonium keys are left to heroic.py and never included).
     """
     prog = on_progress or (lambda *a: None)
 
@@ -1721,7 +1760,7 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
 
     if not to_create:
         prog("No non-Steam game shortcuts to write.")
-        return
+        return set()
 
     if "t6sp" in to_create:
         _drop_old_t6sp_appid(to_create["t6sp"][1], prog)
@@ -1729,8 +1768,9 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
     uids = _find_all_steam_uids()
     if not uids:
         prog("⚠ No Steam user accounts found — own shortcuts skipped.")
-        return
+        return set()
 
+    written, failed, skipped_users = set(), set(), 0
     for uid in uids:
         prog(f"Writing own game shortcuts for user {uid}...")
 
@@ -1738,7 +1778,8 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
-        if existing_raw is None:
+        if existing_raw is None or not _entries_parse(existing_raw, uid, prog):
+            skipped_users += 1
             continue
 
         # Strip any existing entries whose AppName matches a shortcut we're
@@ -1811,12 +1852,20 @@ def write_own_shortcuts(own_games: dict, selected_keys: list,
             try:
                 _write_shortcuts_vdf(shortcuts_path, existing_raw, new_entries)
                 prog("  ✓ shortcuts.vdf saved")
+                written |= set(to_create)
             except Exception as e:
                 prog(f"  ⚠ Failed to write shortcuts.vdf: {e}")
+                failed |= set(to_create)
         else:
             prog("  ✓ No new shortcuts needed")
+            written |= set(to_create)
 
-    prog("✓ Own game shortcuts written.")
+    ok = written - failed
+    if skipped_users or failed or ok != set(to_create):
+        prog("⚠ Own game shortcuts not written for every Steam user; see above.")
+    else:
+        prog("✓ Own game shortcuts written.")
+    return ok
 
 
 def create_own_shortcuts(own_games: dict, selected_keys: list,
@@ -2153,14 +2202,13 @@ def _drop_old_t6sp_appid(game: dict, prog):
 def migrate_own_t6sp(game: dict, on_progress=None) -> bool:
     """Move an own BO2 SP shortcut that still targets T6SP-Mod.exe to t6sp.exe +
     the swap launch option (write_own_shortcuts cleans up the old appid).
-    Steam must be closed."""
+    Steam must be closed. True only when the moved shortcut was written."""
     import config as cfg
     if get_shortcut_appid(OWN_SHORTCUTS["t6sp"]["name"]) != _old_t6sp_appid(game):
         return False
     (on_progress or (lambda *a: None))("Moving the BO2 Singleplayer shortcut to t6sp.exe...")
     own = enrich_own_games({"t6sp": game}, ["t6sp"], on_progress)
-    write_own_shortcuts(own, ["t6sp"], cfg.get_gyro_mode() or "on", on_progress)
-    return True
+    return "t6sp" in write_own_shortcuts(own, ["t6sp"], cfg.get_gyro_mode() or "on", on_progress)
 
 
 def expected_shortcuts(setup: dict) -> tuple[dict, bool]:
@@ -2241,7 +2289,8 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
     """Re-add shortcuts for set-up games that are missing for any Steam
     user, point present ones back at DeckOps's GE-Proton, and move an old
     own BO2 SP shortcut to t6sp.exe. Returns the names that were re-added,
-    remapped or moved."""
+    remapped or moved -- a name is listed only when its writer reported it
+    written (a shortcut that could not be written is left out)."""
     import config as cfg
     from detect_games import parse_library_folders, find_installed_games, find_own_installed
 
@@ -2312,8 +2361,8 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
         for k in set(steam_keys) - set(found):
             prog(f"  ⚠ {missing[k][1]}: game not found in Steam, skipped")
         if found:
-            create_shortcuts(steam_games, found, gyro, on_progress, steam_root=sr)
-            readded += [missing[k][1] for k in found]
+            done = create_shortcuts(steam_games, found, gyro, on_progress, steam_root=sr) or set()
+            readded += [missing[k][1] for k in found if k in done]
 
     own_keys = by_kind("own")
     if own_keys:
@@ -2323,19 +2372,20 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
             prog(f"  ⚠ {missing[k][1]}: game folder not found, skipped")
         if found:
             own_games = enrich_own_games(own_games, found, on_progress)
-            write_own_shortcuts(own_games, found, gyro, on_progress)
-            readded += [missing[k][1] for k in found]
+            done = write_own_shortcuts(own_games, found, gyro, on_progress) or set()
+            readded += [missing[k][1] for k in found if k in done]
 
     heroic_keys = by_kind("heroic")
     if heroic_keys:
         from plutonium_lcd import _create_heroic_steam_shortcut
         for k in heroic_keys:
-            _create_heroic_steam_shortcut(k, on_progress=on_progress, source="own")
-            readded.append(missing[k][1])
+            # Returns nothing today; a False result means it was not written
+            if _create_heroic_steam_shortcut(k, on_progress=on_progress, source="own") is not False:
+                readded.append(missing[k][1])
 
     if launcher_missing:
-        create_launcher_shortcut(on_progress=on_progress)
-        readded.append(LAUNCHER_TITLE)
+        if create_launcher_shortcut(on_progress=on_progress):
+            readded.append(LAUNCHER_TITLE)
 
     return readded
 

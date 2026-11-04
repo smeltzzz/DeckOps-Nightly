@@ -38,6 +38,7 @@ import hmac
 import json
 import os
 import tempfile
+import time
 
 from net import download as _download
 from steam_common import nvme_compatdata as _nvme_compatdata, write_json
@@ -266,8 +267,13 @@ def _fetch_manifest(log, fetch_timeout: int, tries: int) -> dict:
 
 # -- public API ---------------------------------------------------------------
 
+class OutOfTime(Exception):
+    """sync_files' time budget ran out before the swap (see its budget argument)."""
+
+
 def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
-               fetch_timeout: int = 30, tries: int = 3, before_swap=None) -> int:
+               fetch_timeout: int = 30, tries: int = 3, before_swap=None,
+               budget: float = None) -> int:
     """
     Bring the CoD4R files in line with the signed manifest and return how
     many were replaced. Used by the install and by prelaunch.py.
@@ -282,9 +288,21 @@ def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
     before the first file is replaced. The install uses it to undo CoD4x
     only when CoD4R is certain to arrive, so being offline never leaves
     the player with neither client.
+
+    budget -- seconds for the whole sync (prelaunch.py; the install has none).
+    Past it the downloads stop (checked between files and during each one)
+    and OutOfTime is raised before anything is swapped in. Finished .new
+    files and the stopped .part are kept, so the next launch resumes; without
+    it a big CoD4R release on slow Wi-Fi held Play until prelaunch.sh's kill.
     """
     log = log or (lambda *a: None)
     prog = prog or (lambda *a: None)
+    deadline = time.monotonic() + budget if budget else None
+
+    def _check_time(*_):
+        if deadline is not None and time.monotonic() > deadline:
+            raise OutOfTime(f"CoD4R update didn't finish in {budget:.0f}s")
+
     m = _fetch_manifest(log, fetch_timeout, tries)
 
     base = m.get("base_url", _CDN).rstrip("/")
@@ -301,12 +319,19 @@ def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
             new = p + ".new"
             # Left by an earlier interrupted update and already complete.
             if not (os.path.isfile(new) and _sha256(new) == e["sha256"].lower()):
+                _check_time()
                 os.makedirs(os.path.dirname(p), exist_ok=True)
+
+                def _progress(pct, lbl, _d=done, _s=e["size"], _t=total):
+                    _check_time()
+                    prog(int((_d + _s * pct / 100) / _t * 100), lbl)
+
                 _download(
                     f"{base}/{e['path']}", new,
-                    on_progress=lambda pct, lbl, _d=done, _s=e["size"], _t=total:
-                        prog(int((_d + _s * pct / 100) / _t * 100), lbl),
-                    label=os.path.basename(p), timeout=120,
+                    on_progress=_progress,
+                    label=os.path.basename(p),
+                    timeout=120 if deadline is None else 30,
+                    tries=3 if deadline is None else 1,
                     digest=f"sha256:{e['sha256']}",
                 )
             done += e["size"]
@@ -315,6 +340,7 @@ def sync_files(install_dir: str, compatdata_path: str, log=None, prog=None,
     log(f"  CoD4R client v{m['client']['version']}: "
         f"{len(files) - len(todo)} of {len(files)} files up to date")
     _stage(todo)
+    _check_time()
     if before_swap:
         before_swap()
         # Undoing CoD4x changes what is on disk: stage whatever it now leaves

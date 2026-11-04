@@ -239,6 +239,11 @@ def check_game(key: str, entry: dict, game: dict | None, steam_root: str,
                                         + ", ".join(sorted(set(gone))))
                         fixable = True
                         break
+    # Fix runs the game's Update, which has no client to reinstall for vanilla
+    # ("steam") or legacy CoD4x modes (ui_manage._update_candidates skips them):
+    # a Fix button there only answered "No configured modes found".
+    if client in ("steam", "cod4x"):
+        fixable = False
     result["fixable"] = fixable
     return result
 

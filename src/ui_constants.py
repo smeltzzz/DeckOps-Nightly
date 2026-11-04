@@ -37,8 +37,13 @@ MUSIC_PATH   = os.path.join(PROJECT_ROOT, "assets", "music", "background.mp3")
 LOG_DIR      = os.path.join(PROJECT_ROOT, "logs")
 LOG_PATH     = os.path.join(LOG_DIR, "install.log")
 
-os.makedirs(HEADERS_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+for _d in (HEADERS_DIR, LOG_DIR):
+    try:
+        os.makedirs(_d, exist_ok=True)
+    except OSError:
+        # A read-only or full install dir must not make importing the UI (before the
+        # window exists) a crash with nothing on screen; the writers report their own errors
+        _log.warning("could not create %s", _d, exc_info=True)
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────

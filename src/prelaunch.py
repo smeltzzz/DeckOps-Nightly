@@ -27,9 +27,16 @@ def _cod4mp(key, cmd):
         return  # CoD4x or vanilla MP
     with open(meta) as f:
         compat = json.load(f)["compatdata_path"]
-    from cod4r import sync_files
-    # One quick try at the manifest so being offline costs a few seconds.
-    sync_files(install_dir, compat, log=lambda m: _log.info(m.strip()), fetch_timeout=5, tries=1)
+    from cod4r import sync_files, OutOfTime
+    import plutonium_update as pu
+    # One quick try at the manifest so being offline costs a few seconds, and the
+    # same overall budget as the Plutonium update so Play isn't held for minutes.
+    try:
+        sync_files(install_dir, compat, log=lambda m: _log.info(m.strip()), fetch_timeout=5, tries=1,
+                   budget=pu.LAUNCH_BUDGET)
+    except OutOfTime:
+        _log.info("CoD4R: update didn't finish in %ss, launching the current files; "
+                  "the rest downloads on the next launch", pu.LAUNCH_BUDGET)
 
 
 def _plutonium(key, cmd):
@@ -93,10 +100,52 @@ _HANDLERS.update(dict.fromkeys(
     ("t4sp", "t4mp", "t5sp", "t5mp", "t6mp", "t6zm", "iw5mp", "iw5mp_ds"), _plutonium))
 
 
+INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _deckops_update_busy(install_dir=None):
+    """Why a game's update should be skipped this launch, or None.
+
+    An interrupted DeckOps update (its journal still in .update) means src/ may be a
+    mix of two versions until the launcher or the app rolls it back; an update that
+    holds the lock is replacing those files right now. Either way the mod client
+    update waits for the next launch rather than running half-replaced code.
+
+    The lock is only tested, never held through the sync: launcher.sh and the app take
+    it without waiting and refuse to start an update (the launcher refuses to open
+    DeckOps at all) while someone has it, so holding it for up to the launch budget
+    would turn every game launch into a "DeckOps is updating" error for the player.
+    The updater replaces each file whole, so starting one just after this check only
+    risks an import error, which main() turns into a skipped update, never a lost launch.
+    """
+    install_dir = install_dir or INSTALL_DIR
+    if os.path.exists(os.path.join(install_dir, ".update", "transaction.json")):
+        return "an interrupted DeckOps update is waiting to be restored"
+    try:
+        from update_manifest import update_lock
+        with update_lock(install_dir):
+            pass
+    except BlockingIOError:
+        return "a DeckOps update is running"
+    except OSError:
+        pass        # no lock file to take (read-only install): nothing to wait for
+    return None
+
+
 def main(argv):
     if not argv or argv[0] not in _HANDLERS:
         return
     t0 = time.monotonic()
+    # The offline launcher's query is not an update and lan_server.sh needs its answer
+    if argv[0] != "lan":
+        try:
+            busy = _deckops_update_busy()
+        except Exception as ex:
+            busy = None
+            _log.debug("prelaunch: DeckOps update check failed: %s", ex)
+        if busy:
+            _log.info("prelaunch %s: update skipped, %s", argv[0], busy)
+            return
     try:
         _HANDLERS[argv[0]](argv[0], argv[1:])
     except Exception as ex:
@@ -104,6 +153,17 @@ def main(argv):
     _log.info("prelaunch %s: %.1fs", argv[0], time.monotonic() - t0)
 
 
+def _on_sigterm(signum, frame):
+    # prelaunch.sh's timeout ends this with SIGTERM. Python's default for it is to
+    # die on the spot, skipping the rollback in cod4r.sync_files and
+    # plutonium_update._swap_in and leaving a mix of two builds. Raised as
+    # SystemExit (not an Exception, so main() doesn't swallow it) those
+    # except/finally blocks run first; the launch goes ahead either way.
+    raise SystemExit(128 + signum)
+
+
 if __name__ == "__main__":
+    import signal
+    signal.signal(signal.SIGTERM, _on_sigterm)
     setup_logging()
     main(sys.argv[1:])

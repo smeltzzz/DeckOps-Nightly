@@ -64,14 +64,17 @@ def apply_cod4_launch_option(steam_root: str) -> bool:
     Set 7940's option after the launch-option clean slate. The install
     flow runs the CoD4 installers before Steam is closed, so options they
     write there don't survive. Steam must be closed.
+
+    Returns True only if the option is in place for at least one Steam
+    account: False when none is needed, and also when set_launch_options
+    wrote nothing (no account has a 7940 entry yet, a failed write).
     """
     import config as cfg
     opt = cod4_launch_option(cfg.get_setup_games())
     if not opt:
         return False
     from wrapper import set_launch_options
-    set_launch_options(steam_root, COD4_APPID, opt)
-    return True
+    return set_launch_options(steam_root, COD4_APPID, opt) > 0
 
 
 # ── public API ────────────────────────────────────────────────────────────────

@@ -31,7 +31,13 @@ def update_lock(install_dir):
     On Windows this is only used by local tests, never by a DeckOps install.
     """
     path = Path(install_dir) / ".deckops_update.lock"
-    with open(path, "a+") as stream:
+    try:
+        stream = open(path, "a+")
+    except PermissionError:
+        # A lock file left root-owned (a `sudo` run): flock works on a read-only
+        # descriptor too, as in launcher.sh. Other errors are the caller's to handle.
+        stream = open(path, "r")
+    with stream:
         if os.name == "posix":
             import fcntl
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -922,7 +922,7 @@ DEFAULT_FOV = 90
 # MW1, MW2 and MW3 multiplayer, MW1 campaign, WaW, BO1 and BO2: every mode.
 # The MW2 and MW3 campaigns are left out: those 64-bit Steam builds ignore the
 # config, so fovwatch.py holds their FOV and the DXVK launch option caps their FPS.
-FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4mp", "iw5mp",
+FPS_FOV_KEYS = ("cod4sp", "cod4mp", "iw4mp", "iw5mp", "iw5mp_ds",
                 "t4sp", "t4mp", "t5sp", "t5mp", "t6sp", "t6mp", "t6zm")
 
 # Lines older DeckOps versions put in the MW2 / MW3 campaign config.cfg that no
@@ -1001,13 +1001,17 @@ def _patch_dvars(path, values, create=False, binds=None, drop=()):
 
 
 def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
-                on_progress=None):
+                on_progress=None, *, failures=None):
     """
     Set com_maxfps and cg_fov in the deployed configs of every set-up game in
     FPS_FOV_KEYS (SP, MP and ZM), including the Plutonium offline copies and,
     on LCD, the Heroic mirror. Games that haven't been set up are skipped, and
     so are config files that don't exist yet (a fresh install writes them from
     the templates). Returns the number of files changed.
+
+    failures -- optional list; each file that could not be written is
+    appended to it as (path, error message). Callers must not report full
+    success when it is non-empty.
     """
     import config as cfg
 
@@ -1032,6 +1036,8 @@ def set_fps_fov(steam_root, installed_games, fps=DEFAULT_FPS, fov=DEFAULT_FOV,
                 prog(f"  + {label}: {os.path.basename(path)}")
         except OSError as ex:
             prog(f"  ! {label}: could not update {path}: {ex}")
+            if failures is not None:
+                failures.append((path, str(ex)))
 
     for key in keys:
         game = installed_games.get(key, {})
@@ -1102,13 +1108,14 @@ DEADZONE_KEYS = ("iw4mp", "iw5mp", "iw5mp_ds", "t4sp", "t4mp",
 
 def set_deadzone(steam_root, installed_games,
                  deadzone_min=DEFAULT_DEADZONE_MIN,
-                 deadzone_max=DEFAULT_DEADZONE_MAX, on_progress=None):
+                 deadzone_max=DEFAULT_DEADZONE_MAX, on_progress=None, *, failures=None):
     """Patch existing supported game configs in place; return files changed.
 
     Like set_fps_fov, this visits only set-up games, including own-copy
     prefixes, LCD's Heroic mirror and offline Plutonium mirrors. It does not
     create missing files or write unsupported SP/binary profiles. Fresh
     installs and refreshes get these defaults from the shipped cfg assets.
+    failures works as in set_fps_fov.
     """
     import config as cfg
 
@@ -1137,6 +1144,8 @@ def set_deadzone(steam_root, installed_games,
                 prog(f"  + {key}: {os.path.basename(path)}")
         except OSError as ex:
             prog(f"  ! {key}: could not update {path}: {ex}")
+            if failures is not None:
+                failures.append((path, str(ex)))
 
     for key in keys:
         game = installed_games.get(key, {})

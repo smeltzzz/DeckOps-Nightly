@@ -137,8 +137,13 @@ mkdir -p "$INSTALL_DIR"
 # it before running this script, so without it a second launcher or a running DeckOps
 # could recover or apply an update into a half-copied tree. Released (fd 8 closed)
 # before DeckOps is started at the end. No flock: same as launcher.sh, carry on unlocked.
+# A root-owned lock file (left by a `sudo` run) can't be opened for writing, but flock
+# works on a read-only descriptor too. Without either, copying unlocked could race an
+# update, so stop and say how to fix it.
 if command -v flock >/dev/null 2>&1; then
-    exec 8> "$INSTALL_DIR/.deckops_update.lock" || die "Could not open the DeckOps update lock."
+    { exec 8> "$INSTALL_DIR/.deckops_update.lock"; } 2>/dev/null \
+        || { exec 8< "$INSTALL_DIR/.deckops_update.lock"; } 2>/dev/null \
+        || die "Could not open the DeckOps update lock ($INSTALL_DIR/.deckops_update.lock). Check that $INSTALL_DIR belongs to you (e.g. sudo chown -R $(id -un): \"$INSTALL_DIR\"), then try again."
     flock -n 8 || die "DeckOps is updating in another window. Wait for it to finish, then try again."
 fi
 
@@ -159,10 +164,16 @@ rm -rf "$INSTALL_DIR/.update"
 
 # cp just overwrote VERSION with the (older) one tracked in the archive. Record the
 # version of the files now on disk right away, whole, so a failure or Ctrl-C in the
-# venv/pip steps below never leaves a VERSION older than the files.
+# venv/pip steps below never leaves a VERSION older than the files. Unpinned, "0"
+# (never updated: launcher.sh then fetches a full archive) -- the tracked VERSION left
+# in place made a failed install look like that older commit.
 if [ -n "$INITIAL_SHA" ]; then
-    echo "$INITIAL_SHA" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
+    INSTALLED_VERSION="$INITIAL_SHA"
+else
+    INSTALLED_VERSION="0"
 fi
+{ echo "$INSTALLED_VERSION" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"; } \
+    || warn "Could not record the installed version; DeckOps will refresh its files on the next update."
 
 if [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ ]] && [ "$PREVIOUS_SHA" != "$INITIAL_SHA" ] \
    && [ -f "$EXTRACTED/src/update_manifest.py" ]; then
@@ -188,8 +199,11 @@ BUILD_HASH="${BUILD_FALLBACK:-nightly}"
 if command -v git &>/dev/null && [ -d "$INSTALL_DIR/.git" ]; then
     BUILD_HASH=$(cd "$INSTALL_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "${BUILD_FALLBACK:-nightly}")
 fi
-echo "$BUILD_HASH ($BUILD_DATE)" > "$INSTALL_DIR/BUILD"
-success "Build info written: $BUILD_HASH ($BUILD_DATE)"
+if echo "$BUILD_HASH ($BUILD_DATE)" > "$INSTALL_DIR/BUILD"; then
+    success "Build info written: $BUILD_HASH ($BUILD_DATE)"
+else
+    warn "Could not write build info; Settings will not show the build."
+fi
 
 # ── step 4: download background music ────────────────────────────────────────
 info "Downloading background music..."
@@ -272,7 +286,7 @@ mkdir -p "$(dirname "$DESKTOP_FILE")"
 
 # Through the launcher, not the venv's python directly: a venv broken by a
 # SteamOS Python update can then still be repaired from the icon.
-cat > "$DESKTOP_FILE" << DEOF
+if cat > "$DESKTOP_FILE" << DEOF
 [Desktop Entry]
 Name=${APP_TITLE:-DeckOps Nightly}
 Comment=${DESKTOP_COMMENT:-DeckOps Nightly — Experimental build}
@@ -283,14 +297,19 @@ Type=Application
 Categories=Game;
 StartupNotify=true
 DEOF
+then
+    chmod +x "$DESKTOP_FILE"
+    success "App launcher shortcut created."
 
-chmod +x "$DESKTOP_FILE"
-success "App launcher shortcut created."
-
-if [ -d "$HOME/Desktop" ]; then
-    cp "$DESKTOP_FILE" "$DESKTOP_SHORTCUT"
-    chmod +x "$DESKTOP_SHORTCUT"
-    success "Desktop shortcut created."
+    if [ -d "$HOME/Desktop" ]; then
+        if cp "$DESKTOP_FILE" "$DESKTOP_SHORTCUT" && chmod +x "$DESKTOP_SHORTCUT"; then
+            success "Desktop shortcut created."
+        else
+            warn "Could not create the desktop shortcut."
+        fi
+    fi
+else
+    warn "Could not create the app launcher shortcut ($DESKTOP_FILE); start DeckOps with: bash \"$INSTALL_DIR/launcher.sh\""
 fi
 
 # ── step 7: sweep stale plut_lan.sh sidecars ─────────────────────────────────
@@ -306,12 +325,13 @@ fi
 info "Sweeping stale plut_lan.sh sidecars..."
 
 STEAM_ROOT_FOR_SWEEP=""
-# The same places the uninstaller looks (detect_games.STEAM_PATHS): Flatpak Steam and
-# the Debian package keep their root elsewhere
+# The same places the uninstaller looks (detect_games.STEAM_PATHS): Flatpak and Snap
+# Steam and the Debian package keep their root elsewhere
 for r in "$HOME/.local/share/Steam" "$HOME/.steam/steam" "$HOME/.steam/root" \
          "$HOME/.steam/debian-installation" \
          "$HOME/.var/app/com.valvesoftware.Steam/data/Steam" \
-         "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
+         "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam" \
+         "$HOME/snap/steam/common/.local/share/Steam"; do
     if [ -d "$r/steamapps" ]; then
         STEAM_ROOT_FOR_SWEEP="$r"
         break
@@ -351,11 +371,11 @@ fi
 
 # ── step 8: record the SHA of the archive actually installed ─────────────────
 info "Recording current version..."
-if [ -n "$INITIAL_SHA" ]; then
-    echo "$INITIAL_SHA" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
+if ! { echo "$INSTALLED_VERSION" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"; }; then
+    warn "Could not record the installed version; DeckOps will refresh its files on the next update."
+elif [ -n "$INITIAL_SHA" ]; then
     success "Version recorded."
 else
-    echo "0" > "$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
     warn "Version unknown — DeckOps will refresh its files on the next update."
 fi
 

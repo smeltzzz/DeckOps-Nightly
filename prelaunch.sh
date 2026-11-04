@@ -10,7 +10,9 @@ KEY="$1"
 
 # Steam's launch environment (overlay preload, runtime libraries) is meant
 # for the game, not for the host Python, so it is dropped for the check only.
-timeout 120 env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
+# The SIGTERM at 120 s lets prelaunch.py put back a half-swapped file set; -k
+# kills it 10 s later if that hangs, so the game still starts.
+timeout -k 10 120 env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
     "$DIR/.venv/bin/python3" "$DIR/src/prelaunch.py" "$@" >/dev/null 2>&1
 
 shift

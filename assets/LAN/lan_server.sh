@@ -125,6 +125,27 @@ if [ -n "$PORT" ]; then
   mkdir -p "$STATE_DIR" "$SESSIONS"
   exec 9>"$LOCK_FILE"
   flock 9 || { echo "could not lock server startup"; exit 1; }
+  if ss -uln | grep -q ":$PORT "; then
+    # Every mode uses the same port: a server another game left up must not be joined.
+    # It is this mode's when a live session of it is registered or its recorded unit is active.
+    OURS=
+    if [ -s "$SERVER_STATE" ]; then
+      for member in "$SESSIONS"/*; do
+        [ -f "$member" ] || continue
+        pid=${member##*/}; pid=${pid%%-*}
+        if kill -0 "$pid" 2>/dev/null; then OURS=1; break; fi
+      done
+      if [ -z "$OURS" ] && systemctl --user is-active --quiet "$(cat "$SERVER_STATE")" 2>/dev/null; then
+        OURS=1
+      fi
+    fi
+    if [ -z "$OURS" ]; then
+      echo "$(date +%T) port $PORT held by another offline server, stopping it"
+      systemctl --user stop 'deckops-lan-*' 2>/dev/null
+      rm -f "$SERVER_STATE"
+      for i in $(seq 15); do ss -uln | grep -q ":$PORT " || break; sleep 1; done
+    fi
+  fi
   if ! ss -uln | grep -q ":$PORT "; then
     UNIT="deckops-lan-$MODE-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     # systemd-run with the display passed in: a headless server stalls under Proton, and in Game Mode

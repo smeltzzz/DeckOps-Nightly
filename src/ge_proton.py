@@ -299,6 +299,10 @@ def _safe_extractall(tar: tarfile.TarFile, dest: str):
     tar.extractall(dest)
 
 
+# System tar is given this long to extract the multi-GB archive (seconds)
+TAR_TIMEOUT = 1800
+
+
 def _extract_atomically(tarball_path: str, dir_name: str,
                         steam_root: str | None = None):
     """
@@ -323,12 +327,16 @@ def _extract_atomically(tarball_path: str, dir_name: str,
         ok = False
         try:
             r = subprocess.run(["tar", "-xzf", tarball_path, "-C", staging],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, timeout=TAR_TIMEOUT)
             ok = r.returncode == 0
             if not ok:
                 _log.warning("tar failed (%s): %s", r.returncode, r.stderr.strip()[-500:])
         except OSError as ex:          # tar not installed
             _log.warning("tar unavailable: %s", ex)
+        except subprocess.TimeoutExpired:
+            # A hung tar (stalled disk, stuck NFS) used to block setup forever.
+            # Its partial output is cleared below before the tarfile retry.
+            _log.warning("tar timed out after %ss, retrying with tarfile", TAR_TIMEOUT)
         if not ok:
             shutil.rmtree(staging, ignore_errors=True)
             os.makedirs(staging)
@@ -682,11 +690,15 @@ def _overlay_prefix(source_pfx_dir: str, dest_prefix_path: str,
                     ge_version: str | None, on_progress=None) -> bool:
     """
     Overlay a finalized donor prefix onto an existing prefix, copying
-    only files that are missing or differ in size.
+    only files that are missing, plus Wine builtins under drive_c/windows
+    that differ in size (the files Proton itself replaces on an upgrade).
 
     For new prefixes (no pfx/ dir yet), this is equivalent to a full clone.
     For existing prefixes, this fills in any missing files without
-    re-copying the ~1200 DLLs that are already there.
+    re-copying the ~1200 DLLs that are already there. Existing registry
+    files (*.reg), drive_c/users (saves, mod data) and native DLLs are
+    never overwritten: they used to be replaced whenever their size
+    differed from the donor's.
 
     Also copies tracked_files and writes the version file.
 
@@ -722,6 +734,7 @@ def _overlay_prefix(source_pfx_dir: str, dest_prefix_path: str,
                 rel = os.path.relpath(src_dirpath, source_pfx_dir)
                 dst_dirpath = os.path.join(dest_pfx_dir, rel)
                 os.makedirs(dst_dirpath, exist_ok=True)
+                in_windows = os.path.normpath(rel).split(os.sep)[:2] == ["drive_c", "windows"]
 
                 # Handle symlinked directories (e.g. dosdevices/c: -> ../drive_c,
                 # d: -> /run/media/deck/...). Recreate as symlinks in the
@@ -759,21 +772,30 @@ def _overlay_prefix(source_pfx_dir: str, dest_prefix_path: str,
                             copied += 1
                         continue
 
-                    if os.path.exists(dst_file):
+                    if os.path.lexists(dst_file):
+                        # An existing file is the prefix's own: its registry
+                        # (*.reg) and drive_c/users (saves, Plutonium's
+                        # AppData) must never be replaced by the donor's.
+                        # Only Wine builtins under drive_c/windows that
+                        # differ are refreshed, as _refresh_dll_dir does.
+                        if not in_windows or not _is_wine_builtin(dst_file):
+                            skipped += 1
+                            continue
                         try:
                             if os.path.getsize(dst_file) == os.path.getsize(src_file):
                                 skipped += 1
                                 continue
                         except OSError:
                             pass
-                    # Skip existing read-only files -- these are Proton
-                    # prefix scaffolding (wordpad.exe, odbccp32.dll, etc.)
-                    # that differ in size between Proton versions but are
-                    # not needed by any game.  Game-critical DLLs are
-                    # handled separately by _copy_dlls.
-                    if os.path.exists(dst_file) and not os.access(dst_file, os.W_OK):
-                        skipped += 1
-                        continue
+                        # Skip existing read-only files -- these are Proton
+                        # prefix scaffolding (wordpad.exe, odbccp32.dll, etc.)
+                        # that differ in size between Proton versions but are
+                        # not needed by any game.  Game-critical DLLs are
+                        # handled separately by _copy_dlls.
+                        if os.path.exists(dst_file) and not os.access(dst_file, os.W_OK):
+                            skipped += 1
+                            continue
+                        os.remove(dst_file)
                     shutil.copy2(src_file, dst_file)
                     copied += 1
 
@@ -977,7 +999,29 @@ def _clone_with_symlinks(source_pfx_dir: str, dest_prefix_path: str,
 SD_PREFIX_ASIDE_SUFFIX = ".deckops_old"
 
 
-def _cleanup_sd_card_prefixes(appids: list[str], on_progress=None):
+def _external_compat_dirs(steam_root: str | None = None) -> list[str]:
+    """compatdata folders of every Steam library except the internal one:
+    libraryfolders.vdf entries and any card mounted under /run/media/<user>/
+    (detect_games._all_library_dirs). Only the hardcoded deck user and
+    mmcblk0p1 used to be checked, missing other distros' users and drives."""
+    from detect_games import _all_library_dirs
+    from steam_common import default_steam_root
+    sr = os.path.expanduser(steam_root) if steam_root else default_steam_root()
+    internal = {os.path.realpath(os.path.join(sr, "steamapps", "compatdata")),
+                os.path.realpath(os.path.dirname(_nvme_compatdata("0")))}
+    dirs = []
+    for lib in _all_library_dirs(sr):
+        compat = os.path.join(lib, "compatdata")
+        real = os.path.realpath(compat)
+        if real in internal or not os.path.isdir(compat):
+            continue
+        internal.add(real)      # dedupe libraries reached through several paths
+        dirs.append(compat)
+    return dirs
+
+
+def _cleanup_sd_card_prefixes(appids: list[str], on_progress=None,
+                              steam_root: str | None = None):
     """
     Move SD card compatdata prefixes for the given appids out of the way.
     Prefixes now live on NVMe for performance, so the SD card copies are no
@@ -990,39 +1034,29 @@ def _cleanup_sd_card_prefixes(appids: list[str], on_progress=None):
     games that weren't part of the run, with no backup or prompt.
     Returns the list of set-aside paths.
     """
-    import glob
-
     prog = on_progress or (lambda *a: None)
-
-    sd_patterns = [
-        "/run/media/deck/*/steamapps/compatdata",
-        "/run/media/deck/*/SteamLibrary/steamapps/compatdata",
-        "/run/media/mmcblk0p1/steamapps/compatdata",
-        "/run/media/mmcblk0p1/SteamLibrary/steamapps/compatdata",
-    ]
 
     set_aside = []
     seen = set()
-    for pattern in sd_patterns:
-        for compat_dir in glob.glob(pattern):
-            for appid in appids:
-                prefix_dir = os.path.join(compat_dir, str(appid))
-                real = os.path.realpath(prefix_dir)
-                # Symlinks are left alone: someone pointed it somewhere on purpose
-                if real in seen or os.path.islink(prefix_dir) or not os.path.isdir(prefix_dir):
-                    continue
-                seen.add(real)
-                dest = prefix_dir + SD_PREFIX_ASIDE_SUFFIX
-                n = 1
-                while os.path.lexists(dest):
-                    n += 1
-                    dest = f"{prefix_dir}{SD_PREFIX_ASIDE_SUFFIX}{n}"
-                try:
-                    os.rename(prefix_dir, dest)
-                    set_aside.append(dest)
-                    prog(f"  ✓ SD card prefix for {appid} moved aside (not deleted): {dest}")
-                except OSError as ex:
-                    prog(f"  ⚠ Could not move SD card prefix {appid} aside, left in place: {ex}")
+    for compat_dir in _external_compat_dirs(steam_root):
+        for appid in appids:
+            prefix_dir = os.path.join(compat_dir, str(appid))
+            real = os.path.realpath(prefix_dir)
+            # Symlinks are left alone: someone pointed it somewhere on purpose
+            if real in seen or os.path.islink(prefix_dir) or not os.path.isdir(prefix_dir):
+                continue
+            seen.add(real)
+            dest = prefix_dir + SD_PREFIX_ASIDE_SUFFIX
+            n = 1
+            while os.path.lexists(dest):
+                n += 1
+                dest = f"{prefix_dir}{SD_PREFIX_ASIDE_SUFFIX}{n}"
+            try:
+                os.rename(prefix_dir, dest)
+                set_aside.append(dest)
+                prog(f"  ✓ SD card prefix for {appid} moved aside (not deleted): {dest}")
+            except OSError as ex:
+                prog(f"  ⚠ Could not move SD card prefix {appid} aside, left in place: {ex}")
 
     if set_aside:
         prog(f"  ℹ {len(set_aside)} old SD card prefix(es) kept as *{SD_PREFIX_ASIDE_SUFFIX} -- "
@@ -1082,7 +1116,7 @@ def ensure_all_prefix_deps(ge_version: str | None, prefix_paths: list[tuple[str,
                          for _, p in prefix_paths if p} & managed)
     if run_appids:
         prog("  Checking for old SD card prefixes...")
-        _cleanup_sd_card_prefixes(run_appids, on_progress=on_progress)
+        _cleanup_sd_card_prefixes(run_appids, on_progress=on_progress, steam_root=steam_root)
 
     # ── Step 3: Deduplicate and override paths to NVMe ────────────────────
     seen_paths = {}

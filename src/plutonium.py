@@ -1590,6 +1590,7 @@ def apply_offline_mode(on: bool, steam_root: str, prog=lambda pct, msg: None):
     import shortcut
     _cfg.set_offline_mode(on)  # setup_lan reads the setting during each game install
     launcher_removed = True
+    touched = {}  # Add: games whose offline pieces may already be written
     try:
         if not on:
             remove_lan(lambda m: prog(5, m))
@@ -1623,6 +1624,10 @@ def apply_offline_mode(on: bool, steam_root: str, prog=lambda pct, msg: None):
                     _log.warning("could not remove the offline files of %s", k, exc_info=True)
         errors = [f"{k}: configured {entry.get('source', 'steam')} game folder not found"
                   for k, entry in configured.items() if k not in games]
+        if on and errors:
+            # Before any game is touched: a missing folder found after earlier games got
+            # their offline scripts and menu entries left "(Offline)" entries with no launcher.
+            raise RuntimeError("Offline Mode was not set up for all games: " + "; ".join(errors))
         if launcher_removed is False:
             errors.append("the Offline launcher shortcut could not be removed from Steam")
         proton = get_proton_path(steam_root)
@@ -1631,6 +1636,8 @@ def apply_offline_mode(on: bool, steam_root: str, prog=lambda pct, msg: None):
             src = configured[k].get("source", "steam")
             base = 10 + i * step
             prog(base, f"{g.get('name', k)}...")
+            if on:
+                touched[k] = g
             try:
                 install_plutonium(g, k, steam_root, proton, _plut_compat(k, g, src, steam_root),
                                   on_progress=lambda pct, msg, b=base: prog(b + pct * step // 100, msg),
@@ -1646,23 +1653,76 @@ def apply_offline_mode(on: bool, steam_root: str, prog=lambda pct, msg: None):
             from game_config import apply_game_configs
             apply_game_configs(selected_keys=list(games), installed_games=games, steam_root=steam_root,
                                deck_model=_cfg.get_deck_model() or "oled", on_progress=lambda m: prog(93, m))
-            shortcut.create_launcher_shortcut(on_progress=lambda m: prog(95, m))
+            if shortcut.create_launcher_shortcut(on_progress=lambda m: prog(95, m)) is False:
+                raise RuntimeError("the Offline launcher shortcut could not be added to Steam")
     except Exception:
         # A partial add or removal must never leave the library claiming the
         # offline launcher is Ready. A later Add can repair leftover files.
         _cfg.set_offline_mode(False)
+        if touched:
+            _rollback_offline_games(touched, steam_root, prog)
         raise
+
+
+def _rollback_offline_games(games: dict, steam_root: str, prog):
+    """A failed Add: take the offline scripts, menu files and lan_wrapper_path of the
+    games already set up back out, and rerun their setup with Offline Mode off so the
+    Steam launch menus lose their Offline entries again. Best effort: the original
+    error is what gets reported."""
+    import config as _cfg
+    from wrapper import get_proton_path
+    setup = _cfg.get_setup_games()
+    try:
+        if any(isinstance(setup.get(k), dict) and setup[k].get("lan_wrapper_path") for k in games):
+            with _cfg.transaction():
+                cfg = _cfg.load()
+                for k in games:
+                    entry = cfg.get("setup_games", {}).get(k)
+                    if isinstance(entry, dict):
+                        entry.pop("lan_wrapper_path", None)
+                _cfg.save(cfg)
+    except Exception:
+        _log.warning("offline mode rollback: config entries not removed", exc_info=True)
+    for k, g in games.items():
+        try:
+            remove_offline_files(g, k)
+        except OSError:
+            _log.warning("offline mode rollback: could not remove the offline files of %s", k, exc_info=True)
+    try:
+        proton = get_proton_path(steam_root)
+    except Exception:
+        _log.warning("offline mode rollback: no Proton path", exc_info=True)
+        return
+    for k, g in games.items():
+        src = (setup.get(k) or {}).get("source", "steam")
+        try:
+            install_plutonium(g, k, steam_root, proton, _plut_compat(k, g, src, steam_root),
+                              installed_games=games, source=src)
+        except Exception:
+            _log.warning("offline mode rollback: %s setup not rerun", k, exc_info=True)
+            prog(95, f"  ⚠ {k}: Offline entries may remain, remove Offline Mode to clean up")
 
 
 def remove_lan(prog=lambda m: None):
     """Offline Mode removed. rmtree never follows the links into online folders."""
-    for mode in {_plut_key(k) for k in LAN_KEYS}:
-        # No systemctl (non-systemd distro) or a hung user bus must not stop removal
+    for mode in sorted({_plut_key(k) for k in LAN_KEYS}):
+        # lan_server.sh names each server unit deckops-lan-<mode>-<random>, so the
+        # stop goes by pattern (matches loaded units) and by the unit it recorded.
+        units = [f"deckops-lan-{mode}-*"]
         try:
-            subprocess.run(["systemctl", "--user", "stop", f"deckops-lan-{mode}"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-        except (OSError, subprocess.SubprocessError) as ex:
-            _log.warning("could not stop deckops-lan-%s: %s", mode, ex)
+            with open(os.path.join(LAN_ROOT, mode, "server.unit")) as f:
+                recorded = f.read().strip()
+            if recorded:
+                units.append(recorded)
+        except (OSError, ValueError):
+            pass
+        for unit in units:
+            # No systemctl (non-systemd distro) or a hung user bus must not stop removal
+            try:
+                subprocess.run(["systemctl", "--user", "stop", unit],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            except (OSError, subprocess.SubprocessError) as ex:
+                _log.warning("could not stop %s: %s", unit, ex)
     if os.path.isdir(LAN_ROOT):
         shutil.rmtree(LAN_ROOT)
     prog("  ✓ Offline server folders removed")

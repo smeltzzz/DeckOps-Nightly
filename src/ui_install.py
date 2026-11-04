@@ -483,7 +483,12 @@ class SetupScreen(QWidget):
     def _do_folder_scan(self):
         from detect_games import find_own_installed
         try:
-            found = find_own_installed(extra_paths=self._extra_paths)
+            # Folders picked in earlier sessions too: their games must not vanish
+            try:
+                saved = cfg.get_extra_scan_paths()
+            except Exception:
+                saved = []
+            found = find_own_installed(extra_paths=list(dict.fromkeys(saved + self._extra_paths)))
         except Exception as ex:
             _log_to_file(f"[SetupScreen] folder scan failed: {ex}")
             self._scanned_own = None        # keep what was found before
@@ -491,6 +496,19 @@ class SetupScreen(QWidget):
             return
         self._scanned_own = {k: v for k, v in found.items() if k not in self.steam_installed}
         self._scan_sigs.done.emit(True)
+
+    def _remember_folders(self, own):
+        """Save each picked folder that holds a found game: the Library's scan
+        (find_all_games) only knows the default locations otherwise, and lost
+        the games set up from here after setup."""
+        for folder in self._extra_paths:
+            root = os.path.normcase(os.path.realpath(folder)).rstrip(os.sep) + os.sep
+            if any(os.path.normcase(os.path.realpath(g.get("install_dir") or "")).startswith(root)
+                   for g in (own or {}).values() if isinstance(g, dict)):
+                try:
+                    cfg.add_extra_scan_path(folder)
+                except Exception as ex:
+                    _log_to_file(f"[SetupScreen] could not save scan folder {folder}: {ex}")
 
     def _on_folder_scanned(self, ok):
         if not ok or self._scanned_own is None:
@@ -500,6 +518,7 @@ class SetupScreen(QWidget):
             self.warning.setVisible(True)
             return
         own = self._scanned_own
+        self._remember_folders(own)
         if cfg.is_lcd():
             lcd_allowed = set()
             for g in ALL_GAMES: lcd_allowed.update(g.get("lcd_keys", g["keys"]))
@@ -605,6 +624,44 @@ class SetupScreen(QWidget):
 
 class _SteamStillRunning(RuntimeError):
     """Steam could not be closed, so the install stops before Steam's files."""
+
+
+# LCD Plutonium own games get their shortcut from heroic, not write_own_shortcuts
+_OWN_HEROIC_KEYS = {"t4sp", "t4mp", "t5sp", "t5mp", "t6zm", "t6mp", "iw5mp"}
+
+
+def _own_shortcut_keys(own_games, keys):
+    """The keys write_own_shortcuts() is expected to write (same filter it uses)."""
+    from shortcut import OWN_SHORTCUTS
+    need = set()
+    for k in keys:
+        g = (own_games or {}).get(k)
+        if k not in OWN_SHORTCUTS or not isinstance(g, dict) or not g.get("install_dir"):
+            continue
+        if g.get("_own_actual_exe") is None and k in _OWN_HEROIC_KEYS:
+            continue
+        need.add(k)
+    return need
+
+
+def _steam_shortcut_keys(installed, keys):
+    """The keys create_shortcuts() is expected to write (same filter it uses)."""
+    from shortcut import SHORTCUTS, mp_on_main_tile
+    need = set()
+    for k in keys:
+        g = (installed or {}).get(k)
+        if k not in SHORTCUTS or not isinstance(g, dict):
+            continue
+        if not (g.get("install_dir") or g.get("path")) or mp_on_main_tile(k):
+            continue
+        if k == "t4mp":
+            try:
+                if not cfg.is_lcd():
+                    continue
+            except Exception:
+                continue
+        need.add(k)
+    return need
 
 
 # --- _BaseInstallScreen ---
@@ -2079,9 +2136,12 @@ class _BaseInstallScreen(QWidget):
             # The CoD4 phase ran before Steam closed, so its launch option
             # (IW3SP swap, CoD4R pre-launch update) has to be set now.
             if "7940" in run_appids:
-                from iw3sp import apply_cod4_launch_option
+                from iw3sp import apply_cod4_launch_option, cod4_launch_option
                 if apply_cod4_launch_option(self.steam_root):
                     self._s.log.emit("✓  CoD4 launch option set")
+                elif cod4_launch_option(cfg.get_setup_games()):
+                    self._s.log.emit("⚠  CoD4 launch option not set — launch the game once "
+                                     "from Steam, then run Set Up again")
         except Exception as ex:
             self._s.log.emit(f"  Launch option / compat tool cleanup skipped: {ex}")
 
@@ -2220,6 +2280,9 @@ class _BaseInstallScreen(QWidget):
                 self._s.progress.emit(self._ppct(0, _i_i4, _n_i4), f"Setting up {base_name}...")
                 def op_iw4x(pct, msg, _i=_i_i4):
                     self._s.progress.emit(self._ppct(pct, _i, _n_i4), msg)
+                    # Warnings (launch option not set) must outlive the progress line
+                    if isinstance(msg, str) and msg.lstrip().startswith("⚠"):
+                        self._s.log.emit(msg)
                 try:
                     source = "own" if key in own_selected else "steam"
                     if source == "own":
@@ -2354,16 +2417,20 @@ class _BaseInstallScreen(QWidget):
         if has_own:
             gyro_mode = cfg.get_gyro_mode() or "on"
             self._s.progress.emit(self._ppct(60), "Writing own game shortcuts...")
+            own_sc_keys = [k for k in own_selected.keys() if _installable(k)]
+            own_needed = _own_shortcut_keys(own_games, own_sc_keys)
             try:
-                write_own_shortcuts(
+                own_written = write_own_shortcuts(
                     own_games=own_games,
-                    selected_keys=[k for k in own_selected.keys() if _installable(k)],
+                    selected_keys=own_sc_keys,
                     gyro_mode=gyro_mode,
                     on_progress=lambda msg: self._s.log.emit(msg),
                 )
+                if isinstance(own_written, (set, frozenset)):
+                    self._fail_ok(sorted(own_needed - own_written), "Steam shortcut not created")
             except Exception as ex:
                 self._s.log.emit(f"✗  Own shortcuts failed: {ex}")
-                self._fail_ok(list(own_selected.keys()), "Steam shortcut not created")
+                self._fail_ok(sorted(own_needed), "Steam shortcut not created")
 
         # --- Non-Steam shortcuts for Steam games
         steam_keys = [k for k, _, _ in steam_sel]
@@ -2375,6 +2442,10 @@ class _BaseInstallScreen(QWidget):
         sc_extra = [k for k in ("cod4mp", "t4mp") if k not in steam_keys
                     and _setup.get(k, {}).get("source") == "steam"]
         if steam_sel or sc_extra:
+            # Only the games that get a non-Steam shortcut can fail on it: IW4x,
+            # Plutonium main-tile games, CoD4R MP and WaW MP off LCD have none.
+            steam_needed = set()
+            steam_sc_keys = [k for k in steam_keys if _installable(k)] + sc_extra
             try:
                 from shortcut import create_shortcuts
                 self._s.log.emit("Creating non-Steam shortcuts...")
@@ -2383,17 +2454,23 @@ class _BaseInstallScreen(QWidget):
                     from detect_games import parse_library_folders, find_installed_games
                     found = find_installed_games(parse_library_folders(self.steam_root), self.steam_root)
                     steam_installed.update({k: found[k] for k in sc_extra if k in found})
+                steam_needed = _steam_shortcut_keys(steam_installed, steam_sc_keys)
                 gyro_mode = cfg.get_gyro_mode() or "on"
-                create_shortcuts(
+                steam_written = create_shortcuts(
                     installed_games=steam_installed,
-                    selected_keys=[k for k in steam_keys if _installable(k)] + sc_extra,
+                    selected_keys=steam_sc_keys,
                     gyro_mode=gyro_mode,
                     on_progress=lambda msg: self._s.log.emit(msg),
                     steam_root=self.steam_root,
                 )
+                if isinstance(steam_written, (set, frozenset)):
+                    self._fail_ok(sorted(steam_needed - steam_written), "Steam shortcut not created")
             except Exception as ex:
                 self._s.log.emit(f"✗  Steam shortcuts failed: {ex}")
-                self._fail_ok(steam_keys + sc_extra, "Steam shortcut not created")
+                if not steam_needed:
+                    steam_needed = _steam_shortcut_keys(
+                        {k: g for k, gd, g in steam_sel if g}, steam_sc_keys)
+                self._fail_ok(sorted(steam_needed), "Steam shortcut not created")
 
             # Set default launch option so Steam Deck skips the mode picker
             has_cod4_steam = any(KEY_CLIENT.get(k) in ("cod4r", "iw3sp")

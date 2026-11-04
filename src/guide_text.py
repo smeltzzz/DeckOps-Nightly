@@ -4,6 +4,9 @@
 def how_to_start_text(setup: dict, lcd: bool) -> str:
     """What to press to start each set-up game (SetupCompleteScreen). setup is the
     setup_games record. Empty when there is nothing to say."""
+    # Hand-edited or corrupt entries are not set-up games (as in config.check_setup)
+    setup = {k: v for k, v in (setup or {}).items() if isinstance(v, dict)}
+
     def steam(key):
         return key in setup and setup[key].get("source", "steam") == "steam"
 

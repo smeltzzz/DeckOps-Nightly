@@ -62,12 +62,19 @@ def _update_candidates(installed, keys=None):
                 continue
             game = installed.get(key)
             entry = configured.get(key, {})
+            if not isinstance(entry, dict):
+                continue  # a hand-edited or corrupt entry: not a configured mode
             if not game or not entry or entry.get("source", "steam") != game.get("source", "steam"):
                 continue
             client = entry.get("client") or KEY_CLIENT.get(key, "")
             if client and client not in ("steam", "cod4x"):
                 selected.append((key, gd, game))
     return selected
+
+
+def _partial_write_msg(count, failures):
+    """Status line for a config pass where some files could not be written."""
+    return f"⚠  Updated {count} file(s), {len(failures)} could not be written (see log)"
 
 
 def _update_selection(installed, keys=None):
@@ -570,7 +577,10 @@ class ManagementScreen(QWidget):
             self._rebuild()
             # Bring existing installs up to the shipped deadzone defaults too.
             # Idempotent and limited to configured games and existing text configs.
-            if cfg.get_setup_games() and not getattr(self, "_deadzone_running", False):
+            # Not while an install, update or Settings task runs: those rewrite the
+            # same game configs (Settings tasks hold the busy lock while they run).
+            if (cfg.get_setup_games() and not getattr(self, "_deadzone_running", False)
+                    and not inhibit.busy() and not self._settings_task_running()):
                 self._deadzone_running = True
                 installed = dict(self.installed)
                 def _defaults():
@@ -675,6 +685,15 @@ class ManagementScreen(QWidget):
         s = get_screen(self.stack, "ConfigureScreen")
         go_to(self.stack, "ConfigureScreen")
         QTimer.singleShot(0, s._apply_update)
+
+    def _settings_task_running(self):
+        """True while a Settings task (or the DeckOps self-update) runs."""
+        try:
+            s = get_screen(self.stack, "ConfigureScreen")
+        except Exception:
+            return False
+        return bool(s is not None and (getattr(s, "_settings_running", False)
+                                       or getattr(s, "_updating", False)))
 
     def _busy_elsewhere(self):
         """True, with a message, while another operation holds the sleep lock.
@@ -898,9 +917,10 @@ class ManagementScreen(QWidget):
 
         # Depot downgrade option: shown for any Steam-sourced game that
         # can be downgraded (MW3). Whether the downgrade
-        # is actually needed is checked on click.
+        # is actually needed is checked on click. Only MW3 MP / the DS need
+        # it (Plutonium); a campaign-only MW3 has nothing to downgrade for.
         _DG_KEY_MAP = {
-            "iw5": ("iw5mp", "iw5mp_ds", "iw5sp"),
+            "iw5": ("iw5mp", "iw5mp_ds"),
         }
         _DG_LABELS = {"iw5": "Downgrade MW3"}
         has_depot_dg = None
@@ -910,6 +930,8 @@ class ManagementScreen(QWidget):
                 setup_games = cfg.get_setup_games()
                 for k in _matched:
                     entry = setup_games.get(k, {})
+                    if not isinstance(entry, dict):
+                        entry = {}
                     if entry.get("source", "steam") == "steam":
                         has_depot_dg = _dg_id
                         break
@@ -1111,23 +1133,34 @@ class ManagementScreen(QWidget):
                 from plutonium_lcd import get_shared_plut_dir
                 plut_dir = get_shared_plut_dir()
             else:
-                # OLED: read plut_dir from per-game metadata
+                # OLED: read plut_dir from per-game metadata. BO1 / BO2 modes share
+                # one game folder (and so one metadata file) but not one prefix:
+                # trust it only when it was written for this mode.
                 game = self.installed.get(game_key, {})
                 install_dir = game.get("install_dir", "")
+                plut_dir = ""
                 if install_dir:
                     meta_path = os.path.join(install_dir, "deckops_plutonium.json")
                     if os.path.exists(meta_path):
                         try:
-                            import json
                             with open(meta_path) as f:
                                 meta = json.load(f)
-                            plut_dir = meta.get("plut_dir", "")
+                            if isinstance(meta, dict) and meta.get("game_key") == game_key:
+                                plut_dir = meta.get("plut_dir", "") or ""
                         except Exception:
                             plut_dir = ""
-                    else:
+                if not plut_dir:
+                    # This mode's own prefix, picked like install/update do
+                    try:
+                        from plutonium import _plut_compat, _plut_dir_in_prefix
+                        sr = cfg.load().get("steam_root", "") or find_steam_root() or ""
+                        compat = _plut_compat(game_key, game, game.get("source", "steam"), sr)
+                        if compat:
+                            plut_dir = _plut_dir_in_prefix(compat)
+                    except Exception:
+                        _log.warning("could not resolve the Plutonium folder for %s", game_key,
+                                     exc_info=True)
                         plut_dir = ""
-                else:
-                    plut_dir = ""
 
             if not plut_dir:
                 return None
@@ -1375,6 +1408,9 @@ class SetupCompleteScreen(QWidget):
         except Exception:
             show_restore = False
         # A previous visit may have left the buttons disabled and hidden
+        if getattr(self, "_restoring", False):
+            return
+        self._continue_btn.setEnabled(True)
         self._restore_btn.setEnabled(True)
         self._restore_skip.setEnabled(True)
         for w in self._restore_widgets:
@@ -1383,6 +1419,15 @@ class SetupCompleteScreen(QWidget):
 
     def _do_restore(self):
         """Run save restore in a background thread."""
+        if getattr(self, "_restoring", False):
+            return
+        self._restoring = True
+        # Copying saves back must not be cut off by a suspend or by leaving for
+        # the Library (which could start an install over the same prefixes)
+        self._restore_took_lock = not inhibit.busy()
+        if self._restore_took_lock:
+            inhibit.start("DeckOps is restoring saves")
+        self._continue_btn.setEnabled(False)
         self._restore_btn.setEnabled(False)
         self._restore_skip.setEnabled(False)
         self._restore_status.setText("Restoring saves...")
@@ -1415,9 +1460,17 @@ class SetupCompleteScreen(QWidget):
 
         self._s = _Sigs()
         self._s.log.connect(self._restore_finished)
-        threading.Thread(target=_run, daemon=True).start()
+        try:
+            threading.Thread(target=_run, daemon=True).start()
+        except Exception as ex:
+            self._restore_finished(f"RETRY|⚠  Restore failed to start: {ex}")
 
     def _restore_finished(self, message):
+        self._restoring = False
+        if getattr(self, "_restore_took_lock", False):
+            self._restore_took_lock = False
+            inhibit.stop()
+        self._continue_btn.setEnabled(True)
         kind, sep, text = message.partition("|")
         if not sep or kind not in ("DONE", "RETRY"):
             kind, text = "DONE", message
@@ -2014,10 +2067,17 @@ class ConfigureScreen(QWidget):
                 if not steam_root:
                     raise RuntimeError("Steam library not found")
                 installed = find_all_games(steam_root, preferred_sources=cfg.get_setup_games())
+                failures = []
                 count = set_deadzone(steam_root, installed,
-                                     on_progress=lambda msg: _log.info("deadzone: %s", msg.strip()))
-                s.log.emit(f"✓  Deadzones set in {count} config file(s). "
-                           "Games without supported text configs are not affected.")
+                                     on_progress=lambda msg: _log.info("deadzone: %s", msg.strip()),
+                                     failures=failures)
+                if failures:
+                    for path, err in failures:
+                        _log.warning("deadzone: could not write %s: %s", path, err)
+                    s.log.emit(_partial_write_msg(count, failures))
+                else:
+                    s.log.emit(f"✓  Deadzones set in {count} config file(s). "
+                               "Games without supported text configs are not affected.")
             except Exception as ex:
                 _log.error("deadzone update failed", exc_info=True)
                 s.log.emit(f"✗  Failed: {ex}")
@@ -2037,10 +2097,17 @@ class ConfigureScreen(QWidget):
                 from detect_games import find_all_games as _find_all
                 steam_root = cfg.load().get("steam_root", "") or find_steam_root()
                 installed = _find_all(steam_root, preferred_sources=cfg.get_setup_games()) if steam_root else {}
+                failures = []
                 count = set_fps_fov(steam_root, installed,
-                                    on_progress=lambda msg: _log.info("fps/fov: %s", msg.strip()))
-                s.log.emit(f"✓  Wrote 90 FOV and 90 FPS to {count} config file(s). "
-                           "Close the games first if they are running. The MW2 and MW3 campaigns are not affected by this button.")
+                                    on_progress=lambda msg: _log.info("fps/fov: %s", msg.strip()),
+                                    failures=failures)
+                if failures:
+                    for path, err in failures:
+                        _log.warning("fps/fov: could not write %s: %s", path, err)
+                    s.log.emit(_partial_write_msg(count, failures))
+                else:
+                    s.log.emit(f"✓  Wrote 90 FOV and 90 FPS to {count} config file(s). "
+                               "Close the games first if they are running. The MW2 and MW3 campaigns are not affected by this button.")
             except Exception as ex:
                 _log.error("fps/fov failed", exc_info=True)
                 s.log.emit(f"✗  Failed: {ex}")
@@ -2308,6 +2375,10 @@ class ConfigureScreen(QWidget):
             self._update_status.setStyleSheet(f"color:{C_DIM};")
 
     def _apply_update(self):
+        # A second click (or the Library's prompt) while one runs would replace the
+        # progress dialog and start a second worker
+        if getattr(self, "_updating", False):
+            return
         # The update ends in os.execv: a task still running here (closing Steam, rewriting
         # shortcuts.vdf) would be killed mid-write. The uninstaller and Reset guard the same way.
         busy = inhibit.busy()
@@ -2323,6 +2394,19 @@ class ConfigureScreen(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+        # Something may have started while the question was open
+        busy = inhibit.busy()
+        if busy or getattr(self, "_updating", False):
+            if busy:
+                self._update_status.setText(f"Wait for this to finish first: {str(busy).rstrip('.')}.")
+                self._update_status.setStyleSheet(f"color:{C_TREY};")
+            return
+
+        # The relaunch (os.execv) ends every running thread: hold the busy lock so
+        # Set Up / Update / Settings tasks refuse to start meanwhile, and the
+        # window asks before closing
+        self._updating = True
+        inhibit.start("DeckOps is updating itself")
 
         self._update_btn.setEnabled(False)
         self._update_btn.setText("Updating...")
@@ -2332,13 +2416,23 @@ class ConfigureScreen(QWidget):
         from qt import QProgressDialog
         pd = self._update_pd = QProgressDialog("Checking files...", None, 0, 100, self)
         pd.setWindowTitle("Update DeckOps")
+        pd.setWindowModality(Qt.WindowModality.ApplicationModal)
         pd.setMinimumDuration(0); pd.setAutoClose(False); pd.setAutoReset(False)
         pd.setCancelButton(None); pd.show()
 
         self._apply_sig = _Sigs()
         self._apply_sig.progress.connect(lambda p, m: (pd.setValue(p), pd.setLabelText(m)))
         self._apply_sig.log.connect(self._on_apply_signal)
-        threading.Thread(target=self._apply_worker, daemon=True).start()
+        try:
+            threading.Thread(target=self._apply_worker, daemon=True).start()
+        except Exception as ex:
+            self._on_apply_signal(f"FAIL|Could not start DeckOps update: {ex}")
+
+    def _end_update(self):
+        """The update stopped without relaunching: release the busy lock."""
+        if getattr(self, "_updating", False):
+            self._updating = False
+            inhibit.stop()
 
     def _apply_worker(self):
         from update_manifest import update_lock
@@ -2439,6 +2533,7 @@ class ConfigureScreen(QWidget):
             QTimer.singleShot(1000, self._relaunch)
         elif kind == "ROLLBACK":
             self._update_pd.close()
+            self._end_update()
             self._update_btn.setEnabled(False)
             QMessageBox.critical(self, "DeckOps update needs recovery",
                 f"{text}\n\nDeckOps will close to avoid using a partial update. "
@@ -2449,6 +2544,7 @@ class ConfigureScreen(QWidget):
         else:
             # FAIL
             self._update_pd.close()
+            self._end_update()
             self._update_btn.setEnabled(True)
             self._update_btn.setText("Check for Updates")
             try:
@@ -2477,6 +2573,7 @@ class ConfigureScreen(QWidget):
             pd = getattr(self, "_update_pd", None)
             if pd is not None:
                 pd.close()
+            self._end_update()
             self._update_btn.setText("Restart needed")     # stays disabled: nothing left to apply
             self._update_status.setText(
                 f"Update installed, but DeckOps could not restart itself ({ex}). "
@@ -2817,16 +2914,24 @@ class UpdateScreen(QWidget):
                 and (item[2] or {}).get("source", "steam") != "own"]
         if not cod4:
             return
+        failed = False
         try:
             from wrapper import clear_launch_options
-            from iw3sp import apply_cod4_launch_option, COD4_APPID
+            from iw3sp import apply_cod4_launch_option, cod4_launch_option, COD4_APPID
             # set_launch_options appends: drop the partial option first
             clear_launch_options(self.steam_root, COD4_APPID)
             if apply_cod4_launch_option(self.steam_root):
                 self._s.log.emit("✓  CoD4 launch option set")
+            elif cod4_launch_option(cfg.get_setup_games()):
+                # Needed, but written to no Steam account
+                self._s.log.emit("✗  CoD4 launch option not set — launch the game once "
+                                 "from Steam, then run Set Up again")
+                failed = True
         except Exception as ex:
             _log.warning("CoD4 launch option not set", exc_info=True)
             self._s.log.emit(f"✗  Could not set the CoD4 launch option: {ex}")
+            failed = True
+        if failed:
             for item in cod4:
                 if item not in self._failed_games:
                     self._failed_games.append(item)

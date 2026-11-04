@@ -12,6 +12,8 @@ STEAM_PATHS = [
     # was invisible: no games detected, no Steam root at all.
     os.path.expanduser("~/.var/app/com.valvesoftware.Steam/data/Steam"),
     os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    # Steam from Snap (Ubuntu and derivatives)
+    os.path.expanduser("~/snap/steam/common/.local/share/Steam"),
 ]
 
 # Known SD card mount point patterns: /run/media/<user>/<label>. The user is "deck" on
@@ -453,13 +455,18 @@ def _check_sentinel(candidate_dir, sentinel_group):
         zone_dir = os.path.join(candidate_dir, "zone")
         if not os.path.isdir(zone_dir):
             return False
-        for subdir in os.listdir(zone_dir):
-            subdir_path = os.path.join(zone_dir, subdir)
-            if not os.path.isdir(subdir_path):
-                continue
-            for fname in os.listdir(subdir_path):
-                if fname.lower() == sentinel.lower():
-                    return True
+        # A folder that can't be listed (permissions, removed mid-scan) is not
+        # this game; it must not abort the whole own-copy scan.
+        try:
+            for subdir in os.listdir(zone_dir):
+                subdir_path = os.path.join(zone_dir, subdir)
+                if not os.path.isdir(subdir_path):
+                    continue
+                for fname in os.listdir(subdir_path):
+                    if fname.lower() == sentinel.lower():
+                        return True
+        except OSError:
+            return False
         return False
 
     # Standard check: direct relative path
@@ -664,18 +671,33 @@ def find_own_installed(extra_paths=None, on_progress=None):
     return found
 
 
-def find_all_games(steam_root=None, preferred_sources=None):
+def _saved_extra_paths():
+    """Choose Folder picks saved in deckops.json; [] if they can't be read.
+    config is imported here, not at the top: this module has no app imports."""
+    try:
+        import config
+        return config.get_extra_scan_paths()
+    except Exception:
+        return []
+
+
+def find_all_games(steam_root=None, preferred_sources=None, extra_paths=None):
     """Detect both sources, preferring Steam unless a configured game uses an own copy.
 
     ``preferred_sources`` maps keys to their configured source (or setup-game
     entries). This keeps updates and Offline Mode pointed at the installed copy
     that was actually set up when both copies are present.
+
+    ``extra_paths`` are more folders to scan for own copies; None means the
+    folders the player picked with Choose Folder (saved in deckops.json).
     """
     if steam_root is None:
         steam_root = find_steam_root()
     libs = parse_library_folders(steam_root)
     steam = find_installed_games(libs, steam_root)
-    own = find_own_installed()
+    if extra_paths is None:
+        extra_paths = _saved_extra_paths()
+    own = find_own_installed(extra_paths=extra_paths or None)
     merged = {}
     for k, v in own.items():
         merged[k] = v

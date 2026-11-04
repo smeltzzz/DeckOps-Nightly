@@ -1031,7 +1031,7 @@ def _set_heroic_minimize_on_launch(on_progress=None):
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError) as ex:
+    except (ValueError, OSError) as ex:  # ValueError: bad JSON or not UTF-8
         prog(f"  Could not read HGL config.json: {ex}")
         return
 
@@ -1316,8 +1316,9 @@ def install_plutonium_lcd(game: dict, game_key: str,
         if offline:
             prog(60, "Own game — writing offline script...")
             lan_wrapper_path = _write_offline_wrapper(game, game_key, "own")
-    elif proton_path and steam_root:
-        # The game exe stays stock for plain Play; older versions replaced
+    elif steam_root:
+        # Nothing here runs Proton: a missing proton_path must not skip the
+        # offline script and menu files. The game exe stays stock for plain Play; older versions replaced
         # it with an offline wrapper, so put the original back.
         from plutonium import _restore_original_exe, add_steam_menu
         _restore_original_exe(game, game_key)
@@ -1329,7 +1330,7 @@ def install_plutonium_lcd(game: dict, game_key: str,
         _write_lcd_menu_files(game, game_key, lan_wrapper_path)
         add_steam_menu(game, game_key, steam_root, prog)
     else:
-        prog(60, "Skipping wrapper -- missing proton_path or steam_root")
+        prog(60, "Skipping wrapper -- missing steam_root")
 
     # 5b. Set Heroic launch options on the Steam library entry so the
     #     game launches online through Heroic. The -lan wrapper from
@@ -1460,6 +1461,10 @@ def _create_heroic_steam_shortcut(game_key: str, on_progress=None,
     the original "/usr/bin/flatpak" so the CRC-based appid stays stable
     and existing artwork/controller configs/compat tool entries continue
     to resolve correctly.
+
+    Returns the shortcut appid (truthy) once every Steam user has it, False
+    when it could not be written, None when no shortcut applies (Steam
+    source, unknown key).
     """
     # Steam game owners don't need HGL shortcuts -- their games launch
     # from existing Steam library entries with wrappers
@@ -1502,7 +1507,7 @@ def _create_heroic_steam_shortcut(game_key: str, on_progress=None,
     # is invisible, so the "flatpak run ..." invocation fails. HGL owns the
     # Proton invocation downstream, so the Steam-side compat tool is not just
     # unnecessary -- it actively breaks the launch.
-    add_shortcut(
+    appid = add_shortcut(
         name=title,
         exe_path=exe_path,
         start_dir=start_dir,
@@ -1514,3 +1519,16 @@ def _create_heroic_steam_shortcut(game_key: str, on_progress=None,
         clear_compat_tool=True,
         appid_exe_path=appid_exe,
     )
+    # add_shortcut returns the appid even when no shortcuts.vdf could be written
+    # (no Steam user, unreadable or unwritable files): check Steam really has it,
+    # for every user, as Check My Setup does.
+    try:
+        from shortcut import present_shortcut_names
+        present = present_shortcut_names()
+    except Exception as ex:
+        prog(f"  ⚠ Could not check the {title} shortcut: {ex}")
+        return False
+    if not present or title not in present:
+        prog(f"  ⚠ {title}: shortcut not created for every Steam user")
+        return False
+    return appid or True

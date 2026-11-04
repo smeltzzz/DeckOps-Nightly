@@ -50,6 +50,7 @@ DEFAULTS = {
                                  #   "lan_wrapper_path": path to -lan bash script for offline launcher (all sources) }
     "depot_patched": {},         # legacy (read-only): pre-receipt downgrade flag (Ghosts/AW, removed); receipts now live in the game folder
     "game_source": None,         # "steam" or "own"
+    "extra_scan_paths": [],      # Choose Folder picks: also scanned for own copies (find_all_games)
     "music_enabled": True,       # background music on/off
     "music_volume":  0.4,        # 0.0 to 1.0
     "player_name": None,         # in-game player name for configs and LCD Plutonium
@@ -74,6 +75,22 @@ _cache = None        # cached merged dict, or None if invalidated
 # leave it unchanged and the reader keeps the settings from before the write.
 # prelaunch/cache_cleanup run beside the UI and read the same file.
 _cache_key = None
+# CONFIG_PATH as it was when load() last found the file there but could not read
+# it (permissions, an I/O error), else None. load() still answers with the
+# defaults, but save() refuses to write them over the player's real setup.
+# Kept as the path, not a flag, so it only ever guards the file it was about.
+_unreadable = None
+
+
+class ConfigUnreadable(OSError):
+    """deckops.json exists but could not be read, so it is not overwritten."""
+
+
+def _mark_unreadable(ex):
+    global _unreadable
+    if _unreadable != CONFIG_PATH:
+        _log.error("deckops.json could not be read (%s); using defaults and not saving over it", ex)
+    _unreadable = CONFIG_PATH
 
 
 def load() -> dict:
@@ -84,17 +101,23 @@ def load() -> dict:
     since the last read (mtime check). Re-reads from disk if the file
     was modified externally or if save() invalidated the cache.
 
-    Returns defaults if the file doesn't exist or is corrupt.
+    Returns defaults if the file doesn't exist or is corrupt. Also if it
+    can't be read (permissions, I/O error), but then save() refuses to
+    replace it until a load() reads it again.
     """
-    global _cache, _cache_key
+    global _cache, _cache_key, _unreadable
 
     with _lock:
         for attempt in (0, 1):
             # Check if file exists
             try:
                 st = os.stat(CONFIG_PATH)
-            except OSError:
-                # File doesn't exist or can't be stat'd — return defaults
+            except FileNotFoundError:
+                _unreadable = None
+                return copy.deepcopy(DEFAULTS)
+            except OSError as ex:
+                # There may be a real setup behind this (EIO, EACCES on the folder)
+                _mark_unreadable(ex)
                 return copy.deepcopy(DEFAULTS)
             current_key = (st.st_mtime_ns, st.st_size)
 
@@ -124,8 +147,15 @@ def load() -> dict:
                 try: os.replace(CONFIG_PATH, bad); _log.warning("deckops.json unreadable, moved to %s", bad)
                 except OSError as ex: _log.warning("deckops.json unreadable and could not be moved aside: %s", ex)
                 return copy.deepcopy(DEFAULTS)
-            except IOError:
+            except FileNotFoundError:
+                _unreadable = None          # removed between the stat and the read
                 return copy.deepcopy(DEFAULTS)
+            except OSError as ex:
+                # Unreadable is not missing: answering with the defaults is fine, but
+                # the next setter used to save them over the player's whole setup
+                _mark_unreadable(ex)
+                return copy.deepcopy(DEFAULTS)
+            _unreadable = None
             merged = copy.deepcopy(DEFAULTS)
             merged.update(data)
             # A hand edit like {"setup_games": null} would make every setter and
@@ -159,11 +189,16 @@ def mark_corrupt_noticed(paths):
 def save(config: dict):
     """
     Write config to disk and invalidate the cache.
-    Creates the directory if needed.
+    Creates the directory if needed. Raises ConfigUnreadable (an OSError)
+    instead of writing while the last load() could not read an existing file:
+    `config` is then the defaults, not the player's setup.
     """
     global _cache, _cache_key
 
     with _lock:
+        if _unreadable == CONFIG_PATH and os.path.lexists(CONFIG_PATH):
+            _log.error("not saving deckops.json: the existing file could not be read")
+            raise ConfigUnreadable(f"{CONFIG_PATH} could not be read; not overwriting it")
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         write_json(CONFIG_PATH, config)
         _cache = None
@@ -359,7 +394,10 @@ def get_offline_mode() -> bool:
     if c.get("offline_mode") is None:
         on = any(isinstance(e, dict) and e.get("lan_wrapper_path")
                  for e in c.get("setup_games", {}).values())
-        _set("offline_mode", on)
+        try:
+            _set("offline_mode", on)
+        except ConfigUnreadable:
+            pass                    # a getter must not fail; recorded once the file reads again
         return on
     return bool(c["offline_mode"])
 
@@ -411,6 +449,30 @@ def set_docked_resolution(resolution: str):
 def set_game_source(source: str):
     """Save game source preference."""
     _set("game_source", source)
+
+
+def get_extra_scan_paths() -> list:
+    """Folders the player picked with Choose Folder, scanned for own copies
+    alongside the default locations (detect_games.find_all_games)."""
+    paths = load().get("extra_scan_paths")
+    if not isinstance(paths, list):
+        return []
+    return [p for p in paths if isinstance(p, str) and p]
+
+
+@_updates
+def add_extra_scan_path(path: str):
+    """Remember a Choose Folder folder, so the Library finds the games in it
+    after setup. Kept as given; duplicates are ignored."""
+    if not isinstance(path, str) or not path:
+        return
+    path = os.path.normpath(path)
+    current = get_extra_scan_paths()
+    if path in current:
+        return
+    config = load()
+    config["extra_scan_paths"] = current + [path]
+    save(config)
 
 
 def get_music_enabled() -> bool:
@@ -662,7 +724,7 @@ def reset():
     """
     Wipe the config and start fresh. Useful for testing or reinstalling.
     """
-    global _cache, _cache_key
+    global _cache, _cache_key, _unreadable
 
     # Same order as the setters (update lock, then cache lock). Without the update
     # lock a setter that had already loaded the old config saved it back right after
@@ -674,3 +736,4 @@ def reset():
             pass            # already gone (another process reset it): nothing to wipe
         _cache = None
         _cache_key = None
+        _unreadable = None  # the player chose to start over: saving is allowed again

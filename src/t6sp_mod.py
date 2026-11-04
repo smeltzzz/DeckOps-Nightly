@@ -34,6 +34,7 @@ _PIN = "https://github.com/Rattpak/T6SP-Mod-Release/releases/download/v1.0.0-Bet
 MOD_EXE = "T6SP-Mod.exe"
 APPID = 202970
 LAUNCH_OPTS = "bash -c 'exec \"${@/t6sp.exe/T6SP-Mod.exe}\"' -- %command%"
+LAUNCH_OPTION_NOT_SET = "launch option not set — launch the game once from Steam, then run Set Up again"
 
 METADATA_FILE = "deckops_t6sp_mod.json"
 
@@ -107,11 +108,17 @@ def install_t6sp_mod(game: dict, steam_root: str,
 
     if source != "own":
         prog(85, "Setting launch options...")
+        written = None
         try:
             from wrapper import set_launch_options
-            set_launch_options(steam_root, APPID, LAUNCH_OPTS)
+            written = set_launch_options(steam_root, APPID, LAUNCH_OPTS)
         except Exception as ex:
             prog(85, f"⚠ Could not set launch options: {ex}")
+        # 0 accounts written: the option is what swaps in T6SP-Mod.exe, so
+        # without it Steam runs plain t6sp.exe. Fail the game instead of
+        # reporting it set up.
+        if written == 0:
+            raise RuntimeError(LAUNCH_OPTION_NOT_SET)
 
     # Write metadata
     prog(95, "Saving metadata...")

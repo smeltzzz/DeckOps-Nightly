@@ -106,7 +106,9 @@ def _ensure_qt6():
         # A wheel that installs but can't load the platform plugin would abort the app, so try it in a child
         if ok and subprocess.run([sys.executable, "-c", "from PyQt6.QtWidgets import QApplication; QApplication([])"],
                                  capture_output=True, timeout=60).returncode != 0:
-            subprocess.run([pip, "uninstall", "-y", "-q", "PyQt6", "PyQt6-Qt6", "PyQt6-sip"], capture_output=True)
+            # Bounded like the install above: a hung pip must not keep DeckOps from opening
+            subprocess.run([pip, "uninstall", "-y", "-q", "PyQt6", "PyQt6-Qt6", "PyQt6-sip"],
+                           capture_output=True, timeout=300)
             open(marker, "w").close()
             log.warning("PyQt6 installed but could not open a window, staying on PyQt5")
             return

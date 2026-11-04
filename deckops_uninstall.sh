@@ -13,6 +13,25 @@ success() { printf "${GREEN}${BOLD}[  OK  ]${CLEAR} %s\n" "$1"; }
 warn()    { printf "${YELLOW}${BOLD}[ WARN ]${CLEAR} %s\n" "$1"; }
 skip()    { printf "         %s\n" "$1"; }
 
+# Set by any step that could not remove or restore something; the final
+# message then says the uninstall finished with warnings instead of fully.
+FAILED=0
+# rm_path <path> <label> [dir]: remove a file (or with "dir", a folder) and
+# say so; a failed removal is a warning and sets FAILED, never "not found".
+rm_path() {
+    local p="$1" label="$2" kind="${3:-file}"
+    if { [ "$kind" = dir ] && [ -d "$p" ]; } || { [ "$kind" != dir ] && [ -f "$p" ]; }; then
+        if rm -rf -- "$p"; then
+            success "Removed $label"
+        else
+            warn "Failed to remove $label"
+            FAILED=1
+        fi
+    else
+        skip "$label not found"
+    fi
+}
+
 # ── Branch identity ──────────────────────────────────────────────────────────
 # Only ever load THIS branch's identity -- never the other branch's install
 # dir (see install.sh). BASH_SOURCE is empty under `curl | bash`.
@@ -149,6 +168,8 @@ STEAM_ROOTS=(
     # Steam from Flatpak (detect_games.STEAM_PATHS has the same two)
     "$HOME/.var/app/com.valvesoftware.Steam/data/Steam"
     "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+    # Steam from Snap (detect_games.STEAM_PATHS, after the Flatpak paths)
+    "$HOME/snap/steam/common/.local/share/Steam"
     "/run/media/mmcblk0p1/.local/share/Steam"
     "/home/deck/.local/share/Steam"
 )
@@ -424,8 +445,69 @@ if [ -n "$KEEP_OTHER" ]; then
                     "$HOME/Desktop/${INSTALL_DIR_NAME}.desktop"; do
         [ ! -f "$shortcut" ] || rm -f "$shortcut" || warn "Could not remove $shortcut"
     done
-    rm -rf "$INSTALL_DIR" "$HOME/.config/$XDG_ID" \
-        || { warn "Could not fully remove $APP_TITLE; check $INSTALL_DIR"; exit 1; }
+    # This branch's VDF ledger records Steam edits that stay in place for the
+    # other branch. Hand the records only this ledger has to the other one, so
+    # its uninstaller can still reverse them; if that fails, keep this config.
+    KEEP_OWN_CONFIG=""
+    if [ -f "$HOME/.config/$XDG_ID/vdf_edits.json" ]; then
+        if python3 - "$HOME/.config/$XDG_ID/vdf_edits.json" \
+                "$HOME/.config/$OTHER_XDG_ID/vdf_edits.json" <<'PYEOF'
+# Merge this branch's VDF ledger into the other branch's (wrapper.py format:
+# nested JSON objects; the other ledger's existing values win)
+import json, os, sys, tempfile
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, encoding="utf-8") as f:
+    ours = json.load(f)
+if not isinstance(ours, dict):
+    raise ValueError("ledger is not a JSON object")
+try:
+    with open(dst, encoding="utf-8") as f:
+        theirs = json.load(f)
+except FileNotFoundError:
+    theirs = {}
+if not isinstance(theirs, dict):
+    raise ValueError("other ledger is not a JSON object")
+
+def merge(into, new):
+    added = 0
+    for k, v in new.items():
+        if k not in into:
+            into[k] = v
+            added += 1
+        elif isinstance(into[k], dict) and isinstance(v, dict):
+            added += merge(into[k], v)
+    return added
+
+added = merge(theirs, ours)
+if added:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst), prefix=".deckops-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(theirs, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dst)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+print(f"  {added} Steam edit record(s) handed over")
+PYEOF
+        then
+            success "Steam edit records handed to $OTHER_TITLE"
+        else
+            warn "Could not hand Steam edit records to $OTHER_TITLE; kept $HOME/.config/$XDG_ID"
+            KEEP_OWN_CONFIG=1
+        fi
+    fi
+    if [ -n "$KEEP_OWN_CONFIG" ]; then
+        rm -rf "$INSTALL_DIR" \
+            || { warn "Could not fully remove $APP_TITLE; check $INSTALL_DIR"; exit 1; }
+    else
+        rm -rf "$INSTALL_DIR" "$HOME/.config/$XDG_ID" \
+            || { warn "Could not fully remove $APP_TITLE; check $INSTALL_DIR"; exit 1; }
+    fi
     if [ "$XDG_ID" != "deckops" ]; then
         rm -rf "$HOME/.local/share/$XDG_ID" \
             || warn "Could not remove $HOME/.local/share/$XDG_ID"
@@ -498,11 +580,22 @@ restore_exe() {
     local orig_path="$exe_path.deckops_orig"
 
     if [ -f "$orig_path" ]; then
-        mv -f "$orig_path" "$exe_path" && success "Restored $exe_name (stock copy)" || warn "Failed to restore $exe_name"
-    elif [ -f "$bak_path" ]; then
-        mv "$bak_path" "$exe_path" && success "Restored $exe_name (from .bak)" || warn "Failed to restore $exe_name"
-    elif [ -f "$old_path" ]; then
-        mv "$old_path" "$exe_path" && success "Restored $exe_name (from .old)" || warn "Failed to restore $exe_name"
+        mv -f "$orig_path" "$exe_path" && success "Restored $exe_name (stock copy)" || { warn "Failed to restore $exe_name"; FAILED=1; }
+    elif [ -f "$bak_path" ] || [ -f "$old_path" ]; then
+        local backup="$bak_path" ext=".bak"
+        [ -f "$bak_path" ] || { backup="$old_path"; ext=".old"; }
+        # Mirrors plutonium._restore_original_exe: a backup only goes back over
+        # a missing exe or DeckOps' wrapper script. A real exe there (Steam
+        # verified the game, or the player replaced it) is left alone. The
+        # old IW3SP/IW4x/T6SP-MOD swaps put the mod binary in place, and their
+        # installers restore those backups unconditionally (iw3sp.py, iw4x.py,
+        # t6sp_mod.py), so the uninstaller does too.
+        if [ ! -e "$exe_path" ] || [ "$(head -c 2 "$exe_path" 2>/dev/null)" = "#!" ] \
+                || [[ " iw3sp.exe iw4mp.exe t6sp.exe " == *" $exe_name "* ]]; then
+            mv -f "$backup" "$exe_path" && success "Restored $exe_name (from $ext)" || { warn "Failed to restore $exe_name"; FAILED=1; }
+        else
+            skip "$exe_name is a real game file -- kept it and its $ext backup"
+        fi
     elif [ -f "$exe_path" ]; then
         skip "$exe_name -- no backup found (may already be original)"
     else
@@ -833,6 +926,34 @@ if not os.path.isdir(USERDATA_DIR):
     print("  No userdata found, skipping.")
     exit(0)
 
+# Old IW3SP/IW4x/T6SP-MOD swaps put the mod binary over these; their installers
+# restore the .bak unconditionally (iw3sp.py, iw4x.py, t6sp_mod.py)
+BINARY_SWAP_EXES = {"iw3sp.exe", "iw4mp.exe", "t6sp.exe"}
+
+def may_restore(exe_path):
+    """Mirrors plutonium._restore_original_exe: the .bak only goes back over a
+    missing exe or DeckOps' wrapper script, never over a real game exe."""
+    if os.path.basename(exe_path).lower() in BINARY_SWAP_EXES or not os.path.lexists(exe_path):
+        return True
+    try:
+        with open(exe_path, "rb") as f:
+            return f.read(2) == b"#!"
+    except OSError:
+        return False
+
+def restore(exe_path, label):
+    """True if the .bak went back (one atomic rename, no gap without an exe)."""
+    if not may_restore(exe_path):
+        print(f"  Kept {label} and its .bak ({label} is a real game file)")
+        return False
+    try:
+        os.replace(exe_path + ".bak", exe_path)
+        print(f"  Restored {label} (from .bak)")
+        return True
+    except OSError as ex:
+        print(f"  Failed to restore {label}: {ex}")
+        return False
+
 restored = set()
 for uid in os.listdir(USERDATA_DIR):
     if not uid.isdigit() or int(uid) < 10000:
@@ -847,12 +968,8 @@ for uid in os.listdir(USERDATA_DIR):
             continue
         bak_path = exe_path + ".bak"
         if os.path.exists(bak_path):
-            try:
-                os.rename(bak_path, exe_path)
-                print(f"  Restored {exe_name} (from .bak)")
+            if restore(exe_path, exe_name):
                 restored.add(exe_path)
-            except Exception as ex:
-                print(f"  Failed to restore {exe_name}: {ex}")
         else:
             # Also check in the start_dir for the exe
             install_dir = os.path.dirname(exe_path)
@@ -860,14 +977,8 @@ for uid in os.listdir(USERDATA_DIR):
                 candidate = os.path.join(install_dir, known)
                 candidate_bak = candidate + ".bak"
                 if candidate_bak not in restored and os.path.exists(candidate_bak):
-                    try:
-                        if os.path.exists(candidate):
-                            os.remove(candidate)
-                        os.rename(candidate_bak, candidate)
-                        print(f"  Restored {known} (from .bak)")
+                    if restore(candidate, known):
                         restored.add(candidate_bak)
-                    except Exception as ex:
-                        print(f"  Failed to restore {known}: {ex}")
 
 if not restored:
     print("  No non-Steam game backups found.")
@@ -936,7 +1047,7 @@ if [ -n "$STEAM_ROOT" ]; then
     if [ -n "$mw2_dir" ]; then
         for f in "iw4x.dll" "iw4x.exe" "iw4x-launcher.exe" "Unlinker.exe" \
                  "steam_appid.txt" "zone-conversion.log" "zonebuilder.exe"; do
-            [ -f "$mw2_dir/$f" ] && rm -f "$mw2_dir/$f" && success "Removed $f" || skip "$f not found"
+            rm_path "$mw2_dir/$f" "$f"
         done
         # Launcher cache
         [ -d "$mw2_dir/cache" ] && rm -rf "$mw2_dir/cache" && success "Removed cache/" || true
@@ -959,7 +1070,7 @@ if [ -n "$STEAM_ROOT" ]; then
         fi
         if $_remove_mw2_dlc; then
             for d in "main/iw4x/x86" "iw4x" "iw4x-updoot"; do
-                [ -d "$mw2_dir/$d" ] && rm -rf "${mw2_dir:?}/$d" && success "Removed $d/" || skip "$d/ not found"
+                rm_path "${mw2_dir:?}/$d" "$d/" dir
             done
             # Remove DLC .ff files (new path and legacy path)
             [ -d "$mw2_dir/zone/iw4x" ] && rm -rf "$mw2_dir/zone/iw4x" && success "Removed zone/iw4x/" || true
@@ -986,20 +1097,20 @@ if [ -n "$STEAM_ROOT" ]; then
         # Before the metadata below is deleted -- it tells CoD4x and CoD4R apart.
         restore_cod4_audio "$cod4_dir"
         for f in "cod4x_021.dll" "cod4x_loader.exe" "cod4x.exe" "deckops_cod4x.json" "servercache.dat"; do
-            [ -f "$cod4_dir/$f" ] && rm -f "$cod4_dir/$f" && success "Removed $f" || skip "$f not found"
+            rm_path "$cod4_dir/$f" "$f"
         done
         # CoD4R files (miles32.dll is handled by restore_cod4_audio)
         for f in "Cod4R-DedRun.exe" "CoD4R-Launcher.exe" "deckops_cod4r.json" "pbgame.htm" "eula.txt"; do
-            [ -f "$cod4_dir/$f" ] && rm -f "$cod4_dir/$f" && success "Removed $f" || skip "$f not found"
+            rm_path "$cod4_dir/$f" "$f"
         done
         for f in "jcod4r_00.iwd" "xcommon_glyphs.iwd" "xcommon_cod4qol.iwd" "xcommon_cod4r_weapons.iwd"; do
-            [ -f "$cod4_dir/main/$f" ] && rm -f "$cod4_dir/main/$f" && success "Removed main/$f" || skip "main/$f not found"
+            rm_path "$cod4_dir/main/$f" "main/$f"
         done
         for f in "cod4r_patchv2.ff" "cod4r_controls.ff" "cod4r_ambfix.ff" "qol.ff"; do
-            [ -f "$cod4_dir/zone/english/$f" ] && rm -f "$cod4_dir/zone/english/$f" && success "Removed zone/english/$f" || skip "zone/english/$f not found"
+            rm_path "$cod4_dir/zone/english/$f" "zone/english/$f"
         done
         for d in "userraw" "Mods/mp_bots"; do
-            [ -d "$cod4_dir/$d" ] && rm -rf "${cod4_dir:?}/$d" && success "Removed $d/" || skip "$d/ not found"
+            rm_path "${cod4_dir:?}/$d" "$d/" dir
         done
     fi
 
@@ -1032,9 +1143,9 @@ if [ -n "$STEAM_ROOT" ]; then
     cod4_dir=$(find_install_dir 7940) || true
     if [ -n "$cod4_dir" ]; then
         for f in "iw3sp_mod.exe" "iw3sp_mod.dll" "deckops_iw3sp.json"; do
-            [ -f "$cod4_dir/$f" ] && rm -f "$cod4_dir/$f" && success "Removed $f" || skip "$f not found"
+            rm_path "$cod4_dir/$f" "$f"
         done
-        [ -d "$cod4_dir/iw3sp_mod" ] && rm -rf "$cod4_dir/iw3sp_mod" && success "Removed iw3sp_mod/" || skip "iw3sp_mod/ not found"
+        rm_path "$cod4_dir/iw3sp_mod" "iw3sp_mod/" dir
     else
         skip "CoD4 install directory not found"
     fi
@@ -1047,7 +1158,7 @@ if [ -n "$STEAM_ROOT" ]; then
     bo2sp_dir=$(find_install_dir 202970) || true
     if [ -n "$bo2sp_dir" ]; then
         for f in "T6SP-Mod.exe" "t6sp-mod.dll" "deckops_t6sp_mod.json"; do
-            [ -f "$bo2sp_dir/$f" ] && rm -f "$bo2sp_dir/$f" && success "Removed $f" || skip "$f not found"
+            rm_path "$bo2sp_dir/$f" "$f"
         done
     else
         skip "Black Ops II SP install directory not found"
@@ -1115,7 +1226,7 @@ if [ -n "$STEAM_ROOT" ]; then
     ghosts_dir=$(find_install_dir 209160) || true
     if [ -n "$ghosts_dir" ]; then
         for f in "iw6-mod.exe" "alterware-launcher.json" "awcache.json" "deckops_alterware.json"; do
-            [ -f "$ghosts_dir/$f" ] && rm -f "$ghosts_dir/$f" && success "Removed $f (Ghosts)" || skip "$f not found"
+            rm_path "$ghosts_dir/$f" "$f (Ghosts)"
         done
         # Remove AlterWare data/ subdirectories (mod scripts, not base game)
         for d in "data/dw" "data/maps" "data/scripts" "data/ui_scripts" "data/sound"; do
@@ -1130,7 +1241,7 @@ if [ -n "$STEAM_ROOT" ]; then
     aw_dir=$(find_install_dir 209650) || true
     if [ -n "$aw_dir" ]; then
         for f in "s1-mod.exe" "alterware-launcher.json" "awcache.json" "deckops_alterware.json"; do
-            [ -f "$aw_dir/$f" ] && rm -f "$aw_dir/$f" && success "Removed $f (AW)" || skip "$f not found"
+            rm_path "$aw_dir/$f" "$f (AW)"
         done
         for d in "data/dw" "data/maps" "data/scripts" "data/ui_scripts" "data/sound"; do
             [ -d "$aw_dir/$d" ] && rm -rf "${aw_dir:?}/$d" && success "Removed $d/ (AW)"
@@ -1535,7 +1646,10 @@ PYEOF
 echo ""
 
 HAS_VDF_LEDGER=""
-if [ -f "$HOME/.config/$XDG_ID/vdf_edits.json" ]; then
+# vdf_edits.json.applied: a run that got past the ledger pass and stopped later.
+# That install still had a ledger, so a re-run must not fall back to the
+# heuristic sweeps either.
+if [ -f "$HOME/.config/$XDG_ID/vdf_edits.json" ] || [ -f "$HOME/.config/$XDG_ID/vdf_edits.json.applied" ]; then
     HAS_VDF_LEDGER=1
 fi
 export HAS_VDF_LEDGER
@@ -1933,10 +2047,12 @@ for cs_filename, keys in cs_edits.items():
             import deckops_vdf
             deckops_vdf.write_file(cs_path, cs_content.encode("utf-8", "surrogateescape"))
 
-# Clean up the ledger file itself
+# Set the ledger aside (the config dir holding it is removed at the very end).
+# Its presence tells a re-run after a later failure that this install had a
+# ledger, so the heuristic launch option sweep stays off.
 try:
-    os.remove(LEDGER_PATH)
-    print("  Ledger file removed.")
+    os.replace(LEDGER_PATH, LEDGER_PATH + ".applied")
+    print("  Ledger file applied.")
 except Exception:
     pass
 
@@ -2104,6 +2220,14 @@ MANAGED_STEAM_APPIDS = [
 
 steam_dir = os.environ.get("DECKOPS_STEAM_ROOT") or os.path.expanduser("~/.local/share/Steam")
 userdata  = os.path.join(steam_dir, "userdata")
+
+# With a ledger, the ledger pass above already removed exactly what DeckOps
+# wrote. This sweep only guesses (any d3d11=n,b or %command% looks like
+# DeckOps'), so it would also clear options the player set, such as a
+# ReShade WINEDLLOVERRIDES="d3d11=n,b" %command% for Black Ops III.
+if os.environ.get("HAS_VDF_LEDGER"):
+    print("  Edit ledger used -- launch options the player set are kept.")
+    exit(0)
 
 if not os.path.isdir(userdata):
     print("  No Steam userdata found — skipping.")
@@ -2389,7 +2513,10 @@ if [ -n "$STEAM_ROOT" ]; then
     # Mirrors: plutonium.setup_lan (copied into the game's admin/, downgrade/ on Steam).
     # Only deckops_lan.cfg: the .dsr recipes may be the user's own.
     for appid in 42690 42750; do
-        mw3_dir=$(find_install_dir "$appid") || continue
+        # find_install_dir prints "" (and succeeds) when the game is not
+        # installed; "$mw3_dir/admin/..." would then be /admin/...
+        mw3_dir=$(find_install_dir "$appid")
+        [ -n "$mw3_dir" ] || continue
         for f in "$mw3_dir/downgrade/admin/deckops_lan.cfg" "$mw3_dir/admin/deckops_lan.cfg"; do
             [ -f "$f" ] && rm -f "$f" && info "  Removed: $f"
         done
@@ -2771,6 +2898,7 @@ PYEOF
         success "Heroic library.json cleaned"
     else
         warn "Heroic library.json edit failed"
+        FAILED=1
     fi
 else
     skip "Heroic library.json not found (Heroic may not be installed)"
@@ -2938,10 +3066,14 @@ PYEOF
 # controller-config and LCD appid scans further down work out which appids
 # to clean by reading DeckOps' entries out of shortcuts.vdf -- entries that
 # remove_steam_shortcuts is about to delete. They read this snapshot
-# (via $SHORTCUTS_SNAPSHOT/<uid>.vdf) instead of the live file.
-SHORTCUTS_SNAPSHOT="$(mktemp -d)"
+# (via $SHORTCUTS_SNAPSHOT/<uid>.vdf) as well as the live file.
+# It lives in this branch's config dir, which is removed last: when a later
+# step fails, a re-run still finds the shortcuts this run already removed
+# (a fresh snapshot would only hold the cleaned file). A snapshot already
+# there is kept, never overwritten by the cleaned file.
+SHORTCUTS_SNAPSHOT="$HOME/.config/$XDG_ID/uninstall_shortcuts_snapshot"
 export SHORTCUTS_SNAPSHOT
-trap 'rm -rf "$SHORTCUTS_SNAPSHOT" "$DECKOPS_PY_HELPERS"' EXIT
+mkdir -p "$SHORTCUTS_SNAPSHOT" || { warn "Cannot snapshot Steam shortcuts; install kept for retry."; exit 1; }
 # One resolved root (STEAM_ROOT is a single path, not a list): iterate it
 # directly instead of looping over a quoted scalar (shellcheck SC2066).
 _root="$STEAM_ROOT"
@@ -2950,8 +3082,11 @@ if [ -n "$_root" ] && [ -d "$_root/userdata" ]; then
         [ -f "$_vdf" ] || continue
         _uid="$(basename "$(dirname "$(dirname "$_vdf")")")"
         # First root wins; both roots are usually the same dir via symlink.
+        # Copied under a temp name and renamed, so a cut-off copy is never
+        # taken for a snapshot on the next run.
         if [ ! -f "$SHORTCUTS_SNAPSHOT/$_uid.vdf" ]; then
-            cp -p "$_vdf" "$SHORTCUTS_SNAPSHOT/$_uid.vdf" || \
+            { cp -p "$_vdf" "$SHORTCUTS_SNAPSHOT/.$_uid.vdf.tmp" && \
+              mv -f "$SHORTCUTS_SNAPSHOT/.$_uid.vdf.tmp" "$SHORTCUTS_SNAPSHOT/$_uid.vdf"; } || \
                 { warn "Cannot snapshot Steam shortcuts; install kept for retry."; exit 1; }
         fi
     done
@@ -3063,58 +3198,59 @@ OWN_EXE_MAP = {
     "t7x.exe":        "Call of Duty: Black Ops 3 T7x",
 }
 
-def shortcuts_vdf(uid):
-    """Pre-removal snapshot taken before remove_steam_shortcuts, else live file."""
-    snap = os.path.join(os.environ.get("SHORTCUTS_SNAPSHOT", ""), uid + ".vdf")
-    if os.environ.get("SHORTCUTS_SNAPSHOT") and os.path.exists(snap):
-        return snap
-    return os.path.join(userdata, uid, "config", "shortcuts.vdf")
+def shortcuts_vdfs(uid):
+    """The pre-removal snapshot (taken before remove_steam_shortcuts, maybe by an
+    earlier interrupted run) and the live file, whichever exist."""
+    paths = []
+    if os.environ.get("SHORTCUTS_SNAPSHOT"):
+        paths.append(os.path.join(os.environ["SHORTCUTS_SNAPSHOT"], uid + ".vdf"))
+    paths.append(os.path.join(userdata, uid, "config", "shortcuts.vdf"))
+    return [p for p in paths if os.path.exists(p)]
 
 for uid in os.listdir(userdata):
     if not uid.isdigit() or int(uid) < 10000:
         continue
-    vdf_path = shortcuts_vdf(uid)
-    if not os.path.exists(vdf_path):
-        continue
-    try:
-        with open(vdf_path, "rb") as f:
-            data = f.read()
-        for _fields, _mine in deckops_vdf.entries(data):
-            if not _mine:
-                continue    # the user's own shortcut: leave its artwork alone
-            exe_raw = _fields.get("exe", "")
-            if not exe_raw:
-                continue
-            exe_name = os.path.basename(exe_raw.strip('"')).lower()
-            canonical = OWN_EXE_MAP.get(exe_name)
-            if canonical:
-                # Use exe_raw (with quotes) for appid calc to match Steam
-                appid = calc_shortcut_appid(exe_raw, canonical)
-                if appid not in shortcut_appids:
-                    shortcut_appids.add(appid)
-                    print(f"  Found own game {canonical} → appid {appid}")
-    except Exception:
-        pass
+    for vdf_path in shortcuts_vdfs(uid):
+        try:
+            with open(vdf_path, "rb") as f:
+                data = f.read()
+            for _fields, _mine in deckops_vdf.entries(data):
+                if not _mine:
+                    continue    # the user's own shortcut: leave its artwork alone
+                exe_raw = _fields.get("exe", "")
+                if not exe_raw:
+                    continue
+                exe_name = os.path.basename(exe_raw.strip('"')).lower()
+                canonical = OWN_EXE_MAP.get(exe_name)
+                if canonical:
+                    # Use exe_raw (with quotes) for appid calc to match Steam
+                    appid = calc_shortcut_appid(exe_raw, canonical)
+                    if appid not in shortcut_appids:
+                        shortcut_appids.add(appid)
+                        print(f"  Found own game {canonical} → appid {appid}")
+        except Exception:
+            pass
 
 if not shortcut_appids:
     print("  No shortcut appids to clean up.")
 
-# Add the DeckOps offline launcher shortcut appid. The launcher uses
-# DeckOps_Offline.exe as its exe path, and its appid is calculated from
-# the quoted exe path + title. We check both the current and old exe paths.
-_LAUNCHER_TITLE = "DeckOps: Plutonium Offline"
-_OLD_LAUNCHER_TITLE = "DeckOps: Plutonium Launcher"
-# Only this branch's launcher artwork is proven ours.
-_launcher_dirs = [os.environ.get("DECKOPS_INSTALL_DIR")
-                  or os.path.join(os.path.expanduser("~"), "DeckOps-Nightly")]
-_launcher_ids = []
-for _d in _launcher_dirs:
-    for _exe in (os.path.join(_d, "assets", "LAN", "DeckOps_Offline.exe"),
-                 os.path.join(_d, ".venv", "bin", "python3")):
-        for _title in (_LAUNCHER_TITLE, _OLD_LAUNCHER_TITLE):
-            _launcher_ids.append((f'"{_exe}"', _title))
-for _exe, _title in _launcher_ids:
-    _appid = calc_shortcut_appid(_exe, _title)
+def launcher_appids():
+    """Appids of this branch's Offline launcher shortcut, from the quoted exe path
+    + title (shortcut.create_launcher_shortcut). Today's shortcut runs
+    assets/LAN/launcher_offline.sh; older ones ran DeckOps_Offline.exe or the
+    venv's python3 directly, under the current or the old title. Only this
+    branch's launcher is proven ours."""
+    d = (os.environ.get("DECKOPS_INSTALL_DIR")
+         or os.path.join(os.path.expanduser("~"), "DeckOps-Nightly"))
+    ids = []
+    for exe in (os.path.join(d, "assets", "LAN", "launcher_offline.sh"),
+                os.path.join(d, "assets", "LAN", "DeckOps_Offline.exe"),
+                os.path.join(d, ".venv", "bin", "python3")):
+        for title in ("DeckOps: Plutonium Offline", "DeckOps: Plutonium Launcher"):
+            ids.append(calc_shortcut_appid(f'"{exe}"', title))
+    return ids
+
+for _appid in launcher_appids():
     if _appid not in shortcut_appids:
         shortcut_appids.add(_appid)
         print(f"  Launcher shortcut → appid {_appid}")
@@ -3408,12 +3544,14 @@ OWN_EXE_MAP = {
     "t7x.exe":        "Call of Duty: Black Ops 3 T7x",
 }
 
-def shortcuts_vdf(uid):
-    """Pre-removal snapshot taken before remove_steam_shortcuts, else live file."""
-    snap = os.path.join(os.environ.get("SHORTCUTS_SNAPSHOT", ""), uid + ".vdf")
-    if os.environ.get("SHORTCUTS_SNAPSHOT") and os.path.exists(snap):
-        return snap
-    return os.path.join(USERDATA, uid, "config", "shortcuts.vdf")
+def shortcuts_vdfs(uid):
+    """The pre-removal snapshot (taken before remove_steam_shortcuts, maybe by an
+    earlier interrupted run) and the live file, whichever exist."""
+    paths = []
+    if os.environ.get("SHORTCUTS_SNAPSHOT"):
+        paths.append(os.path.join(os.environ["SHORTCUTS_SNAPSHOT"], uid + ".vdf"))
+    paths.append(os.path.join(USERDATA, uid, "config", "shortcuts.vdf"))
+    return [p for p in paths if os.path.exists(p)]
 
 # Titles the user's own shortcuts use. Controller config is keyed by title, so a
 # title one of them shares with ours must be left alone.
@@ -3422,27 +3560,36 @@ user_titles = set()
 for uid in os.listdir(USERDATA):
     if not uid.isdigit() or int(uid) < 10000:
         continue
-    vdf_path = shortcuts_vdf(uid)
-    if not os.path.exists(vdf_path):
-        continue
-    try:
-        with open(vdf_path, "rb") as f:
-            data = f.read()
-        for _fields, _mine in deckops_vdf.entries(data):
-            if not _mine:
-                user_titles.add(_fields.get("appname", ""))
-                continue    # the user's own shortcut: keep its controller config
-            exe_raw = _fields.get("exe", "")
-            if not exe_raw:
-                continue
-            exe_name = os.path.basename(exe_raw.strip('"')).lower()
-            canonical = OWN_EXE_MAP.get(exe_name)
-            if canonical:
-                # Use exe_raw (with quotes) for appid calc to match Steam
-                appid = calc_shortcut_appid(exe_raw, canonical)
-                all_appids.add(appid)
-    except Exception:
-        pass
+    for vdf_path in shortcuts_vdfs(uid):
+        try:
+            with open(vdf_path, "rb") as f:
+                data = f.read()
+            for _fields, _mine in deckops_vdf.entries(data):
+                if not _mine:
+                    user_titles.add(_fields.get("appname", ""))
+                    continue    # the user's own shortcut: keep its controller config
+                exe_raw = _fields.get("exe", "")
+                if not exe_raw:
+                    continue
+                exe_name = os.path.basename(exe_raw.strip('"')).lower()
+                canonical = OWN_EXE_MAP.get(exe_name)
+                if canonical:
+                    # Use exe_raw (with quotes) for appid calc to match Steam
+                    appid = calc_shortcut_appid(exe_raw, canonical)
+                    all_appids.add(appid)
+        except Exception:
+            pass
+
+# This branch's Offline launcher shortcut (shortcut.create_launcher_shortcut
+# gives it a layout in Steam Controller Configs/<uid>/config/<appid>/, with
+# the .deckops-owned marker). Same appids as the artwork step above.
+_install = (os.environ.get("DECKOPS_INSTALL_DIR")
+            or os.path.join(os.path.expanduser("~"), "DeckOps-Nightly"))
+for _exe in (os.path.join(_install, "assets", "LAN", "launcher_offline.sh"),
+             os.path.join(_install, "assets", "LAN", "DeckOps_Offline.exe"),
+             os.path.join(_install, ".venv", "bin", "python3")):
+    for _title in ("DeckOps: Plutonium Offline", "DeckOps: Plutonium Launcher"):
+        all_appids.add(calc_shortcut_appid(f'"{_exe}"', _title))
 
 # Build list of all keys to remove from configset files (appids + named keys)
 all_configset_keys = set(all_appids)
@@ -3463,6 +3610,66 @@ SHORTCUT_TITLES -= user_titles
 for title in SHORTCUT_TITLES:
     all_configset_keys.add(re.sub(r'[/\\?%*:|"<>.]', "", title.lower()))
 
+# One file that cannot be read or removed is reported and the rest is still
+# cleaned; the step then exits 4 so the uninstaller reports warnings.
+partial = []
+
+def warn_partial(msg):
+    partial.append(msg)
+    print(f"  WARNING: {msg}")
+
+def guarded(op, path):
+    try:
+        op(path)
+    except OSError as ex:
+        warn_partial(f"could not remove {path}: {ex}")
+
+def user_backups(path):
+    """controller_profiles.install_layout keeps a layout the player changed as
+    <path>.deckops-user-<time> before replacing it. Newest first."""
+    folder, base = os.path.split(path)
+    found = []
+    for n in os.listdir(folder):
+        stamp = n[len(base) + len(".deckops-user-"):]
+        if n.startswith(base + ".deckops-user-") and stamp.isdigit():
+            found.append((int(stamp), os.path.join(folder, n)))
+    return [p for _, p in sorted(found, reverse=True)]
+
+def clean_canonical(uid, path):
+    old = path + ".deckops-original"
+    marker = path + ".deckops-owned"
+    if os.path.isfile(marker):
+        with open(marker, "r", encoding="ascii") as f:
+            expected = f.read().strip()
+        with open(path, "rb") as f:
+            actual = hashlib.sha256(f.read()).hexdigest()
+        backups = user_backups(path)
+        if expected == actual:
+            if backups:
+                # The player's own last version of this layout
+                os.replace(backups[0], path)
+                print(f"  uid {uid}: restored your changed layout {path}")
+                backups = backups[1:]
+            elif os.path.isfile(old):
+                os.replace(old, path)
+            else:
+                os.remove(path)
+        os.remove(marker)
+        for b in backups + ([old] if os.path.isfile(old) else []):
+            print(f"  uid {uid}: kept your earlier layout {b}")
+    elif os.path.isfile(old):
+        # Legacy build: this backup predates the owned-file marker.
+        # Keep both rather than guess which one is the player's.
+        print(f"  uid {uid}: kept {path} and its original backup")
+    else:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                header = f.read(2048)
+            if '"title"' in header and '"DeckOps -' in header:
+                os.remove(path)
+        except OSError:
+            pass
+
 # Get Deck serial for serial-specific configset cleanup
 deck_serial = get_deck_serial()
 if deck_serial:
@@ -3480,11 +3687,14 @@ for uid in os.listdir(USERDATA):
             appid_dir = os.path.join(configs_root, appid)
             if not os.path.isdir(appid_dir):
                 continue
-            for name in os.listdir(appid_dir):
-                if re.fullmatch(r'controller_[a-z0-9_]+_deckops[a-z0-9_]*\.vdf', name):
-                    os.remove(os.path.join(appid_dir, name))
-            if not os.listdir(appid_dir):
-                os.rmdir(appid_dir)
+            try:
+                for name in os.listdir(appid_dir):
+                    if re.fullmatch(r'controller_[a-z0-9_]+_deckops[a-z0-9_]*\.vdf', name):
+                        guarded(os.remove, os.path.join(appid_dir, name))
+                if not os.listdir(appid_dir):
+                    guarded(os.rmdir, appid_dir)
+            except OSError as ex:
+                warn_partial(f"uid {uid}: could not clean {appid_dir}: {ex}")
 
     # Path 2: Steam Controller Configs/<uid>/config/<appid>/ (used by shortcut.py)
     steam_cfg_root = os.path.join(
@@ -3496,43 +3706,30 @@ for uid in os.listdir(USERDATA):
             appid_dir = os.path.join(steam_cfg_root, appid)
             if not os.path.isdir(appid_dir):
                 continue
-            for name in os.listdir(appid_dir):
+            try:
+                names = os.listdir(appid_dir)
+            except OSError as ex:
+                warn_partial(f"uid {uid}: could not read {appid_dir}: {ex}")
+                continue
+            for name in names:
                 path = os.path.join(appid_dir, name)
                 if re.fullmatch(r'controller_[a-z0-9_]+_deckops[a-z0-9_]*\.vdf', name):
-                    os.remove(path)
+                    guarded(os.remove, path)
                     continue
                 # Canonical controller_<type>.vdf is a Steam layout fallback.
                 # Only restore/delete it if it still matches what DeckOps put
                 # there. Do not remove a layout edited since the last apply.
                 if not re.fullmatch(r'controller_[a-z0-9_]+\.vdf', name):
                     continue
-                old = path + ".deckops-original"
-                marker = path + ".deckops-owned"
-                if os.path.isfile(marker):
-                    with open(marker, "r", encoding="ascii") as f:
-                        expected = f.read().strip()
-                    with open(path, "rb") as f:
-                        actual = hashlib.sha256(f.read()).hexdigest()
-                    if expected == actual:
-                        if os.path.isfile(old):
-                            os.replace(old, path)
-                        else:
-                            os.remove(path)
-                    os.remove(marker)
-                elif os.path.isfile(old):
-                    # Legacy build: this backup predates the owned-file marker.
-                    # Keep both rather than guess which one is the player's.
-                    print(f"  uid {uid}: kept {path} and its original backup")
-                else:
-                    try:
-                        with open(path, "r", encoding="utf-8", errors="replace") as f:
-                            header = f.read(2048)
-                        if '"title"' in header and '"DeckOps -' in header:
-                            os.remove(path)
-                    except OSError:
-                        pass
-            if not os.listdir(appid_dir):
-                os.rmdir(appid_dir)
+                try:
+                    clean_canonical(uid, path)
+                except (OSError, UnicodeDecodeError) as ex:
+                    warn_partial(f"uid {uid}: could not clean {path}: {ex}")
+            try:
+                if not os.listdir(appid_dir):
+                    os.rmdir(appid_dir)
+            except OSError as ex:
+                warn_partial(f"uid {uid}: could not remove {appid_dir}: {ex}")
 
         # Clean configset files (neptune + serial-specific + all external types)
         configsets_to_clean = [
@@ -3554,10 +3751,19 @@ for uid in os.listdir(USERDATA):
             configset_path = os.path.join(steam_cfg_root, configset)
             if clean_configset(configset_path, all_configset_keys):
                 print(f"  uid {uid}: cleaned {configset}")
-PYEOF
-[ $? -eq 0 ] || { warn "Steam controller cleanup failed; install kept for retry."; exit 1; }
 
-success "Per-game controller configs removed."
+if partial:
+    exit(4)
+PYEOF
+_ctrl_rc=$?
+if [ "$_ctrl_rc" -eq 4 ]; then
+    warn "Some controller files could not be cleaned (see above)."
+    FAILED=1
+elif [ "$_ctrl_rc" -ne 0 ]; then
+    warn "Steam controller cleanup failed; install kept for retry."; exit 1
+else
+    success "Per-game controller configs removed."
+fi
 echo ""
 
 echo ""
@@ -3595,39 +3801,39 @@ def calc_shortcut_appid(exe_path, name):
     crc = binascii.crc32(key) & 0xFFFFFFFF
     return str((crc | 0x80000000) & 0xFFFFFFFF)
 
-def shortcuts_vdf(uid):
-    """Pre-removal snapshot taken before remove_steam_shortcuts, else live file."""
-    snap = os.path.join(os.environ.get("SHORTCUTS_SNAPSHOT", ""), uid + ".vdf")
-    if os.environ.get("SHORTCUTS_SNAPSHOT") and os.path.exists(snap):
-        return snap
-    return os.path.join(userdata, uid, "config", "shortcuts.vdf")
+def shortcuts_vdfs(uid):
+    """The pre-removal snapshot (taken before remove_steam_shortcuts, maybe by an
+    earlier interrupted run) and the live file, whichever exist."""
+    paths = []
+    if os.environ.get("SHORTCUTS_SNAPSHOT"):
+        paths.append(os.path.join(os.environ["SHORTCUTS_SNAPSHOT"], uid + ".vdf"))
+    paths.append(os.path.join(userdata, uid, "config", "shortcuts.vdf"))
+    return [p for p in paths if os.path.exists(p)]
 
 found = set()
 if os.path.isdir(userdata):
     for uid in os.listdir(userdata):
         if not uid.isdigit() or int(uid) < 10000:
             continue
-        vdf = shortcuts_vdf(uid)
-        if not os.path.exists(vdf):
-            continue
-        try:
-            with open(vdf, "rb") as f:
-                data = f.read()
-        except Exception:
-            continue
-
-        if not deckops_vdf.readable(data):
-            raise ValueError(f"uid {uid}: invalid shortcuts snapshot")
-        for fields, _mine in deckops_vdf.entries(data):
-            name = fields.get("appname", "")
-            exe = fields.get("exe", "")
-            lo = fields.get("launchoptions", "")
-            if not isinstance(name, str) or not isinstance(exe, str) or not isinstance(lo, str):
+        for vdf in shortcuts_vdfs(uid):
+            try:
+                with open(vdf, "rb") as f:
+                    data = f.read()
+            except Exception:
                 continue
-            clean = exe.strip('"')
-            if (("/lcd_wrappers/plut_" in clean and clean.endswith(".sh")) or
-                (clean in ("flatpak", "/usr/bin/flatpak") and DECKOPS_HEROIC_URL.search(lo))):
-                found.add(calc_shortcut_appid(exe, name))
+
+            if not deckops_vdf.readable(data):
+                raise ValueError(f"uid {uid}: invalid shortcuts file {vdf}")
+            for fields, _mine in deckops_vdf.entries(data):
+                name = fields.get("appname", "")
+                exe = fields.get("exe", "")
+                lo = fields.get("launchoptions", "")
+                if not isinstance(name, str) or not isinstance(exe, str) or not isinstance(lo, str):
+                    continue
+                clean = exe.strip('"')
+                if (("/lcd_wrappers/plut_" in clean and clean.endswith(".sh")) or
+                    (clean in ("flatpak", "/usr/bin/flatpak") and DECKOPS_HEROIC_URL.search(lo))):
+                    found.add(calc_shortcut_appid(exe, name))
 
 with open(out_path, "w") as f:
     for appid in sorted(found):
@@ -3843,6 +4049,7 @@ if [ -d "$DECKY_PLUGIN_DIR" ]; then
     if [ -d "$DECKY_PLUGIN_DIR" ]; then
         warn "Could not remove the Decky plugin (needs root). Remove it with:"
         warn "  sudo rm -rf \"$DECKY_PLUGIN_DIR\""
+        FAILED=1
     else
         success "Decky plugin removed."
     fi
@@ -3861,7 +4068,7 @@ SHORTCUTS=(
 # incomplete install directory.
 
 for s in "${SHORTCUTS[@]}"; do
-    [ -f "$s" ] && rm -f "$s" && success "Removed $s" || skip "$(basename "$s") not found"
+    rm_path "$s" "$s"
 done
 
 command -v update-desktop-database &>/dev/null && \
@@ -3879,11 +4086,168 @@ pkill -f "mpv.*$INSTALL_DIR/assets/music" 2>/dev/null && success "mpv stopped" |
 systemctl --user stop 'deckops-lan-*' 2>/dev/null && success "Offline servers stopped" || skip "No offline server running"
 echo ""
 
+# ── Shared Wine DLLs ──────────────────────────────────────────────────────────
+# ge_proton.ensure_all_prefix_deps gives every game prefix but the first a
+# pfx/drive_c/windows/system32 and syswow64 that are links into
+# ~/.local/share/deckops/shared_dlls (ge_proton._clone_with_symlinks). Removing
+# that folder below would leave those games with no Windows system folder, so
+# each such link becomes a real copy first. Prefixes themselves are never
+# removed. If any copy fails, shared_dlls is kept.
+KEEP_SHARED_DLLS=""
+SHARED_DLL_DIR="$HOME/.local/share/deckops/shared_dlls"
+if [ -z "$KEEP_OTHER" ] && [ -d "$SHARED_DLL_DIR" ]; then
+    info "Giving game prefixes their own copy of the shared Wine DLLs..."
+    python3 - "$SHARED_DLL_DIR" "${COMPAT_DIRS[@]}" <<'PYEOF'
+# Mirrors ge_proton._links_to_shared / _clone_with_symlinks (src/ is gone by now)
+import glob, os, shutil, sys
+
+shared = os.path.realpath(sys.argv[1])
+roots = list(sys.argv[2:])
+# COMPAT_DIRS is only built when a Steam root was found and only globs the
+# deck user's cards, so the usual locations are scanned too (seen dedupes).
+_home = os.path.expanduser("~")
+for extra in ([os.path.join(_home, p, "steamapps", "compatdata") for p in (
+                  ".local/share/Steam", ".steam/steam", ".steam/root",
+                  ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+                  ".var/app/com.valvesoftware.Steam/data/Steam",
+                  "snap/steam/common/.local/share/Steam")]
+              + glob.glob("/run/media/*/*/steamapps/compatdata")
+              + glob.glob("/run/media/*/*/SteamLibrary/steamapps/compatdata")
+              + [os.path.join(_home, "Games", "Heroic", "Prefixes")]):
+    if os.path.isdir(extra) and extra not in roots:
+        roots.append(extra)
+failed = done = 0
+seen = set()
+
+def inside_shared(path):
+    real = os.path.realpath(path)
+    return real == shared or real.startswith(shared + os.sep)
+
+def materialize(link):
+    """Replace the link with a real copy of the folder it points at. Links
+    inside it (Proton's links into its own files) stay links; one that points
+    back into shared_dlls is copied, as that folder is about to go."""
+    tmp = link + ".deckops-copy"
+    if os.path.lexists(tmp):
+        shutil.rmtree(tmp)
+    shutil.copytree(os.path.realpath(link), tmp, symlinks=True)
+    for top, dirs, files in os.walk(tmp):
+        for n in dirs + files:
+            p = os.path.join(top, n)
+            if os.path.islink(p) and inside_shared(p):
+                target = os.path.realpath(p)
+                os.remove(p)
+                if os.path.isdir(target):
+                    shutil.copytree(target, p, symlinks=True)
+                else:
+                    shutil.copy2(target, p)
+    target = os.readlink(link)
+    os.remove(link)
+    try:
+        os.rename(tmp, link)
+    except OSError:
+        os.symlink(target, link)      # put the link back rather than lose the folder
+        raise
+
+for root in roots:
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        continue
+    for name in names:
+        windows = os.path.join(root, name, "pfx", "drive_c", "windows")
+        for d in ("system32", "syswow64"):
+            link = os.path.join(windows, d)
+            if not os.path.islink(link) or not inside_shared(link):
+                continue
+            key = os.path.realpath(windows)
+            if (key, d) in seen:
+                continue
+            seen.add((key, d))
+            try:
+                materialize(link)
+                done += 1
+                print(f"  {name}: {d} is now a real folder")
+            except (OSError, shutil.Error) as ex:
+                failed += 1
+                tmp = link + ".deckops-copy"
+                shutil.rmtree(tmp, ignore_errors=True)
+                print(f"  {name}: could not copy {d} ({ex})")
+
+print(f"  {done} shared DLL link(s) replaced")
+sys.exit(2 if failed else 0)
+PYEOF
+    if [ $? -ne 0 ]; then
+        KEEP_SHARED_DLLS=1
+        FAILED=1
+        warn "Some game prefixes still use $SHARED_DLL_DIR; it was kept so those games keep working."
+    else
+        success "Game prefixes no longer depend on DeckOps' shared DLLs."
+    fi
+    echo ""
+fi
+
+# ── Offline scripts in own-copy game folders ──────────────────────────────────
+# plutonium._write_offline_wrapper writes e.g. t6plut_lan_mp.sh next to the
+# game files, also in folders outside any Steam library (own copies), which the
+# Steam library sweep above never sees. deckops.json records each one as
+# lan_wrapper_path. Only files DeckOps wrote go: a bash script with its header.
+if [ -z "$KEEP_OTHER" ] && [ -f "$INSTALL_DIR/deckops.json" ]; then
+    info "Removing DeckOps offline scripts from game folders..."
+    python3 - "$INSTALL_DIR/deckops.json" <<'PYEOF'
+import json, os, sys
+
+# Online wrappers (plutonium._write_oled_own_wrapper) carry no header; they are
+# DeckOps' when named like one of its wrapper exes and starting Plutonium.
+WRAPPER_NAMES = {f"{g}plut{m}{s}.exe" for g in ("t4", "t5", "t6", "iw5")
+                 for m in ("sp", "mp", "zm", "ds") for s in ("", "_lan")}
+
+def ours(path, offline_only):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(65536)
+    except OSError:
+        return False
+    if not head.startswith(b"#!/bin/bash"):
+        return False
+    if b"\n# DeckOps offline " in head:
+        return True
+    return (not offline_only and os.path.basename(path).lower() in WRAPPER_NAMES
+            and b"plutonium://play/" in head)
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        setup = json.load(f).get("setup_games") or {}
+except (OSError, ValueError, AttributeError) as ex:
+    print(f"  deckops.json unreadable ({ex}); offline scripts left in place")
+    sys.exit(2)
+removed = failed = 0
+for key, entry in (setup.items() if isinstance(setup, dict) else ()):
+    if not isinstance(entry, dict):
+        continue
+    for field, offline_only in (("lan_wrapper_path", True), ("wrapper_path", False)):
+        path = entry.get(field)
+        if not isinstance(path, str) or not path or not os.path.isfile(path) or not ours(path, offline_only):
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+            print(f"  Removed {path}")
+        except OSError as ex:
+            failed += 1
+            print(f"  Could not remove {path}: {ex}")
+if not removed:
+    print("  No DeckOps offline scripts found.")
+sys.exit(2 if failed else 0)
+PYEOF
+    [ $? -eq 0 ] || { warn "Some DeckOps scripts in game folders were left in place."; FAILED=1; }
+    echo ""
+fi
+
 info "Removing DeckOps install directory and config..."
 
 DECKOPS_DIRS=(
     "$INSTALL_DIR"
-    "$HOME/.config/$XDG_ID"
 )
 [ "$XDG_ID" != "deckops" ] && DECKOPS_DIRS+=("$HOME/.local/share/$XDG_ID")
 if [ -n "$KEEP_OTHER" ]; then
@@ -3896,20 +4260,45 @@ else
     DECKOPS_DIRS+=("$HOME/.local/share/deckops")
 fi
 
+# This branch's config last: it holds the shortcuts snapshot and the applied
+# ledger a re-run needs if anything above failed.
+DECKOPS_DIRS+=("$HOME/.config/$XDG_ID")
+
 for d in "${DECKOPS_DIRS[@]}"; do
-    # save_backup.py writes here; keep it so a reinstall can restore saves
-    if [ -d "$d/save_backup" ]; then
-        find "$d" -mindepth 1 -maxdepth 1 ! -name save_backup -exec rm -rf {} + \
-            && success "Removed $d (kept save_backup/)" || warn "Failed to clean $d"
+    # save_backup.py writes here; keep it so a reinstall can restore saves.
+    # shared_dlls stays when a game prefix could not get its own copy.
+    keep=()
+    [ -d "$d/save_backup" ] && keep+=(save_backup)
+    [ -n "$KEEP_SHARED_DLLS" ] && [ "$d" = "$HOME/.local/share/deckops" ] \
+        && [ -d "$d/shared_dlls" ] && keep+=(shared_dlls)
+    if [ "${#keep[@]}" -gt 0 ]; then
+        find_args=()
+        for k in "${keep[@]}"; do find_args+=(! -name "$k"); done
+        if find "$d" -mindepth 1 -maxdepth 1 "${find_args[@]}" -exec rm -rf {} +; then
+            success "Removed $d (kept ${keep[*]})"
+        else
+            warn "Failed to clean $d"
+            FAILED=1
+        fi
     elif [ -d "$d" ]; then
-        rm -rf "$d" && success "Removed $d" || warn "Failed to remove $d"
+        if rm -rf "$d"; then
+            success "Removed $d"
+        else
+            warn "Failed to remove $d"
+            FAILED=1
+        fi
     else
         skip "$d -- not found"
     fi
 done
 echo ""
 
-echo -e "${GREEN}${BOLD}  DeckOps fully uninstalled.${CLEAR}"
+if [ "$FAILED" -ne 0 ]; then
+    echo -e "${YELLOW}${BOLD}  DeckOps uninstalled with warnings -- see above.${CLEAR}"
+    echo "  Fix what the warnings mention, or run the uninstaller again."
+else
+    echo -e "${GREEN}${BOLD}  DeckOps fully uninstalled.${CLEAR}"
+fi
 echo ""
 echo "  Your Steam games are untouched."
 echo "  Unrelated Plutonium data and backed-up saves were kept."
@@ -3929,10 +4318,13 @@ fi
 info "Uninstall complete."
 echo ""
 
+DONE_TEXT="DeckOps uninstalled."
+[ "$FAILED" -eq 0 ] || DONE_TEXT="DeckOps uninstalled with warnings. Some items could not be removed; see the terminal output."
+
 # Show summary dialog in background while countdown runs in terminal
 zenity --info \
     --title="$APP_TITLE Uninstaller" \
-    --text="DeckOps uninstalled.\n\nYour Steam games, unrelated Plutonium data and backed-up saves were kept.\nDeckOps-managed game files, shortcuts and controller profiles were cleaned where identifiable.${COD4_VERIFY_TEXT}\n\nPlease restart Steam for changes to take effect." \
+    --text="${DONE_TEXT}\n\nYour Steam games, unrelated Plutonium data and backed-up saves were kept.\nDeckOps-managed game files, shortcuts and controller profiles were cleaned where identifiable.${COD4_VERIFY_TEXT}\n\nPlease restart Steam for changes to take effect." \
     --timeout=12 \
     2>/dev/null &
 

@@ -30,6 +30,8 @@ _log = get_logger(__name__)
 
 _CDN_BASE = "https://cdn.alterware.ovh"
 
+LAUNCH_OPTION_NOT_SET = "launch option not set — launch the game once from Steam, then run Set Up again"
+
 
 def cdn_digests() -> dict:
     """{cdn_path: "sha1:<hex>"} from the CDN's files.json. Empty on failure
@@ -111,7 +113,10 @@ def install_sp_mod(game_key: str, install_dir: str, on_progress=None,
     if not own:
         from wrapper import set_launch_options, clear_launch_options
         clear_launch_options(steam_root, cfg["appid"])
-        set_launch_options(steam_root, cfg["appid"], build_sp_launch_option(game_key))
+        # 0 accounts written: the option is what swaps in iw-pad.exe, so
+        # the install has not worked
+        if not set_launch_options(steam_root, cfg["appid"], build_sp_launch_option(game_key)):
+            raise RuntimeError(LAUNCH_OPTION_NOT_SET)
     prog(100, "IW-Pad installed.")
 
 
@@ -239,8 +244,10 @@ def repair_sp_launch_options(steam_root: str, log=lambda m: None) -> list:
             continue
         log(f"  {key}: launch option is not DeckOps' IW-Pad one, setting it again")
         clear_launch_options(steam_root, appid)
-        set_launch_options(steam_root, appid, build_sp_launch_option(key))
-        fixed.append(key)
+        if set_launch_options(steam_root, appid, build_sp_launch_option(key)):
+            fixed.append(key)
+        else:
+            log(f"  ⚠ {key}: {LAUNCH_OPTION_NOT_SET}")
     return fixed
 
 

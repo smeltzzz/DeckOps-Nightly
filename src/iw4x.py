@@ -578,9 +578,13 @@ def install_iw4x(game: dict, steam_root: str,
             from steam_appinfo import add_launch_entries
             from steam_common import prelaunch_prefix
             clear_launch_options(steam_root, MW2_MP_APPID)
-            set_launch_options(steam_root, MW2_MP_APPID,
-                               'DECKOPS_MENU="iw4mp.exe=iw4x-launcher.exe" DECKOPS_MENU_ARGS="--arch x86" '
-                               f'{prelaunch_prefix("menu")}%command%')
+            if not set_launch_options(steam_root, MW2_MP_APPID,
+                                      'DECKOPS_MENU="iw4mp.exe=iw4x-launcher.exe" DECKOPS_MENU_ARGS="--arch x86" '
+                                      f'{prelaunch_prefix("menu")}%command%'):
+                # 0 accounts written. The launch menu below still adds Play IW4x,
+                # but plain Play no longer falls back to it.
+                prog(80, "  ⚠ launch option not set — launch the game once from Steam, "
+                         "then run Set Up again")
             if add_launch_entries(steam_root, MW2_MP_APPID, IW4X_MENU + [IW4X_STOCK_ENTRY]):
                 prog(80, "  ✓ Launch menu: Play IW4x")
             else:

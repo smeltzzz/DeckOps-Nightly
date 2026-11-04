@@ -250,8 +250,14 @@ def link_prefix(master: str, prefix_plut: str, info: dict, log=None) -> int:
     n = 0
     for d in SHARED_DIRS:
         src, dst = os.path.join(m, d), os.path.join(prefix_plut, d)
-        if os.path.isdir(src) and os.path.islink(dst) and os.path.realpath(dst) != src:
+        if not os.path.isdir(src):
+            continue
+        if os.path.islink(dst) and os.path.realpath(dst) != src:
             os.unlink(dst)
+            os.symlink(src, dst)
+            n += 1
+        elif not os.path.lexists(dst) and os.path.isdir(prefix_plut):
+            # The master gained a shared dir after this prefix was linked
             os.symlink(src, dst)
             n += 1
     for e in info["files"]:
