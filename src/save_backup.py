@@ -127,22 +127,31 @@ def _load_config() -> dict | None:
 
 
 def _find_all_compatdata_dirs(steam_root: str) -> list:
-    """Return all compatdata directories across all Steam library folders."""
-    dirs = []
-    main = os.path.join(steam_root, "steamapps", "compatdata")
-    if os.path.isdir(main):
-        dirs.append(main)
+    """Return all compatdata directories across all Steam library folders.
+
+    Deduplicated by real path, in discovery order: the Steam root is often a
+    symlink (~/.steam/steam -> ~/.local/share/Steam), and libraryfolders.vdf
+    lists the same library under its real path. Counting it twice shifted the
+    "<appid>@n" library indexes between backup and restore."""
+    dirs, seen = [], set()
+
+    def _add(cd):
+        if not os.path.isdir(cd):
+            return
+        real = os.path.realpath(cd)
+        if real not in seen:
+            seen.add(real)
+            dirs.append(cd)
+
+    _add(os.path.join(steam_root, "steamapps", "compatdata"))
 
     lf_vdf = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
     if os.path.isfile(lf_vdf):
         try:
-            import re
             with open(lf_vdf, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             for match in re.finditer(r'"path"\s+"([^"]+)"', content):
-                cd = os.path.join(match.group(1), "steamapps", "compatdata")
-                if os.path.isdir(cd) and cd not in dirs:
-                    dirs.append(cd)
+                _add(os.path.join(match.group(1), "steamapps", "compatdata"))
         except (OSError, ValueError):
             pass
 
@@ -151,8 +160,7 @@ def _find_all_compatdata_dirs(steam_root: str) -> list:
     for pattern in ["/run/media/*/*/steamapps/compatdata",
                     "/run/media/*/*/SteamLibrary/steamapps/compatdata"]:
         for d in glob.glob(pattern):
-            if os.path.isdir(d) and d not in dirs:
-                dirs.append(d)
+            _add(d)
 
     return dirs
 
@@ -239,14 +247,23 @@ def _plut_restore_dst(steam_root: str, group: dict, tag: str) -> str | None:
     # existing prefix on any library, else internal (DeckOps always creates Steam prefixes
     # on internal storage)
     appid, _, n = tag.partition("@")
-    existing = []
+    existing, seen = [], set()
     for compat_root in _find_all_compatdata_dirs(steam_root):
         path = _plut_storage(os.path.join(compat_root, appid), group["plut_store"])
-        if os.path.isdir(path):
+        real = os.path.realpath(path)
+        if os.path.isdir(path) and real not in seen:
+            seen.add(real)
             existing.append(path)
+    index = int(n) if n.isdigit() else 0
+    if index and index >= len(existing):
+        # That library's prefix is gone (SD card out, library removed). Falling
+        # back to existing[0] overwrote the main prefix's stats with another
+        # library's, so this backup is skipped instead.
+        _log.warning("save restore: no prefix for %s in library #%d (%d found), skipped",
+                     tag, index, len(existing))
+        return None
     if existing:
-        index = int(n) if n.isdigit() else 0
-        return existing[index] if index < len(existing) else existing[0]
+        return existing[index]
     return _plut_storage(os.path.join(steam_root, "steamapps", "compatdata", appid),
                          group["plut_store"])
 
@@ -268,10 +285,12 @@ def _detected_games() -> tuple:
         steam, own = {}, {}
         try:
             from detect_games import (find_steam_root, parse_library_folders,
-                                      find_installed_games, find_own_installed)
+                                      find_installed_games, find_own_installed_saved)
             sr = find_steam_root() or STEAM_ROOT_DEFAULT()
             steam = find_installed_games(parse_library_folders(sr), sr)
-            own = find_own_installed()
+            # Includes the Choose Folder picks: an own copy outside the default
+            # folders was otherwise never backed up or restored
+            own = find_own_installed_saved()
         except Exception:
             # Not remembered: a failed scan (Steam files mid-write, say) must not
             # make every later backup/restore in this session see "no games"
@@ -307,6 +326,33 @@ def _find_install_dir(keys: list, setup_games: dict, installed_games: dict = Non
             return d
 
     return None
+
+
+def _missing_own_keys(keys: list, setup_games: dict, installed_games: dict = None) -> list:
+    """Keys set up from an own copy whose game folder wasn't found (drive not
+    inserted, folder moved). Their saves can't be located, so the group's
+    backup is incomplete -- never "nothing to back up"."""
+    own = None
+    missing = []
+    for k in keys:
+        entry = setup_games.get(k)
+        if not isinstance(entry, dict) or entry.get("source") != "own":
+            continue
+        d = (installed_games or {}).get(k, {}).get("install_dir")
+        if d and os.path.isdir(d):
+            continue
+        if own is None:
+            own = _detected_games()[1]
+        if k not in own:
+            missing.append(k)
+    return missing
+
+
+def _report_missing_own(group: str, missing: list, prog):
+    _log.warning("save backup: %s — own copy not found for %s", group, missing)
+    prog(f"  ⚠ {group}: your own copy of the game ({', '.join(missing)}) was not found, so its "
+         "saves were not backed up. Insert the drive or use Choose Folder to point DeckOps "
+         "at your game folder.")
 
 
 def _copytree_safe(src: str, dst: str, group: str, prog):
@@ -528,6 +574,14 @@ def backup_saves(steam_root: str = None, on_progress=None,
 
         if group["type"] == "plutonium_prefix":
             dst = os.path.join(BACKUP_ROOT, group_name)
+            missing = _missing_own_keys(keys, setup_games, installed_games)
+            if missing:
+                # The own copy's prefix can't be located without its game
+                # folder. A backup without it would replace a complete earlier
+                # one, so the group is reported as not backed up instead.
+                _report_missing_own(group_name, missing, on_progress)
+                failed.append(group_name)
+                continue
             storages = _find_plutonium_storages(steam_root, group, setup_games)
             parts = {(tag, p): os.path.join(path, p) for tag, path in storages.items()
                      for p in _PLUT_USER_PARTS if os.path.isdir(os.path.join(path, p))}
@@ -554,6 +608,12 @@ def backup_saves(steam_root: str = None, on_progress=None,
             install_dir = _find_install_dir(keys, setup_games, installed_games)
             if install_dir:
                 src = os.path.join(install_dir, group["subdir"])
+            else:
+                missing = _missing_own_keys(keys, setup_games, installed_games)
+                if missing:
+                    _report_missing_own(group_name, missing, on_progress)
+                    failed.append(group_name)
+                    continue
 
         if not src or not os.path.isdir(src):
             _log.debug("save backup: %s — source not found", group_name)
@@ -682,7 +742,11 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
             for tag, src_root in sources.items():
                 tdst = _plut_restore_dst(steam_root, group, tag)
                 if not tdst:
-                    on_progress(f"  ⚠ {group_name}: {tag} game not found, skipped")
+                    if "@" in tag:
+                        on_progress(f"  ⚠ {group_name}: the Steam library these saves ({tag}) came "
+                                    "from was not found (SD card not inserted?), skipped")
+                    else:
+                        on_progress(f"  ⚠ {group_name}: {tag} game not found, skipped")
                     continue
                 for p in _PLUT_USER_PARTS:
                     src = os.path.join(src_root, p)

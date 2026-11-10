@@ -11,6 +11,7 @@ Both are best effort. A missing binary, bus or service is never fatal.
 """
 
 import atexit
+import os
 import subprocess
 
 from log import get_logger
@@ -18,7 +19,15 @@ from log import get_logger
 _log = get_logger(__name__)
 
 # Bounded so a leaked child can't hold the machine awake indefinitely.
-MAX_HOLD = "6h"
+MAX_HOLD = 6 * 3600
+POLL = 5
+
+# What systemd-inhibit runs while it holds the lock. A plain `sleep 6h` kept the
+# machine awake for hours after DeckOps crashed or was killed (atexit never ran).
+# This one also ends within POLL seconds of the DeckOps process ($1) going away.
+# It can't notice os.execv (the PID stays the same): call stop() before exec-ing.
+_WATCH = ('n=0; while [ "$n" -lt "$2" ] && kill -0 "$1" 2>/dev/null; '
+          'do sleep "$3"; n=$((n + 1)); done')
 
 _proc = None
 _cookie = None
@@ -88,7 +97,8 @@ def start(why="DeckOps is installing"):
                 ["systemd-inhibit",
                  "--what=idle:sleep:handle-lid-switch",
                  "--who=DeckOps", f"--why={why}", "--mode=block",
-                 "sleep", MAX_HOLD],
+                 "sh", "-c", _WATCH, "deckops-inhibit",
+                 str(os.getpid()), str(MAX_HOLD // POLL), str(POLL)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             _log.info("sleep inhibited (%s)", why)
         except Exception as ex:
@@ -100,13 +110,18 @@ def start(why="DeckOps is installing"):
 
 
 def stop():
-    """Release both locks. Safe to call when nothing is held."""
+    """Release both locks. Safe to call when nothing is held, and more than once.
+
+    Call it right before os.execv: exec runs no atexit handlers, and the
+    inhibitor child would otherwise stay with the new image.
+    """
     global _proc, _cookie, _busy
     _busy = None
     if _proc is not None:
         try:
-            _proc.terminate()
-            _proc.wait(timeout=5)
+            if _proc.poll() is None:
+                _proc.terminate()
+                _proc.wait(timeout=5)
         except Exception:
             try: _proc.kill()
             except Exception: pass

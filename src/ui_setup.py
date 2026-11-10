@@ -1,7 +1,10 @@
 """
 ui_setup.py — First-run setup flow for DeckOps
 
-Flow: [Autodetect Confirm] → OS → Device → Name → [Play Mode / Resolution] → Done
+Flow: [Autodetect Confirm] → OS → Device → Name → [Play Mode / Resolution] → Select Games
+
+The large DECKOPS / COMBAT on DECK title block is shown on the first step only;
+later steps use the compact step header so their choices fit on a Deck screen.
 
 When both OS and device are detected from DMI and os-release, a confirm
 screen lets the user accept with one click or fall through to the manual
@@ -18,7 +21,9 @@ from detect_hw import detect_os, detect_device
 from ui_constants import (
     C_CARD, C_LINE, C_TEXT, C_IW, C_TREY, C_DIM, C_DARK_BTN,
     font, _btn, _lbl, _title_block, _back_row,
-    go_to,
+    go_to, get_screen,
+    FONT_ACTION, BTN_MIN_H, LABELS,
+    _no_focus_scroll, _focus_first,
 )
 
 
@@ -36,7 +41,7 @@ DEVICES = {
     "legion_go_2":  {"label": "Lenovo Legion Go 2",   "deck_model": "other", "other_device": "1920x1200_144hz", "other_device_type": "legion_go_2","has_gyro": True},
     "rog_ally":     {"label": "ROG Ally",              "deck_model": "other", "other_device": "1920x1080",       "other_device_type": "2btn",       "has_gyro": True},
     "rog_ally_x":   {"label": "ROG Ally X",            "deck_model": "other", "other_device": "1920x1080",       "other_device_type": "2btn",       "has_gyro": True},
-    "xbox_ally_x":  {"label": "ROG Xbox Ally X",       "deck_model": "other", "other_device": "1920x1080",       "other_device_type": "2btn",       "has_gyro": True},
+    "xbox_ally_x":  {"label": "ROG Xbox Ally",         "deck_model": "other", "other_device": "1920x1080",       "other_device_type": "2btn",       "has_gyro": True},
     "msi_claw_8":   {"label": "MSI Claw 8",           "deck_model": "other", "other_device": "1920x1200",       "other_device_type": "2btn",       "has_gyro": True},
     "rp6":          {"label": "Retroid Pocket 6",     "deck_model": "other", "other_device": "1920x1080",       "other_device_type": "generic",    "has_gyro": False},
     "general_pc":   {"label": "Desktop / laptop PC",   "deck_model": "other", "other_device": None,              "other_device_type": "generic",    "has_gyro": True},
@@ -48,12 +53,13 @@ DEVICES = {
 # Texts used on more than one setup screen
 _INTRO = ("DeckOps sets up community clients and display settings for your Call of Duty "
           "games. On Steam Deck it also applies one bundled Steam Input layout.")
+# (The bundled fonts have no ⚠, so the notes use a plain bullet.)
 _NOTES = [
-    "⚠   DeckOps creates the Proton prefixes for your games. You don't need to launch each "
+    "•   DeckOps creates the Proton prefixes for your games. You don't need to launch each "
     "game through Steam first.",
-    "⚠   To play Plutonium games online (WaW, BO1, BO2, MW3), create a free account at "
+    "•   To play Plutonium games online (WaW, BO1, BO2, MW3), create a free account at "
     "plutonium.pw before you continue.",
-    "⚠   Use a stable internet connection. If the install fails, don't re-run it again and "
+    "•   Use a stable internet connection. If the install fails, don't re-run it again and "
     "again; ask for help on the Discord instead.",
 ]
 class SetupFlowScreen(QWidget):
@@ -75,6 +81,7 @@ class SetupFlowScreen(QWidget):
         self._choosing_native_resolution = False
         self._has_entered = False
         self._scrolls = {}
+        self._primary = {}      # section -> its first choice, focused when the step shows
 
         main_lay = QVBoxLayout(self)
         self._main_lay = main_lay
@@ -133,6 +140,7 @@ class SetupFlowScreen(QWidget):
         change_btn.clicked.connect(self._reject_autodetect)
         crow.addWidget(yes_btn); crow.addWidget(change_btn)
         cl.addLayout(crow)
+        self._primary["_confirm_section"] = yes_btn
         cl.addSpacing(12)
         cl.addWidget(_lbl(_INTRO, 13, C_DIM))
         for warn in _NOTES:
@@ -163,6 +171,7 @@ class SetupFlowScreen(QWidget):
             b = _btn(label, C_IW, h=48)
             b.clicked.connect(lambda checked, k=os_key: self._pick_os(k))
             os_row.addWidget(b)
+            self._primary.setdefault("_os_section", b)
         lay.addLayout(os_row)
         lay.addSpacing(12)
         lay.addWidget(_lbl(_INTRO, 13, C_DIM))
@@ -175,8 +184,6 @@ class SetupFlowScreen(QWidget):
         ml = QVBoxLayout(self._model_section)
         ml.setContentsMargins(28, 18, 28, 18); ml.setSpacing(16)
         self._back_os_btn = _back_row(ml, self._back_to_os)
-        ml.addSpacing(12)
-        _title_block(ml, main_size=32)
         ml.addWidget(_lbl("Which device do you have?", 15, C_TEXT))
         ml.addSpacing(12)
         mrow = QHBoxLayout(); mrow.setSpacing(20)
@@ -189,6 +196,7 @@ class SetupFlowScreen(QWidget):
         sm_btn.clicked.connect(lambda: self._pick_device("steam_machine"))
         other_btn.clicked.connect(self._show_device_picker)
         mrow.addWidget(lcd_btn); mrow.addWidget(oled_btn)
+        self._primary["_model_section"] = lcd_btn
         ml.addLayout(mrow)
         mrow2 = QHBoxLayout(); mrow2.setSpacing(12)
         mrow2.addWidget(sm_btn); mrow2.addWidget(other_btn)
@@ -201,8 +209,6 @@ class SetupFlowScreen(QWidget):
         dvl = QVBoxLayout(self._device_section)
         dvl.setContentsMargins(28, 18, 28, 18); dvl.setSpacing(16)
         self._back_model_btn = _back_row(dvl, self._back_to_model)
-        dvl.addSpacing(12)
-        _title_block(dvl, main_size=32)
         dvl.addWidget(_lbl("Select your device", 15, C_TEXT))
         dvl.addSpacing(4)
         dvl.addWidget(_lbl(
@@ -220,6 +226,7 @@ class SetupFlowScreen(QWidget):
             b = _btn(DEVICES[dev_key]["label"], C_DARK_BTN, h=48)
             b.clicked.connect(lambda checked, k=dev_key: self._pick_device(k))
             col_lenovo.addWidget(b)
+            self._primary.setdefault("_device_section", b)
         dev_cols.addLayout(col_lenovo)
 
         # Middle column: ASUS
@@ -262,8 +269,6 @@ class SetupFlowScreen(QWidget):
         nl = QVBoxLayout(self._name_section)
         nl.setContentsMargins(28, 18, 28, 18); nl.setSpacing(16)
         self._back_name_btn = _back_row(nl, self._back_to_device_from_name)
-        nl.addSpacing(12)
-        _title_block(nl, main_size=32)
         nl.addWidget(_lbl("What's your player name?", 15, C_TEXT))
         nl.addSpacing(4)
         nl.addWidget(_lbl(
@@ -284,7 +289,8 @@ class SetupFlowScreen(QWidget):
         )
         nl.addWidget(self._name_input)
         nl.addSpacing(16)
-        name_cont = _btn("Continue >>", C_IW, h=52)
+        name_cont = _btn(LABELS["continue"], C_IW, h=52)
+        self._primary["_name_section"] = name_cont
         name_cont.setFixedWidth(260)
         name_cont.clicked.connect(self._save_player_name)
         nc_row = QHBoxLayout(); nc_row.addStretch(); nc_row.addWidget(name_cont); nc_row.addStretch()
@@ -297,8 +303,6 @@ class SetupFlowScreen(QWidget):
         rl = QVBoxLayout(self._resolution_section)
         rl.setContentsMargins(28, 18, 28, 18); rl.setSpacing(16)
         self._back_res_btn = _back_row(rl, self._back_to_prev_from_res)
-        rl.addSpacing(12)
-        _title_block(rl, main_size=32)
         self._res_title_lbl = _lbl("What resolution is your display?", 15, C_TEXT)
         rl.addWidget(self._res_title_lbl)
         rl.addSpacing(4)
@@ -315,6 +319,7 @@ class SetupFlowScreen(QWidget):
             b = _btn(label, C_DARK_BTN, h=52)
             b.clicked.connect(lambda checked, k=res_key: self._pick_resolution(k))
             col_1610.addWidget(b)
+            self._primary.setdefault("_resolution_section", b)
         res_cols.addLayout(col_1610)
 
         col_169 = QVBoxLayout(); col_169.setSpacing(10)
@@ -341,8 +346,6 @@ class SetupFlowScreen(QWidget):
         pl = QVBoxLayout(self._play_section)
         pl.setContentsMargins(28, 18, 28, 18); pl.setSpacing(16)
         self._back_play_btn = _back_row(pl, self._back_to_prev_from_play)
-        pl.addSpacing(12)
-        _title_block(pl, main_size=32)
         pl.addWidget(_lbl("How do you play?", 15, C_TEXT))
         pl.addSpacing(4)
         pl.addWidget(_lbl(
@@ -356,6 +359,7 @@ class SetupFlowScreen(QWidget):
         hh_btn.clicked.connect(lambda: self._pick_play_mode("handheld"))
         dk_btn.clicked.connect(lambda: self._pick_play_mode("docked"))
         prow.addWidget(hh_btn); prow.addWidget(dk_btn)
+        self._primary["_play_section"] = hh_btn
         pl.addLayout(prow)
         pl.addSpacing(12)
         self._register_step("_play_section")
@@ -372,7 +376,9 @@ class SetupFlowScreen(QWidget):
         footer = QWidget(self)
         footer_lay = QHBoxLayout(footer)
         footer_lay.setContentsMargins(24, 8, 24, 10)
-        self._footer_back = _btn("Back to previous step", C_DARK_BTN, size=12, h=38)
+        self._footer_back = _btn(LABELS["back"], C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        self._footer_back.setMinimumWidth(120)
+        self._footer_back.setAccessibleName("Back to the previous step")
         self._footer_back.clicked.connect(self._go_back)
         footer_lay.addWidget(self._footer_back)
         footer_lay.addStretch()
@@ -383,6 +389,7 @@ class SetupFlowScreen(QWidget):
 
     def _register_step(self, name):
         area = QScrollArea(self)
+        _no_focus_scroll(area)
         area.setWidgetResizable(True)
         area.setFrameShape(QScrollArea.Shape.NoFrame)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -409,6 +416,16 @@ class SetupFlowScreen(QWidget):
         self._progress.setValue(progress)
         self._progress.setAccessibleDescription(f"{label}, {progress}% through setup")
         self._footer_back.setVisible(section_name not in ("_confirm_section", "_os_section"))
+        # A new step starts on its first choice, not on Back (deferred: no-op while hidden)
+        _focus_first([self._primary.get(section_name)])
+
+    # ── Controller protocol (see ui_constants) ─────────────────────────────────────────
+    def focus_target(self):
+        return self._primary.get(getattr(self, "_current_section", None))
+
+    def back_action(self):
+        # Same as the footer Back; the first step has nowhere to go back to
+        self._go_back()
 
     def _go_back(self):
         back = {
@@ -585,5 +602,13 @@ class SetupFlowScreen(QWidget):
     # ── Finish ────────────────────────────────────────────────────────────
 
     def _finish(self):
-        # Setup hands straight over to the game scan; there is no optional-mods step.
-        go_to(self.stack, "WelcomeScreen" if cfg.is_first_run() else "ManagementScreen")
+        # Setup hands straight over to Select Games, which scans for games inline
+        # (the separate results screen is gone); there is no optional-mods step.
+        if not cfg.is_first_run():
+            go_to(self.stack, "ManagementScreen")
+            return
+        select = get_screen(self.stack, "SetupScreen")
+        if select is not None:
+            select._from_manage = False
+            select._scan_pending = True
+        go_to(self.stack, "SetupScreen")

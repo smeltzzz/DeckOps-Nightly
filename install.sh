@@ -41,7 +41,10 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 BRANCH=""
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
+# Only a sibling that is part of a DeckOps tree we own: a script run from /tmp
+# must never source a deckops_identity.sh someone else left there.
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/deckops_identity.sh" ] && \
+   [ -O "$SCRIPT_DIR/deckops_identity.sh" ] && [ -f "$SCRIPT_DIR/src/identity.py" ]; then
     source "$SCRIPT_DIR/deckops_identity.sh"
 elif [ -f "$HOME/DeckOps-Nightly/deckops_identity.sh" ]; then
     source "$HOME/DeckOps-Nightly/deckops_identity.sh"

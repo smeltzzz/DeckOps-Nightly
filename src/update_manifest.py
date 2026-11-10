@@ -48,6 +48,50 @@ def update_lock(install_dir):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+INSTANCE_LOCK = ".deckops_instance.lock"
+
+
+def instance_lock(install_dir, wait=2.0):
+    """Hold the "DeckOps is open" lock for the life of this process.
+
+    Returns the open file that holds it: keep a reference, the lock lasts as
+    long as the file stays open (it is closed on exec, so a relaunch through
+    os.execv lets go and the new image takes it again). Returns None where
+    locking is unavailable (Windows, a lock file that can't be opened, a
+    filesystem without flock): DeckOps then opens as it did before the lock.
+    Raises BlockingIOError if another DeckOps still holds it after `wait`
+    seconds; the short wait covers an old image that is still letting go.
+    launcher.sh tests the same file with `flock -n`.
+    """
+    if os.name != "posix":
+        return None
+    import fcntl
+    import time
+    path = Path(install_dir) / INSTANCE_LOCK
+    try:
+        stream = open(path, "a+")
+    except PermissionError:
+        try:
+            stream = open(path, "r")
+        except OSError:
+            return None
+    except OSError:
+        return None
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return stream
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                stream.close()
+                raise
+            time.sleep(0.1)
+        except OSError:
+            stream.close()
+            return None
+
+
 def upgrade_desktop_entries(install_dir, home=None):
     """Point desktop icons made by older installers at `launcher.sh --desktop`.
 
@@ -93,20 +137,35 @@ def upgrade_desktop_entries(install_dir, home=None):
     return changed
 
 
-def _path(value):
+def _protected(value):
+    """Player data and the version marker: an update never writes or deletes these."""
+    return value.startswith("logs/") or value in _PROTECTED
+
+
+def _path(value, allow_protected=False):
     if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value:
         raise ValueError("invalid update path")
     if any(part in ("", ".", "..") for part in value.split("/")) or any(ord(c) < 32 for c in value):
         raise ValueError("unsafe update path")
     if ":" in value.split("/")[0]:
         raise ValueError("unsafe update path")
-    if value.startswith("logs/") or value in _PROTECTED or value == ".update" or value.startswith(".update/"):
+    # The update's own staging area is never a legitimate repo path
+    if value == ".update" or value.startswith(".update/"):
+        raise ValueError("protected update path")
+    if not allow_protected and _protected(value):
         raise ValueError("protected update path")
     return value
 
 
 def compare(data):
-    """Yield (M|D, path, blob SHA) from a complete GitHub comparison."""
+    """Yield (M|D, path, blob SHA) from a complete GitHub comparison.
+
+    Paths an update never touches (VERSION, deckops.json, logs, music) are
+    left out: the repo tracks VERSION, and refusing the whole comparison over
+    it sent every such update down the slow full-archive path. Unsafe paths
+    still reject the comparison. An empty result is a valid comparison: there
+    is nothing to download, only the new version to record.
+    """
     files = data.get("files")
     if not isinstance(files, list) or data.get("status") not in ("ahead", "identical"):
         raise ValueError("incomplete GitHub comparison")
@@ -114,19 +173,25 @@ def compare(data):
     if len(files) >= 300:
         raise ValueError("GitHub comparison may be truncated")
     for entry in files:
+        if not isinstance(entry, dict):
+            raise ValueError("incomplete GitHub comparison")
         status = entry.get("status")
-        path = _path(entry.get("filename"))
+        path = _path(entry.get("filename"), allow_protected=True)
         if status == "removed":
-            yield "D", path, "-"
+            if not _protected(path):
+                yield "D", path, "-"
             continue
         if status == "renamed":
-            yield "D", _path(entry.get("previous_filename")), "-"
+            previous = _path(entry.get("previous_filename"), allow_protected=True)
+            if not _protected(previous):
+                yield "D", previous, "-"
         elif status not in ("added", "modified", "changed", "copied"):
             raise ValueError(f"unknown GitHub change status: {status}")
         sha = entry.get("sha", "")
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):
             raise ValueError("GitHub comparison omitted a file hash")
-        yield "M", path, sha
+        if not _protected(path):
+            yield "M", path, sha
 
 
 def tree_paths(data):
@@ -433,8 +498,10 @@ if __name__ == "__main__":
                         previous = [line.rstrip("\n") for line in stream if line.strip()]
                 apply_update(install_dir, staged, sha, full=True, previous_files=previous)
             else:
+                # An empty list (nothing but VERSION or player files changed) is valid:
+                # the update then only records the new version.
                 with open(changes, encoding="utf-8") as stream:
-                    rows = [line.rstrip("\n").split("\t") for line in stream]
+                    rows = [line.rstrip("\n").split("\t") for line in stream if line.strip()]
                 apply_update(install_dir, staged, sha, rows)
         else:
             raise ValueError("invalid update command")

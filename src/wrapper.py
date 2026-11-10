@@ -224,8 +224,14 @@ def _localconfigs(steam_root):
             continue
         # surrogateescape: bytes that aren't UTF-8 are carried through an edit
         # unchanged (errors="replace" turned them into U+FFFD on write)
-        with open(vdf_path, "r", encoding="utf-8", errors="surrogateescape") as f:
-            content = f.read()
+        try:
+            with open(vdf_path, "r", encoding="utf-8", errors="surrogateescape") as f:
+                content = f.read()
+        except OSError as ex:
+            # One unreadable user's file must not stop launch-option edits
+            # for every other user on the device.
+            _log.warning("Could not read localconfig.vdf for user %s (%s): %s", uid, vdf_path, ex)
+            continue
         yield uid, vdf_path, content
 
 

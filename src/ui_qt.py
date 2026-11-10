@@ -5,7 +5,7 @@ Slim shell: BootstrapScreen, DeckOpsWindow, and run().
 All screen classes are imported from split modules:
     ui_constants  — shared constants, helpers, navigation
     ui_setup      — first-run setup flow (OS → Device → Gyro → ...)
-    ui_install    — install pipeline (Welcome, Setup, Install)
+    ui_install    — install pipeline (Select Games with the first-run scan, Install)
     ui_manage     — post-install (Management, Configure, SetupComplete, Update)
 """
 
@@ -19,14 +19,15 @@ import inhibit
 from identity import APP_TITLE
 
 from ui_constants import (
-    C_CARD, C_DIM, C_DARK_BTN, C_LINE, C_TEXT, font, _lbl, _title_block,
+    C_CARD, C_DIM, C_DARK_BTN, C_FOCUS, C_LINE, C_TEXT, font, _lbl, _title_block,
     _load_font, _app_style, _start_audio, _kill_audio,
     _set_audio_enabled, _clean_enabled,
-    go_to, get_screen,
+    go_to, get_screen, screen_title, install_controller_nav, _ensure_focus_in,
+    FONT_BODY, FOCUS_RING_W,
 )
 
 from ui_setup import SetupFlowScreen
-from ui_install import WelcomeScreen, SetupScreen, InstallScreen
+from ui_install import SetupScreen, InstallScreen
 from ui_manage import ManagementScreen, ConfigureScreen, SetupCompleteScreen, UpdateScreen
 
 
@@ -98,7 +99,6 @@ class DeckOpsWindow(QMainWindow):
         for cls in [
             BootstrapScreen,
             SetupFlowScreen,
-            WelcomeScreen,
             SetupScreen,
             InstallScreen,
             ManagementScreen,
@@ -113,46 +113,65 @@ class DeckOpsWindow(QMainWindow):
         # A compact status strip owns the persistent music control. Unlike the
         # old floating button it never covers a wizard action or a result card.
         strip = QStatusBar(self)
-        strip.setFixedHeight(38)
+        strip.setFixedHeight(48)        # room for the 40px music button
         strip.setSizeGripEnabled(False)
         strip.setStyleSheet(
             f"QStatusBar{{background:{C_CARD};border-top:1px solid {C_LINE};}}"
             f"QStatusBar QLabel{{background:transparent;color:{C_DIM};padding:0 10px;}}")
         self.setStatusBar(strip)
         self._screen_label = QLabel()
-        self._screen_label.setFont(font(9, bold=True))
+        self._screen_label.setFont(font(FONT_BODY, bold=True))
         strip.addWidget(self._screen_label)
         self._dbg_label = QLabel()
-        self._dbg_label.setFont(font(9))
+        self._dbg_label.setFont(font(FONT_BODY))
         strip.addPermanentWidget(self._dbg_label)
         self._dbg_label.setVisible(os.environ.get("DECKOPS_DEBUG") == "1")
 
         self._muted = not _clean_enabled(cfg.get_music_enabled())
         self._mute_btn = QPushButton(self)
-        self._mute_btn.setFixedSize(112, 30)
-        self._mute_btn.setFont(font(10, bold=True))
+        self._mute_btn.setFixedSize(124, 40)
+        self._mute_btn.setFont(font(FONT_BODY, bold=True))
         self._mute_btn.setStyleSheet(
-            f"QPushButton{{background:{C_DARK_BTN};color:{C_TEXT};border:1px solid {C_LINE};"
-            "border-radius:6px;padding:0 8px;}"
-            "QPushButton:hover,QPushButton:focus{border:2px solid #FFFFFF;}")
+            f"QPushButton{{background:{C_DARK_BTN};color:{C_TEXT};"
+            f"border:{FOCUS_RING_W}px solid {C_LINE};border-radius:6px;padding:0 8px;}}"
+            f"QPushButton:hover{{border-color:{C_DIM};}}"
+            f"QPushButton:focus{{border:{FOCUS_RING_W}px solid {C_FOCUS};}}")
         self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Reachable with Tab / D-pad, but a click or tap must not park focus on
+        # it: it used to be the first focus on every screen, so A toggled music.
+        self._mute_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self._mute_btn.setAutoDefault(True)
         self._mute_btn.clicked.connect(self._toggle_mute)
         strip.addPermanentWidget(self._mute_btn)
         self._sync_mute_button()
         self.stack.currentChanged.connect(self._update_dbg_label)
+        self.stack.currentChanged.connect(self._land_focus)
         self._update_dbg_label(0)
+        # Controller (D-pad / A / B) navigation for the whole app
+        install_controller_nav(QApplication.instance(), scope=self)
+        QApplication.instance().focusChanged.connect(self._focus_moved)
+
+    def _focus_moved(self, old, new):
+        # When the focused widget is hidden (a setup step swapped out, a button
+        # hidden after use) Qt passes focus to the next widget in the chain, and
+        # that was usually the music button, so A then toggled music. Send that
+        # fallback focus back into the current screen instead; a deliberate Tab /
+        # D-pad move onto the button (old still visible) is left alone.
+        try:
+            if new is self._mute_btn and (old is None or not old.isVisible()):
+                _ensure_focus_in(self.stack.currentWidget())
+        except RuntimeError:
+            pass
+
+    def _land_focus(self, idx):
+        # Screens may set their own focus (focus_target / _focus_first in showEvent);
+        # this only fills in when the new screen still has nothing focused.
+        _ensure_focus_in(self.stack.widget(idx))
 
     def _update_dbg_label(self, idx):
         w = self.stack.widget(idx)
         name = getattr(w, "screen_name", w.__class__.__name__)
-        titles = {
-            "BootstrapScreen": "OPENING", "SetupFlowScreen": "DEVICE SETUP",
-            "WelcomeScreen": "FIND GAMES",
-            "SetupScreen": "SELECT GAMES", "InstallScreen": "INSTALLATION",
-            "ManagementScreen": "GAME LIBRARY", "ConfigureScreen": "SETTINGS",
-            "SetupCompleteScreen": "GUIDE", "UpdateScreen": "GAME UPDATES",
-        }
-        self._screen_label.setText(titles.get(name, name.upper()))
+        self._screen_label.setText(screen_title(name).upper())
         self._dbg_label.setText(f"[{idx}] {name}")
         self._muted = not _clean_enabled(cfg.get_music_enabled())
         self._sync_mute_button()
@@ -209,6 +228,7 @@ def run():
         get_logger(__name__).warning("bundled font missing, using the system font: %s", ex)
     app.setFont(font(11))
     app.setStyleSheet(_app_style())
+    install_controller_nav(app)     # DeckOpsWindow also does this; idempotent
     win = DeckOpsWindow()
     # With a sys.excepthook set, PyQt no longer aborts on an error in a slot;
     # this adds the dialog so the user knows something failed

@@ -681,6 +681,14 @@ def _saved_extra_paths():
         return []
 
 
+def find_own_installed_saved(on_progress=None):
+    """find_own_installed() over the default folders plus the Choose Folder
+    picks saved in deckops.json. Use this anywhere outside the scan screen
+    (backup/restore, Repair Shortcuts, controller profiles) so an own copy
+    the player pointed DeckOps at is found the same way find_all_games finds it."""
+    return find_own_installed(extra_paths=_saved_extra_paths() or None, on_progress=on_progress)
+
+
 def find_all_games(steam_root=None, preferred_sources=None, extra_paths=None):
     """Detect both sources, preferring Steam unless a configured game uses an own copy.
 

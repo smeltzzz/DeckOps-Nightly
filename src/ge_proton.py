@@ -243,8 +243,11 @@ def install_ge_proton(on_progress=None, steam_root: str | None = None):
             _log.warning("%s has no checksum file, downloading unverified", dir_name)
 
         prog(10, f"Downloading {dir_name}...")
-        download(tarball_url, tarball_path, on_progress=on_progress, label=dir_name,
-                 digest=digest)
+        # Scaled into the 10..85 band: passing the caller's callback straight
+        # through ran the bar 0->100 for the download, then back to 87
+        download(tarball_url, tarball_path,
+                 on_progress=lambda p, m: prog(10 + int(p) * 75 // 100, m),
+                 label=dir_name, digest=digest)
 
         prog(87, f"Extracting {dir_name}...")
         _extract_atomically(tarball_path, dir_name, steam_root=steam_root)

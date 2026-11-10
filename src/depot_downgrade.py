@@ -798,6 +798,29 @@ def qr_text_to_pixmap(qr_text: str, scale: int = 6):
         return None
 
 
+class DownloadCancelled(Exception):
+    """Raised by run_depot_download_qr when its cancel() callback returns True."""
+
+
+def _watch_cancel(proc, cancel, stop_watch: threading.Event, interval: float = 0.25):
+    # DepotDownloader can sit silent for minutes while it waits for a QR scan,
+    # so a cancel checked only between output lines could take that long.
+    while not stop_watch.wait(interval):
+        if proc.poll() is not None:
+            return
+        try:
+            cancelled = cancel()
+        except Exception:
+            _log.debug("cancel check failed", exc_info=True)
+            continue
+        if cancelled:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            return
+
+
 def run_depot_download_qr(
     staging_dir: str,
     depot_info: dict,
@@ -808,6 +831,7 @@ def run_depot_download_qr(
     app_id: int | None = None,
     username: str | None = None,
     max_retries: int | None = MAX_QR_RETRIES,
+    cancel=None,
 ) -> str | None:
     """
     Run DepotDownloader for a single depot with QR code authentication.
@@ -819,7 +843,23 @@ def run_depot_download_qr(
     error DepotDownloader words differently than _DD_ERROR_KEYWORDS expects
     cannot leave the user in an endless "QR code expired" loop whose only
     exit is killing DeckOps.
+
+    Returns None on failure. On success it returns the username to reuse for
+    the next depot, or "" when DepotDownloader did not print one (the caller
+    then logs the next depot in by QR again).
+
+    cancel, if given, is polled about four times a second; once it returns
+    True, DepotDownloader is killed and DownloadCancelled is raised (never
+    swallowed into a None "failure"), so the caller can report a skip.
     """
+    def _cancelled() -> bool:
+        if cancel is None:
+            return False
+        try:
+            return bool(cancel())
+        except Exception:
+            return False
+
     os.makedirs(staging_dir, exist_ok=True)
 
     effective_app = depot_info.get("app") or app_id
@@ -830,6 +870,8 @@ def run_depot_download_qr(
     attempt = 0
     while True:
         attempt += 1
+        if _cancelled():
+            raise DownloadCancelled()
 
         cmd = [
             DEPOTDOWNLOADER_BIN,
@@ -854,6 +896,8 @@ def run_depot_download_qr(
 
         captured_username = None
         auth_succeeded = False
+        downloaded = False
+        qr_expired = False
         error_lines = []
         last_output = [time.monotonic()]
         stalled = [False]
@@ -877,6 +921,9 @@ def run_depot_download_qr(
             )
             threading.Thread(target=_watch_stall, daemon=True,
                              args=(proc, staging_dir, last_output, stalled, stop_watch)).start()
+            if cancel is not None:
+                threading.Thread(target=_watch_cancel, daemon=True,
+                                 args=(proc, cancel, stop_watch)).start()
 
             qr_lines = []
             reading_qr = False
@@ -913,12 +960,19 @@ def run_depot_download_qr(
                     continue
 
                 if "Got depot key" in line:
+                    downloaded = True
                     on_progress(f"Downloading depot {depot_info['depot']}...")
                     on_log(line)
                 elif "%" in line and ("download" in line.lower() or
                                       "/" in line):
+                    downloaded = True
                     on_progress(line.strip())
                 else:
+                    low = line.lower()
+                    if "total downloaded" in low or "download complete" in low:
+                        downloaded = True
+                    if "qr" in low and ("expired" in low or "timed out" in low):
+                        qr_expired = True
                     stripped = line.strip()
                     if stripped and not _is_qr_line(line):
                         error_lines.append(stripped)
@@ -926,6 +980,9 @@ def run_depot_download_qr(
 
             proc.wait()
             stop_watch.set()
+
+            if _cancelled():
+                raise DownloadCancelled()
 
             if stalled[0]:
                 on_log(f"DepotDownloader stopped responding (no progress for "
@@ -948,6 +1005,18 @@ def run_depot_download_qr(
                 for el in error_lines
             )
 
+            # A clean exit that downloaded the depot is a success even when
+            # DepotDownloader never printed its "Success! ... -username X
+            # -remember-password" hint (versions word it differently, or skip it
+            # when nothing new is remembered). Treating that as an expired QR
+            # code re-ran the whole download up to MAX_QR_RETRIES times and then
+            # reported failure. "" (not None) tells the caller it succeeded but
+            # there is no username to reuse, so its next depot logs in by QR.
+            if (proc.returncode == 0 and downloaded and not real_error
+                    and not qr_expired):
+                on_log(f"Depot {depot_info['depot']} download complete.")
+                return captured_username or ""
+
             if real_error or (auth_succeeded and proc.returncode != 0):
                 on_log(f"DepotDownloader failed (exit code {proc.returncode}).")
                 for el in error_lines[-10:]:
@@ -959,6 +1028,14 @@ def run_depot_download_qr(
                     )
                 return None
 
+            if downloaded and not qr_expired:
+                # It got past login and started downloading, then failed: a new
+                # QR code would not help, and the partial files stay for a retry.
+                on_log(f"DepotDownloader stopped during the download (exit code {proc.returncode}).")
+                for el in error_lines[-10:]:
+                    on_log(f"  {el}")
+                return None
+
             # `0` means "do not retry" and None means "no cap": the old
             # `max_retries > 0` test turned both into an endless loop.
             if max_retries is not None and attempt >= max_retries:
@@ -967,7 +1044,13 @@ def run_depot_download_qr(
 
             on_log("QR code expired. Generating a new one...")
 
+        except DownloadCancelled:
+            raise
         except Exception as ex:
+            if _cancelled():
+                # A callback raised because the user cancelled (or the read broke
+                # when the watcher killed DepotDownloader): a skip, not a failure.
+                raise DownloadCancelled() from ex
             on_log(f"DepotDownloader error: {ex}")
             _log.exception("DepotDownloader failed")
             return None

@@ -234,6 +234,43 @@ def safe_manifest_path(root: str, relative: str) -> str:
     return current
 
 
+ROLLBACK_PREFIX = ".deckops_rollback_"
+ROLLBACK_KEEP_MARKER = "DECKOPS_KEEP"
+# A rollback folder younger than this may belong to a commit still running in
+# another process, so the sweep leaves it for a later run
+ROLLBACK_STALE_AGE = 15 * 60
+
+
+def _sweep_stale_rollbacks(install_dir: str):
+    """Remove rollback folders left by a commit that was killed mid-way.
+
+    The finally below never runs when the process dies (prelaunch timeout,
+    power button), so each such kill used to leave a backup folder in the game
+    directory for good. Folders marked as kept after a failed rollback hold the
+    user's only originals and are never touched.
+    """
+    try:
+        names = os.listdir(install_dir)
+    except OSError:
+        return
+    now = time.time()
+    for name in names:
+        if not name.startswith(ROLLBACK_PREFIX):
+            continue
+        path = os.path.join(install_dir, name)
+        try:
+            if os.path.islink(path) or not os.path.isdir(path):
+                continue
+            if os.path.lexists(os.path.join(path, ROLLBACK_KEEP_MARKER)):
+                continue
+            if now - os.path.getmtime(path) < ROLLBACK_STALE_AGE:
+                continue
+            shutil.rmtree(path)
+            _log.info("removed stale update backup %s", path)
+        except OSError:
+            _log.warning("could not remove stale update backup %s", path, exc_info=True)
+
+
 def commit_staged_files(install_dir: str, staged_dir: str, files, remove=()):
     """Replace a set of staged files, restoring originals on a failed commit.
 
@@ -248,7 +285,8 @@ def commit_staged_files(install_dir: str, staged_dir: str, files, remove=()):
     for source, _ in writes:
         if not os.path.isfile(source):
             raise ValueError(f"missing staged file: {source}")
-    backup_dir = tempfile.mkdtemp(prefix=".deckops_rollback_", dir=install_dir)
+    _sweep_stale_rollbacks(install_dir)
+    backup_dir = tempfile.mkdtemp(prefix=ROLLBACK_PREFIX, dir=install_dir)
     backups = {}
     changed = []
     keep_backups = False
@@ -294,6 +332,13 @@ def commit_staged_files(install_dir: str, staged_dir: str, files, remove=()):
                     restore_error = ex
             if restore_error:
                 keep_backups = True
+                # Marks the folder as deliberately kept so the stale-folder
+                # sweep at the next commit leaves the user's originals alone
+                try:
+                    with open(os.path.join(backup_dir, ROLLBACK_KEEP_MARKER), "w", encoding="utf-8") as f:
+                        f.write("Rollback incomplete; these are the original files.\n")
+                except OSError:
+                    _log.warning("could not mark %s as kept", backup_dir, exc_info=True)
                 raise RuntimeError(f"Rollback incomplete; originals kept in {backup_dir}") from restore_error
             raise
     finally:

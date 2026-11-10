@@ -236,7 +236,7 @@ def assign_controller_profiles(gyro_mode=None, on_progress=None):
 
     # Own-copy shortcuts use appids derived from their executable paths.
     try:
-        from detect_games import find_own_installed
+        from detect_games import find_own_installed_saved
         from shortcut import OWN_SHORTCUTS, own_shortcut_exe
         import config as cfg
         setup = cfg.get_setup_games() or {}
@@ -244,7 +244,9 @@ def assign_controller_profiles(gyro_mode=None, on_progress=None):
         # scan finds (or a game set up from Steam) must not get a layout.
         own_keys = {k for k, e in setup.items()
                     if isinstance(e, dict) and e.get("source") == "own"}
-        for key, game in (find_own_installed() or {}).items():
+        # Choose Folder picks included: an own copy outside the default
+        # folders has a shortcut too
+        for key, game in (find_own_installed_saved() or {}).items():
             if key not in OWN_SHORTCUTS or key not in own_keys or not game.get("exe_path"):
                 continue
             if key == "cod4mp" and setup[key].get("client") == "cod4x":

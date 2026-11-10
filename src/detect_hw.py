@@ -13,7 +13,12 @@ import platform
 
 # ── DMI product_name -> DEVICES key ──────────────────────────────────────────
 # Values come from /sys/class/dmi/id/product_name on each device.
-# ASUS repeats the model code (e.g. "RC71L_RC71L"), so those use prefix matching.
+# ASUS puts the model code after the marketing name and repeats it
+# (e.g. "ROG Ally RC71L_RC71L", "ROG Ally X RC72LA_RC72LA_000123206"), so
+# those match the code anywhere in the string.
+#
+# Every key returned here must exist in ui_setup.DEVICES (the setup screen
+# looks it up directly).
 
 _DMI_EXACT = {
     # Valve
@@ -23,23 +28,33 @@ _DMI_EXACT = {
     # Lenovo (opaque model codes)
     "83E1":     "legion_go",
     "83L3":     "legion_go_s",
+    "83N6":     "legion_go_s",
+    "83Q2":     "legion_go_s",
+    "83Q3":     "legion_go_s",
     "83N0":     "legion_go_2",
     "83N1":     "legion_go_2",
 }
 
-_DMI_PREFIX = [
-    # ASUS -- product_name may carry a suffix like RC71L_RC71L
-    ("RC71L",  "rog_ally"),
+# ASUS model codes, matched as substrings. Longer / newer codes first so a
+# code can never be shadowed by a shorter one earlier in the list.
+_DMI_CODES = [
     ("RC72LA", "rog_ally_x"),
+    # RC73YA is the ROG Xbox Ally (non-X). It has the same 1920x1080 screen
+    # and controls as the X, so both share one entry, labelled "ROG Xbox Ally".
     ("RC73YA", "xbox_ally_x"),
     ("RC73XA", "xbox_ally_x"),
     ("RC74XA", "xbox_ally_x"),
+    ("RC71L",  "rog_ally"),
 ]
 
 # MSI uses board_name (MS-xxxx) more reliably than product_name.
 _DMI_BOARD = {
     "MS-1T8K": "msi_claw_8",
-    "MS-1T41": "msi_claw_8",
+    "MS-1T52": "msi_claw_8",        # Claw 8 AI+ (1920x1200)
+    # MS-1T41 is the original Claw A1M: a 7" 1920x1080 screen. It was mapped
+    # to msi_claw_8 (1920x1200). With no 1080p Claw entry it goes to the
+    # generic handheld, which asks for the screen resolution.
+    "MS-1T41": "other_handheld",
 }
 
 # ---
@@ -97,8 +112,8 @@ def detect_device() -> str | None:
     hit = _DMI_EXACT.get(product)
     if hit:
         return hit
-    for prefix, key in _DMI_PREFIX:
-        if product.startswith(prefix):
+    for code, key in _DMI_CODES:
+        if code in product:
             return key
     board = _read_dmi("board_name")
     hit = _DMI_BOARD.get(board)

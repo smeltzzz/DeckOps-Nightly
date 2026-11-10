@@ -11,6 +11,33 @@ import sys
 # Ensure src/ is on the path when run directly
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+
+def _tell(message, error=True):
+    """Show a message before Qt is loaded (standard library only).
+
+    zenity is missing on some supported desktops, where a failed start used to
+    say nothing at all: fall back to kdialog, then a notification, and always
+    print it for a terminal or the journal.
+    """
+    import shutil
+    import subprocess
+    print(f"DeckOps: {message}", file=sys.stderr)
+    attempts = (
+        ["zenity", "--error" if error else "--info", "--title=DeckOps", "--width=380", f"--text={message}"],
+        ["kdialog", "--title", "DeckOps", "--error" if error else "--msgbox", message],
+        ["notify-send", "--app-name=DeckOps", "DeckOps", message],
+    )
+    for cmd in attempts:
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            if subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0:
+                return
+        except OSError:
+            continue
+
+
 # The installed desktop shortcut launches main.py directly. Recover before
 # importing logging, Qt, or anything else an interrupted update may have touched.
 try:
@@ -33,18 +60,29 @@ try:
         _rolled_back = False
 except Exception as ex:
     print(f"DeckOps could not open safely: {ex}", file=sys.stderr)
-    import shutil, subprocess
-    if shutil.which("zenity"):
-        message = ("Another DeckOps update is running. Wait for it to finish before opening DeckOps again."
-                   if isinstance(ex, BlockingIOError) else
-                   "Could not restore an interrupted update. Your files were kept; please contact DeckOps support before reinstalling.")
-        subprocess.run(["zenity", "--error", "--title=DeckOps", f"--text={message}"], check=False)
+    _tell("Another DeckOps update is running. Wait for it to finish before opening DeckOps again."
+          if isinstance(ex, BlockingIOError) else
+          "Could not restore an interrupted update. Your files were kept; please contact DeckOps support before reinstalling.")
     sys.exit(1)
 
 if _rolled_back:
     # The current main.py was loaded before the rollback. Start it again from
     # disk so it matches the modules we just restored.
     os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), *sys.argv[1:]])
+
+# One DeckOps at a time: two windows ran installs, Steam edits and self-updates
+# over each other. The open file holds the lock until this process ends; an
+# os.execv relaunch closes it and takes it again (instance_lock waits briefly).
+_instance_lock = None
+try:
+    from update_manifest import instance_lock
+    _instance_lock = instance_lock(_install_dir)
+except BlockingIOError:
+    _tell("DeckOps is already open.", error=False)
+    sys.exit(0)
+except Exception as ex:
+    # A lock that can't be taken must never keep DeckOps from opening
+    print(f"DeckOps: single-instance check skipped: {ex}", file=sys.stderr)
 
 from log import setup_logging, get_logger
 setup_logging()

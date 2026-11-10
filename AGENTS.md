@@ -7,8 +7,8 @@ DeckOps Nightly is a Linux/SteamOS installer and PyQt desktop app that sets up C
 - `python -m ruff check .` — lint. `pyproject.toml` selects correctness rules only (`E9`, `F`, `B`), target py311, 120 columns.
 - `python -m pytest -q` — full suite. Tests are `unittest` style; pytest collects them cleanly.
 - Single test: `python -m pytest tests/test_reliability.py::TransactionTests::test_failed_full_apply_restores_all_old_files -q`
-- Linux-only shell tests: run `tests/test_prelaunch_shell.py`, `tests/test_lan_server_shell.py`, and `tests/test_offline_launcher_shell.py` on Linux with `bash`/`flock`; they skip on Windows. So do the fake-script classes in `tests/test_reliability.py` (`PrefixFinalizeTests`, `DepotQrRetryTests`, marked `_POSIX_ONLY`), so a Windows run is not the full suite.
-- To run everything on a Windows dev box, use a Linux container (`python:3.12-slim` plus `pytest PyQt6`, `QT_QPA_PLATFORM=offscreen`) over a copy of the repo with `.sh`/`.py` converted to LF: a CRLF checkout breaks the shell tests even though git stores LF.
+- A Windows run is not the full suite. Shell, `flock`, symlink, and file-mode tests skip there: all of `tests/test_*_shell.py`, plus `_POSIX_ONLY`/`POSIX_ONLY`/`LINUX_BASH`-marked classes and `skipUnless` cases across `test_reliability.py` and the `test_sweep*` files.
+- To run everything on a Windows dev box, use a Linux container (`python:3.12-slim` plus apt `libglib2.0-0 libgl1 libegl1 libfontconfig1 libxkbcommon0 libdbus-1-3`, pip `pytest PyQt6 PyQt5`, `QT_QPA_PLATFORM=offscreen`; PyQt5 is needed for the offline-launcher tests) over a copy of the repo with `.sh`/`.py` converted to LF: a CRLF checkout breaks the shell tests even though git stores LF. Run as a non-root user, because a few `test_sweep5_startup.py` lock tests skip when `geteuid() == 0`.
 - Rebuild the tracked offline launcher with `powershell -ExecutionPolicy Bypass -File scripts/build_offline_launcher.ps1 -Publish` on Windows x64. See `docs/offline-launcher-build.md`.
 
 There is no CI, pre-commit, or formatter config. Run the two checks above before finishing.
@@ -18,6 +18,8 @@ There is no CI, pre-commit, or formatter config. Run the two checks above before
 - `src/main.py` is the app entry point. It must recover interrupted updates before importing logging or Qt. `src/update_manifest.py` is deliberately standard-library-only because `launcher.sh` and `install.sh` run it with system Python before the venv exists.
 - `src/ui_qt.py` owns the window and screen stack. Screens live in `ui_setup.py`, `ui_install.py`, and `ui_manage.py`; shared constants/helpers are in `ui_constants.py`.
 - UI modules import Qt through `src/qt.py`, never PyQt directly; it intentionally supports PyQt6 with a PyQt5 fallback.
+- The UI must work controller-only (D-pad arrives as arrow keys, A as Return). `ui_qt.py` installs a navigation event filter; screens opt in with `focus_target()`, `back_action()` (B/Escape), and `escape_allowed()` (False while work runs). Wrap every `QScrollArea` with `ui_constants._no_focus_scroll` (or create it with `_scroll_area`) so it can't trap the D-pad, and order rebuilt widgets with `_chain_focus`.
+- The bundled fonts lack ✓ ✗ ⚠ ← ⏳, so never put them in UI text: use `MARK_*`/`_mark()`/`_plain_marks()` from `ui_constants`. Use `screen_title()`/`LABELS` for screen names and Back/Continue labels, and the `FONT_*`/`BTN_MIN_H` size constants (Deck minimums).
 - `src/identity.py` is the Python source of truth for branch, install paths, repo URLs, and branding. `deckops_identity.sh` is the shell counterpart. Hardcoded fallbacks in `launcher.sh`, `install.sh`, and `deckops_uninstall.sh` must stay in sync. Change branch only through `BRANCH`.
 - This fork's identity points at `smeltzzz/DeckOps-Nightly`; `upstream` is `GalvarinoDev/DeckOps-Nightly`. Do not "correct" URLs to upstream.
 - `identity.py` has no internal imports and `log.py` only imports `identity`; avoid adding app imports to either.

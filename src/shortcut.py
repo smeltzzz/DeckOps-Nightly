@@ -358,7 +358,7 @@ def _read_existing_shortcuts(path: str) -> list:
     
     # Extract AppName values
     existing = []
-    for match in re.finditer(b'\x01[Aa]pp[Nn]ame\x00([^\x00]+)\x00', data):
+    for match in re.finditer(rb'\x01(?i:appname)\x00([^\x00]+)\x00', data):
         existing.append(match.group(1).decode('utf-8', errors='replace'))
     
     return existing
@@ -849,14 +849,16 @@ def _strip_entries_by_name(raw_body: bytes, names_to_strip: set) -> tuple:
     kept = []
     stripped = set()
     for entry in entries:
-        # Check if this entry's AppName (or appname) matches anything we
-        # want to strip. Match the full "\x01AppName\x00NAME\x00" sequence
-        # so partial substring matches do not trigger a false strip.
+        # Check if this entry's AppName matches anything we want to strip.
+        # Match the full "\x01AppName\x00NAME\x00" sequence so partial
+        # substring matches do not trigger a false strip. Key case varies
+        # between Steam versions (AppName / appname / Appname), so the key
+        # matches case-insensitively, same as get_shortcut_appid; the title
+        # must match exactly.
         matched_name = None
         for name in names_to_strip:
-            name_bytes = name.encode("utf-8")
-            if (b'\x01AppName\x00' + name_bytes + b'\x00' in entry or
-                b'\x01appname\x00' + name_bytes + b'\x00' in entry):
+            name_field = re.compile(rb'\x01(?i:appname)\x00' + re.escape(name.encode("utf-8")) + rb'\x00')
+            if name_field.search(entry):
                 matched_name = name
                 break
         if matched_name is not None:
@@ -2037,7 +2039,7 @@ def create_launcher_shortcut(on_progress=None):
         grid_dir = os.path.join(_userdata_dir(), uid, "config", "grid")
 
         existing_raw = _read_shortcuts_or_skip(shortcuts_path, uid, prog)
-        if existing_raw is None:
+        if existing_raw is None or not _entries_parse(existing_raw, uid, prog):
             continue
         existing_names = _read_existing_shortcuts(shortcuts_path)
 
@@ -2292,7 +2294,7 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
     remapped or moved -- a name is listed only when its writer reported it
     written (a shortcut that could not be written is left out)."""
     import config as cfg
-    from detect_games import parse_library_folders, find_installed_games, find_own_installed
+    from detect_games import parse_library_folders, find_installed_games, find_own_installed_saved
 
     prog = on_progress or (lambda *a: None)
 
@@ -2336,7 +2338,7 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
     except Exception as ex:
         _log.warning("SP launch options not checked: %s", ex)
     if setup.get("t6sp", {}).get("source") == "own":
-        g = find_own_installed().get("t6sp")
+        g = find_own_installed_saved().get("t6sp")
         if g and migrate_own_t6sp(g, on_progress):
             readded.append(OWN_SHORTCUTS["t6sp"]["name"])
 
@@ -2366,7 +2368,8 @@ def repair_shortcuts(steam_root: str = None, on_progress=None) -> list:
 
     own_keys = by_kind("own")
     if own_keys:
-        own_games = find_own_installed()
+        # Choose Folder picks included, same as the scan that set the game up
+        own_games = find_own_installed_saved()
         found = [k for k in own_keys if k in own_games]
         for k in set(own_keys) - set(found):
             prog(f"  ⚠ {missing[k][1]}: game folder not found, skipped")

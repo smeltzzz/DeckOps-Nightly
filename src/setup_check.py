@@ -165,6 +165,14 @@ def prefix_problems(compat: str | None) -> list:
     return []
 
 
+def _folder_missing_text(source: str) -> str:
+    if source == "own":
+        return ("Game folder not found. Insert the drive or use Choose Folder to point "
+                "DeckOps at your game folder.")
+    return ("Game folder not found. Install the game again in Steam, "
+            "or insert the SD card it is on.")
+
+
 def check_game(key: str, entry: dict, game: dict | None, steam_root: str,
                setup_games: dict) -> dict:
     """One game's result: {"key", "name", "problems": [str], "fixable": bool}."""
@@ -174,9 +182,15 @@ def check_game(key: str, entry: dict, game: dict | None, steam_root: str,
     problems = result["problems"]
 
     install_dir = (game or {}).get("install_dir", "")
-    if not install_dir or not os.path.isdir(install_dir):
-        problems.append("Game folder not found. Install the game again in Steam, "
-                        "or insert the SD card it is on.")
+    found_source = (game or {}).get("source")
+    # The scan falls back to the other copy when the one DeckOps set up is
+    # gone (own copy's drive out, Steam copy uninstalled). Checking that
+    # other copy reported problems -- and offered fixes -- for a game folder
+    # DeckOps never set up.
+    wrong_copy = (source in ("steam", "own") and found_source in ("steam", "own")
+                  and found_source != source)
+    if wrong_copy or not install_dir or not os.path.isdir(install_dir):
+        problems.append(_folder_missing_text(source))
         return result      # nothing else can be checked or fixed from here
 
     fixable = False
