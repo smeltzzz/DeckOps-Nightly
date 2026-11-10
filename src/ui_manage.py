@@ -29,11 +29,13 @@ from ui_constants import (
     _show_preflight,
     ALL_GAMES, KEY_CLIENT, KEY_MODE_LABEL,
     _active_keys, _active_client, _active_appid,
-    SP_IMAGE_URLS, IMG_RATIO, CARD_COLS, CARD_MAX_W,
+    SP_IMAGE_URLS, IMG_RATIO,
     HEROES_DIR, PROJECT_ROOT,
     _clean_volume, _clean_enabled, _reload_audio_settings,
     _set_audio_volume, _set_audio_enabled, _start_audio, _kill_audio,
     go_to, get_screen,
+    FONT_BODY, FONT_ACTION, BTN_MIN_H, LABELS, screen_title,
+    _no_focus_scroll, _chain_focus, _focus_first, _ensure_focus_in, _plain_marks,
 )
 
 from guide_text import how_to_start_text
@@ -109,12 +111,47 @@ def _confirm_game_update(parent, selected, extras=()):
     return msg.exec() == QMessageBox.StandardButton.Yes
 
 
-# Library cards are wider than the old five-column portrait tiles, while
-# still allowing three columns at 800px and five at 1280px.
-_LIBRARY_CARD_W = max(CARD_MAX_W, 220)
-# Steam library covers are portrait (2:3). Give them their full height rather
-# than turning them into shallow banners that hide most of the artwork.
-_LIBRARY_COVER_H = round(_LIBRARY_CARD_W * IMG_RATIO)
+# Compact library cards: cover art beside the status, one row of actions
+# below. Every card fits on one 1280x800 screen (two rows of four); the width
+# flexes between these bounds so a small window still gets three columns.
+_LIBRARY_CARD_MIN_W = 236
+_LIBRARY_CARD_MAX_W = 300
+_LIBRARY_CARD_W = _LIBRARY_CARD_MAX_W      # nominal width before the first layout
+_LIBRARY_MAX_COLS = 4
+# Steam library covers are portrait (2:3); contained, never cropped.
+_LIBRARY_COVER_H = 144
+_LIBRARY_COVER_W = round(_LIBRARY_COVER_H / IMG_RATIO)
+
+
+class _StatusLabel(QLabel):
+    """Status line: worker messages keep their ✓ ✗ ⚠ marks (fine in the log
+    file), but the bundled fonts lack those glyphs, so the label shows the
+    plain-word version (_plain_marks)."""
+
+    def __init__(self, size=FONT_BODY, color=C_DIM, align=Qt.AlignmentFlag.AlignLeft, auto_hide=False):
+        super().__init__("")
+        self._auto_hide = auto_hide
+        self.setFont(font(size))
+        self.setAlignment(align)
+        self.setWordWrap(True)
+        self.setStyleSheet(f"color:{color};background:transparent;")
+        if auto_hide:
+            self.setVisible(False)
+
+    def setText(self, text):
+        super().setText(_plain_marks(text or ""))
+        if self._auto_hide:
+            # An empty status line takes no room (Settings sections stay compact)
+            self.setVisible(bool(text))
+
+
+def _card_modes(keys, installed):
+    """The modes a library card expects: the free MW3 server is an
+    alternative to MP, not an extra mode required beside it."""
+    modes = [k for k in keys if k != "iw5mp_ds"] if "iw5mp" in installed else list(keys)
+    if "iw5mp_ds" in installed and "iw5mp" not in installed:
+        modes = [k for k in modes if k != "iw5mp"]
+    return modes
 
 
 # VERSION is per install; the repo still tracks an old copy from 2026-05
@@ -256,11 +293,7 @@ class ManagementCard(QFrame):
             state = "Ready" if ready else "Not set up"
             detail = "Offline launcher and bot matches" if ready else "Add the offline launcher"
         else:
-            # The free MW3 server is an alternative to MP, not an extra mode
-            # required when the Steam MP game is already present.
-            modes = [k for k in keys if k != "iw5mp_ds"] if "iw5mp" in installed else list(keys)
-            if "iw5mp_ds" in installed and "iw5mp" not in installed:
-                modes = [k for k in modes if k != "iw5mp"]
+            modes = _card_modes(keys, installed)
             ik = [k for k in keys if k in installed]
             ready_keys = [k for k in modes if k in installed and
                           cfg.is_game_setup_for_source(k, installed[k].get("source", "steam"))]
@@ -282,115 +315,118 @@ class ManagementCard(QFrame):
         )
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-
-        # Reserve the cover's height before the first layout pass. Setting it
-        # only in resizeEvent left a zero-height cover at initial 1280x800 show,
-        # placing the badge directly over the title and status.
-        img_container = QWidget()
-        img_container.setFixedSize(_LIBRARY_CARD_W, _LIBRARY_COVER_H)
-        img_container.setStyleSheet(f"background:{C_SURFACE};border:none;")
-
-        self._img = QLabel(img_container)
-        self._img.setFixedSize(_LIBRARY_CARD_W, _LIBRARY_COVER_H)
-        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._img.setFont(font(9, True))
-        self._img.setText("NO ARTWORK\nAVAILABLE")
-        self._img.setStyleSheet(f"color:{C_DIM};background:transparent;border:none;")
-        self._dim_art = state != "Ready"
+        lay.setContentsMargins(10, 8, 10, 10)
+        lay.setSpacing(6)
 
         # Keep the client label outside the artwork: even its corner should
         # remain visible, rather than being covered by a badge overlay.
         badge_strip = QWidget()
-        badge_strip.setFixedHeight(28)
-        badge_strip.setStyleSheet(f"background:{C_CARD};border:none;")
+        badge_strip.setFixedHeight(26)
+        badge_strip.setStyleSheet("background:transparent;border:none;")
+        bsl = QHBoxLayout(badge_strip); bsl.setContentsMargins(0, 0, 0, 0); bsl.setSpacing(0)
         # CoD 4 and BO2 set an explicit "badge" so the tag also shows that the
         # campaign runs on a modded client; other cards show the primary client.
         badge_text = (gd.get("badge") or client.split(" + ")[0]).lower()
-        self._client_badge = QPushButton(badge_text, badge_strip)
+        self._client_badge = QPushButton(badge_text)
         self._client_badge.setToolTip(client)
-        self._client_badge.setFont(font(9, True)); self._client_badge.setEnabled(False)
+        self._client_badge.setFont(font(10, True)); self._client_badge.setEnabled(False)
+        self._client_badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._client_badge.setStyleSheet(
             f"QPushButton{{background:{color};color:{C_BG};border:none;border-radius:3px;padding:2px 6px;}}"
             f"QPushButton:disabled{{background:{color};color:{C_BG};}}"
         )
-        self._client_badge.adjustSize()
-        self._client_badge.setMaximumWidth(_LIBRARY_CARD_W - 10)
-        self._client_badge.raise_()
-
-        self._img_container = img_container
+        self._client_badge.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        bsl.addWidget(self._client_badge); bsl.addStretch()
         lay.addWidget(badge_strip)
-        lay.addWidget(img_container)
+
+        # Cover and status side by side. The cover's size is reserved before
+        # the first layout pass (a zero-height cover once hid the status).
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(10)
+        img_container = QWidget()
+        img_container.setFixedSize(_LIBRARY_COVER_W, _LIBRARY_COVER_H)
+        img_container.setStyleSheet(f"background:{C_SURFACE};border:none;border-radius:4px;")
+        self._img = QLabel(img_container)
+        self._img.setFixedSize(_LIBRARY_COVER_W, _LIBRARY_COVER_H)
+        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img.setFont(font(10, True))
+        self._img.setWordWrap(True)
+        self._img.setText("NO ARTWORK\nAVAILABLE")
+        self._img.setStyleSheet(f"color:{C_DIM};background:transparent;border:none;")
+        self._dim_art = state != "Ready"
+        self._img_container = img_container
+        top.addWidget(img_container, 0, Qt.AlignmentFlag.AlignTop)
 
         info = QWidget()
         info.setStyleSheet("background:transparent;border:none;")
-        il = QVBoxLayout(info); il.setContentsMargins(10, 10, 10, 10); il.setSpacing(5)
+        il = QVBoxLayout(info); il.setContentsMargins(0, 0, 0, 0); il.setSpacing(4)
         name = gd["base"].replace("Call of Duty 4: Modern Warfare", "Modern Warfare 1")
         name = name.replace("Call of Duty: ", "")
         if self._is_lan: name = "Offline Mode"
-        title = _lbl(name, 10, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft)
-        title.setFixedHeight(38)
+        title = _lbl(name, FONT_ACTION, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft)
         self._title_label = title
         il.addWidget(title)
-        self._state_label = _lbl(state.upper(), 10,
+        self._state_label = _lbl(state.upper(), FONT_BODY,
                                   color if state == "Ready" else C_TREY if ik or self._is_lan else C_DIM,
                                   bold=True, align=Qt.AlignmentFlag.AlignLeft, wrap=False)
         self._state_label.setAccessibleName(f"{name}: {state}")
         il.addWidget(self._state_label)
-        summary = _lbl(detail, 9, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        summary.setFixedHeight(42)
+        summary = _lbl(detail, 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         self._summary_label = summary
         il.addWidget(summary)
+        il.addStretch()
+        top.addWidget(info, 1)
+        lay.addLayout(top)
 
+        # One row of actions: a single primary action, plus at most one short
+        # secondary one. Everything else lives in Game Options.
         self._btn_bar = QWidget()
-        bb = QVBoxLayout(self._btn_bar)
-        bb.setContentsMargins(0, 4, 0, 0); bb.setSpacing(5)
+        self._btn_bar.setStyleSheet("background:transparent;border:none;")
+        bb = QHBoxLayout(self._btn_bar)
+        bb.setContentsMargins(0, 0, 0, 0); bb.setSpacing(6)
+        self._buttons = []
 
-        def _card_btn(text, bg):
-            b = _btn(text, bg, size=9, h=34)
+        def _card_btn(text, bg, stretch=1, tip=None):
+            b = _btn(text, bg, size=FONT_ACTION, h=BTN_MIN_H)
             b.setStyleSheet(b.styleSheet().replace("padding:0 18px;", "padding:0 4px;"))
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setMinimumWidth(0)
+            if tip:
+                b.setToolTip(tip)
+            bb.addWidget(b, stretch)
+            self._buttons.append(b)
             return b
 
         if self._is_lan and not ready:
-            b = _card_btn("Add Offline", C_IW)
-            b.setToolTip("Add Offline Mode")
+            b = _card_btn("Add Offline", C_IW, tip="Add Offline Mode")
             if on_offline: b.clicked.connect(lambda: on_offline(True))
-            bb.addWidget(b)
         elif self._is_lan:
-            b = _card_btn("Repair", C_DARK_BTN)
+            b = _card_btn("Repair", C_DARK_BTN, tip="Repair the offline launcher")
             if on_readd: b.clicked.connect(lambda: on_readd(gd))
-            bb.addWidget(b)
-            rm = _card_btn("Remove Offline", C_RED_BTN)
-            rm.setToolTip("Remove Offline Mode")
+            rm = _card_btn("Remove", C_RED_BTN, tip="Remove Offline Mode")
+            rm.setAccessibleName("Remove Offline Mode")
             if on_offline: rm.clicked.connect(lambda: on_offline(False))
-            bb.addWidget(rm)
         elif missing:
-            b = _card_btn("Set Up Modes" if ready else "Set Up", C_IW)
-            b.setToolTip("Set up only the detected modes that still need setup")
+            n = len(missing)
+            b = _card_btn(f"Set Up {n} Mode{'s' if n != 1 else ''}" if ready else "Set Up", C_IW, 3,
+                          tip="Set up only the detected modes that still need setup")
             b.clicked.connect(lambda: on_setup(gd))
-            bb.addWidget(b)
+            if ik and ready:
+                opt = _card_btn("Options", C_DARK_BTN, 2, tip="Game Options")
+                opt.setAccessibleName("Game Options")
+                opt.clicked.connect(lambda: on_configure(gd, ik))
         elif not ik and "iw5mp_ds" in keys and on_add_ds:
-            b = _card_btn("Get Free MW3", C_IW)
-            b.setToolTip("Get the free MW3 Dedicated Server from Steam")
+            b = _card_btn("Get Free MW3", C_IW, tip="Get the free MW3 Dedicated Server from Steam")
             b.clicked.connect(lambda: on_add_ds(gd))
-            bb.addWidget(b)
         elif not ik:
             b = _card_btn("Add Games", C_DARK_BTN)
             if on_add_games: b.clicked.connect(on_add_games)
-            bb.addWidget(b)
-        if ik and ready:
+        else:
+            # Ready, or every detected mode ready with some game files missing:
+            # Game Options also offers Find Missing Modes then.
             b = _card_btn("Game Options", C_DARK_BTN)
             b.clicked.connect(lambda: on_configure(gd, ik))
-            bb.addWidget(b)
-        if ik and state == "Partial" and not missing:
-            b = _card_btn("Find Modes", C_DARK_BTN)
-            b.setToolTip("Find missing game modes through Add Games")
-            if on_add_games: b.clicked.connect(on_add_games)
-            bb.addWidget(b)
-        il.addWidget(self._btn_bar)
-        lay.addWidget(info)
+        lay.addWidget(self._btn_bar)
+        self._primary = self._buttons[0] if self._buttons else None
         self._raw_pixmap = None
 
         if self._is_lan:
@@ -406,9 +442,18 @@ class ManagementCard(QFrame):
                 self._img_sigs.log.connect(self._on_image_fetched)
                 threading.Thread(target=self._fetch, args=(self._appid,), daemon=True).start()
         self._scale_image()
-        # The scroll area otherwise compresses grid rows to its viewport's
-        # height on first show (especially at 800x500), despite sizeHint().
-        self.setFixedHeight(self.sizeHint().height())
+        self.fit_width(_LIBRARY_CARD_W)
+
+    def fit_width(self, width):
+        """Fix the card at width and at the height its wrapped text needs
+        there. The scroll area otherwise compresses grid rows to its
+        viewport's height on first show, despite sizeHint()."""
+        self.setFixedWidth(width)
+        self.setFixedHeight(self.natural_height(width))
+
+    def natural_height(self, width):
+        h = self.heightForWidth(width)
+        return h if h > 0 else self.sizeHint().height()
 
     def _on_image_fetched(self, path):
         try:
@@ -438,7 +483,6 @@ class ManagementCard(QFrame):
                 effect = QGraphicsOpacityEffect(self._img)
                 effect.setOpacity(0.65)
                 self._img.setGraphicsEffect(effect)
-        self._client_badge.move(6, 6)
 
     def _fetch(self, appid):
         url = SP_IMAGE_URLS.get(appid)
@@ -461,29 +505,35 @@ class ManagementScreen(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
 
         hdr, hl = _header_bar()
-        hl.addWidget(_lbl("GAME LIBRARY", 12, C_IW, bold=True, wrap=False))
+        hl.addWidget(_lbl(screen_title("ManagementScreen").upper(), 12, C_IW, bold=True, wrap=False))
         lay.addWidget(hdr)
 
         # Separate toolbar: the logo never competes with actions at 800x500.
         toolbar = QWidget(); toolbar.setStyleSheet(f"background:{C_CARD};")
         actions = QHBoxLayout(toolbar)
         actions.setContentsMargins(12, 4, 12, 8); actions.setSpacing(6)
-        add_btn = _btn("Add Games", C_IW, size=9, h=38)
+        add_btn = _btn("Add Games", C_IW, size=FONT_ACTION, h=BTN_MIN_H)
         add_btn.clicked.connect(self._add_games)
-        self._game_update_btn = _btn("Update Games", C_DARK_BTN, size=9, h=38)
+        self._game_update_btn = _btn("Update Games", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         self._game_update_btn.clicked.connect(self._update_all_games)
-        self._deckops_update_btn = _btn("DeckOps Update", C_DARK_BTN, size=9, h=38)
-        self._deckops_update_btn.clicked.connect(self._check_deckops_update)
-        cfg_btn = _btn("Settings", C_DARK_BTN, size=9, h=38)
+        cfg_btn = _btn(LABELS["settings"], C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         cfg_btn.clicked.connect(lambda: go_to(self.stack, "ConfigureScreen"))
-        for button in (add_btn, self._game_update_btn,
-                       self._deckops_update_btn, cfg_btn):
+        # DeckOps updates are checked and installed from Settings only. This
+        # button is just the notice: shown when the startup check finds an
+        # update, it opens Settings and runs that check there.
+        self._deckops_update_btn = _btn("DeckOps Update", C_TREY, size=FONT_ACTION, h=BTN_MIN_H)
+        self._deckops_update_btn.setToolTip("A DeckOps update is available: open Settings to install it")
+        self._deckops_update_btn.clicked.connect(self._open_deckops_update)
+        self._deckops_update_btn.setVisible(False)
+        self._toolbar_buttons = [add_btn, self._game_update_btn, self._deckops_update_btn, cfg_btn]
+        for button in self._toolbar_buttons:
             button.setStyleSheet(button.styleSheet().replace("padding:0 18px;", "padding:0 4px;"))
             button.setMinimumWidth(0)
             actions.addWidget(button, 1)
+        self._toolbar = toolbar
         lay.addWidget(toolbar)
 
-        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll = _no_focus_scroll(QScrollArea()); self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         inner = QWidget(); self._grid_host = inner
@@ -493,15 +543,34 @@ class ManagementScreen(QWidget):
         self._scroll.setWidget(inner); lay.addWidget(self._scroll, stretch=1)
         self._cards = []
         self._columns = 0
+        self._card_w = 0
 
-        self._deckops_update_status = _lbl("", 10, C_DIM, wrap=False)
-        self._deckops_update_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._deckops_update_status = _StatusLabel(FONT_BODY, C_IW, Qt.AlignmentFlag.AlignCenter, auto_hide=True)
         self._deckops_update_status.setContentsMargins(16,0,16,4)
+        self._deckops_update_status.setVisible(False)
         lay.addWidget(self._deckops_update_status)
 
-        self._status = _lbl("", 12, C_DIM)
-        self._status.setContentsMargins(16,4,16,4)
-        lay.addWidget(self._status)
+        footer = QWidget()
+        fl = QHBoxLayout(footer); fl.setContentsMargins(16,4,16,6); fl.setSpacing(12)
+        self._status = _StatusLabel(FONT_BODY, C_DIM)
+        fl.addWidget(self._status, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._scan_again_btn = _btn("Scan Again", C_IW, size=FONT_ACTION, h=BTN_MIN_H)
+        self._scan_again_btn.clicked.connect(self._scan_again)
+        self._scan_again_btn.setVisible(False)
+        fl.addWidget(self._scan_again_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(footer)
+
+    # ── controller protocol (see ui_constants) ─────────────────────────────
+    def focus_target(self):
+        """First card's primary action; the toolbar when there are no cards."""
+        for card in self._cards:
+            if card._primary is not None:
+                return card._primary
+        return self._toolbar_buttons[0]
+
+    def _focus_order(self):
+        cards = [b for card in self._cards for b in card._buttons]
+        return self._toolbar_buttons + cards + [self._scan_again_btn]
 
     def _add_games(self):
         """Open game selection directly, including its Choose Folder action."""
@@ -548,12 +617,20 @@ class ManagementScreen(QWidget):
         # Never overwrite a check or update the player started meanwhile
         if available and self._deckops_update_btn.isEnabled() and not self._deckops_update_status.text():
             self._deckops_update_status.setText(
-                "A DeckOps update is available. Open DeckOps Update to review and install it.")
-            self._deckops_update_status.setStyleSheet(f"color:{C_IW};")
+                "A DeckOps update is available. Open Settings to review and install it.")
+            self._deckops_update_status.setVisible(True)
+            self._deckops_update_btn.setText("Update Available")
+            self._deckops_update_btn.setVisible(True)
+
+    def _scan_again(self):
+        self._scan_again_btn.setVisible(False)
+        self._status.setText("")
+        self._refresh()
 
     def _refresh(self):
         if getattr(self, "_scanning", False): return
         self._scanning = True
+        self._scan_again_btn.setVisible(False)
         self._game_update_btn.setEnabled(False)
         if not self.installed: self._status.setText("Loading games...")
         self._scan_sigs = _Sigs()
@@ -596,9 +673,29 @@ class ManagementScreen(QWidget):
                         self._deadzone_running = False
                 threading.Thread(target=_defaults, daemon=True).start()
         else:
-            self._status.setText("Game scan failed. Return to Game Library to try again.")
+            # This message is shown on the Library itself: offer the retry here.
+            self._status.setText("Couldn't scan for games. Check that Steam is installed, then try again.")
+            self._scan_again_btn.setVisible(True)
+
+    def _card_focus(self):
+        """(card index, button index) of the focused card action, or None."""
+        fw = QApplication.focusWidget()
+        for ci, card in enumerate(self._cards):
+            try:
+                if fw in card._buttons:
+                    return ci, card._buttons.index(fw)
+            except RuntimeError:
+                return None
+        return None
 
     def _rebuild(self):
+        # A rescan (every time the Library is shown) rebuilds the cards: keep the
+        # player's place, the focused card action and the scroll position.
+        where = self._card_focus()
+        # Shown before the first scan finished: focus could only land on the
+        # toolbar. Move it to the first card once there are cards.
+        first_cards = not self._cards and QApplication.focusWidget() is self._toolbar_buttons[0]
+        scroll = self._scroll.verticalScrollBar().value()
         while self._grid.count():
             item = self._grid.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -613,74 +710,84 @@ class ManagementScreen(QWidget):
         ) for gd in games]
         self._columns = 0
         self._layout_cards()
+        # Toolbar, then the card actions in grid (row-major) order, then the footer
+        _chain_focus(self._focus_order())
+        if where is not None and self._cards:
+            ci = min(where[0], len(self._cards) - 1)
+            buttons = self._cards[ci]._buttons
+            if buttons:
+                target = buttons[min(where[1], len(buttons) - 1)]
+                target.setFocus(Qt.FocusReason.OtherFocusReason)
+            QTimer.singleShot(0, lambda: self._restore_scroll(scroll))
+        elif first_cards and self._cards:
+            self.focus_target().setFocus(Qt.FocusReason.OtherFocusReason)
+        elif self.isVisible():
+            _ensure_focus_in(self)
+
+    def _restore_scroll(self, value):
+        try:
+            bar = self._scroll.verticalScrollBar()
+            bar.setValue(min(value, bar.maximum()))
+        except RuntimeError:
+            pass
 
     def _layout_cards(self):
-        width = self._scroll.viewport().width() or self.width()
+        # Always leave room for the vertical scroll bar: it appears only after
+        # this layout makes the grid taller than the viewport, and the screen
+        # gets no resize event for that.
+        bar = self._scroll.verticalScrollBar()
+        width = (self._scroll.width() or self.width()) - max(bar.sizeHint().width(), 10)
         margins = self._grid.contentsMargins()
+        spacing = self._grid.horizontalSpacing()
         available = width - margins.left() - margins.right()
-        columns = max(1, min(CARD_COLS, (available + self._grid.horizontalSpacing()) //
-                              (_LIBRARY_CARD_W + self._grid.horizontalSpacing())))
-        if columns == self._columns:
+        columns = max(1, min(_LIBRARY_MAX_COLS, len(self._cards) or 1,
+                             (available + spacing) // (_LIBRARY_CARD_MIN_W + spacing)))
+        card_w = max(_LIBRARY_CARD_MIN_W,
+                     min(_LIBRARY_CARD_MAX_W, (available - spacing * (columns - 1)) // columns))
+        if columns == self._columns and card_w == self._card_w:
             return
-        self._columns = columns
+        self._columns, self._card_w = columns, card_w
+        # Same width and height for every card, so the actions line up per row.
+        height = max([card.natural_height(card_w) for card in self._cards] or [0])
         for card in self._cards:
+            card.setFixedSize(card_w, height)
             self._grid.removeWidget(card)
         for idx, card in enumerate(self._cards):
             self._grid.addWidget(card, idx // columns, idx % columns,
                                  Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         # widgetResizable may otherwise shrink the inner widget to the short
         # viewport while fixed-height cards spill into the next grid row.
-        rows = [self._cards[i:i + columns] for i in range(0, len(self._cards), columns)]
+        rows = (len(self._cards) + columns - 1) // columns
         self._grid_host.setMinimumHeight(
-            margins.top() + margins.bottom()
-            + sum(max(card.height() for card in row) for row in rows)
-            + max(0, len(rows) - 1) * self._grid.verticalSpacing())
+            margins.top() + margins.bottom() + rows * height
+            + max(0, rows - 1) * self._grid.verticalSpacing())
 
-    # ── Update DeckOps (from ManagementScreen) ──────────────────────────────
+    # ── DeckOps update notice (installs run from Settings) ─────────────────
     _GITHUB_USER = GITHUB_USER
     _GITHUB_REPO = GITHUB_REPO
 
-    def _check_deckops_update(self):
-        self._deckops_update_btn.setEnabled(False)
-        self._deckops_update_status.setText("Checking...")
-        self._deckops_update_status.setStyleSheet(f"color:{C_DIM};")
-        self._du_sig = _Sigs()
-        self._du_sig.log.connect(self._on_deckops_update_signal)
-        threading.Thread(target=self._deckops_update_worker, daemon=True).start()
+    def _clear_update_notice(self):
+        self._deckops_update_btn.setText("DeckOps Update")
+        self._deckops_update_btn.setVisible(False)
+        self._deckops_update_status.setText("")
+        self._deckops_update_status.setVisible(False)
 
-    def _deckops_update_worker(self):
-        self._du_sig.log.emit(_check_update_status())
-
-    def _on_deckops_update_signal(self, msg):
-        kind, text = msg.split("|", 1)
-        self._deckops_update_btn.setEnabled(True)
-        self._deckops_update_status.setText(text)
-        if kind == "UPDATE":
-            self._deckops_update_status.setStyleSheet(f"color:{C_IW};")
-            self._deckops_update_btn.setText("Update && Restart")
-            try:
-                self._deckops_update_btn.clicked.disconnect()
-            except TypeError:
-                pass
-            self._deckops_update_btn.clicked.connect(self._apply_deckops_update)
-        else:
-            self._deckops_update_status.setStyleSheet(f"color:{C_DIM};")
+    def _open_deckops_update(self):
+        """The notice button: Settings owns the one DeckOps update entry point;
+        open it and run its check, which then offers Update && Restart."""
+        self._clear_update_notice()
+        s = get_screen(self.stack, "ConfigureScreen")
+        go_to(self.stack, "ConfigureScreen")
+        if s is not None and hasattr(s, "_check_for_updates"):
+            QTimer.singleShot(0, s._check_for_updates)
 
     def _apply_deckops_update(self):
         # The update ends in a relaunch that would cut a running Settings task off mid-write
         if self._busy_elsewhere():
             return
         # The update runs on Settings and ends in a relaunch. When it fails there ("Already
-        # up to date", a download error) this button must not keep offering "Update &&
-        # Restart" for it: back to the plain button, which checks again when shown.
-        self._deckops_update_btn.setText("DeckOps Update")
-        try:
-            self._deckops_update_btn.clicked.disconnect()
-        except TypeError:
-            pass
-        self._deckops_update_btn.clicked.connect(self._check_deckops_update)
-        self._deckops_update_status.setText("")
-        self._deckops_update_status.setStyleSheet(f"color:{C_DIM};")
+        # up to date", a download error) the notice must not keep offering it.
+        self._clear_update_notice()
         # Apply runs on Settings; show it so download progress is visible
         s = get_screen(self.stack, "ConfigureScreen")
         go_to(self.stack, "ConfigureScreen")
@@ -953,20 +1060,28 @@ class ManagementScreen(QWidget):
         outer.addWidget(_lbl("GAME OPTIONS", 15, C_TEXT, bold=True,
                              align=Qt.AlignmentFlag.AlignLeft, wrap=False))
         outer.addWidget(_lbl(gd["base"], 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
-        options = QScrollArea(); options.setWidgetResizable(True)
+        options = _no_focus_scroll(QScrollArea()); options.setWidgetResizable(True)
         options.setFrameShape(QScrollArea.Shape.NoFrame)
         options.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content = QWidget(); actions = QVBoxLayout(content)
         actions.setContentsMargins(0, 4, 4, 4); actions.setSpacing(9)
         choice = []
+        buttons = []
 
         def add_action(title, description, token, destructive=False):
-            b = _btn(title, C_RED_BTN if destructive else C_DARK_BTN, size=11, h=40)
+            b = _btn(title, C_RED_BTN if destructive else C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
             b.clicked.connect(lambda _checked=False: (choice.append(token), dlg.accept()))
             actions.addWidget(b)
+            buttons.append(b)
             actions.addWidget(_lbl(description, 10, C_DIM,
                                    align=Qt.AlignmentFlag.AlignLeft))
 
+        # Detected modes are set up but some game files were not found (the card's
+        # only action is Game Options then): the search lives here.
+        missing_files = [k for k in _card_modes(_active_keys(gd), self.installed)
+                         if k not in self.installed]
+        if missing_files and installed_keys:
+            add_action("Find Missing Modes", "Look for the missing game files through Add Games.", "find")
         if has_mods_support:
             add_action("Open Mod Folders", "Open the game's mod or custom map folder.", "mods")
         if has_mod_client:
@@ -983,13 +1098,18 @@ class ManagementScreen(QWidget):
                    "reinstall", True)
         actions.addStretch()
         options.setWidget(content); outer.addWidget(options, 1)
-        cancel = _btn("Cancel", C_DARK_BTN, size=11, h=40)
+        cancel = _btn("Cancel", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         cancel.clicked.connect(dlg.reject)
         outer.addWidget(cancel)
+        _chain_focus(buttons + [cancel])
+        # Open on the first action, not on the scroll area or Cancel
+        (buttons[0] if buttons else cancel).setFocus(Qt.FocusReason.OtherFocusReason)
         dlg.exec()
 
         selected = choice[0] if choice else None
-        if selected == "mods":
+        if selected == "find":
+            self._add_games()
+        elif selected == "mods":
             self._mods(gd, installed_keys)
         elif selected == "update":
             self._update(gd, installed_keys)
@@ -1248,7 +1368,7 @@ class SetupCompleteScreen(QWidget):
         super().__init__(); self.stack = stack; self.screen_name = "SetupCompleteScreen"
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         hdr, hl = _header_bar()
-        hl.addWidget(_lbl("FIELD GUIDE", 11, C_IW, bold=True, wrap=False))
+        hl.addWidget(_lbl(screen_title("SetupCompleteScreen").upper(), 12, C_IW, bold=True, wrap=False))
         lay.addWidget(hdr)
 
         banner = QWidget(); heading = QVBoxLayout(banner)
@@ -1265,7 +1385,7 @@ class SetupCompleteScreen(QWidget):
         lay.addWidget(banner)
 
         # Only the notes scroll: the return action remains visible at 800x500.
-        self._guide_scroll = QScrollArea(); scroll = self._guide_scroll
+        self._guide_scroll = _no_focus_scroll(QScrollArea()); scroll = self._guide_scroll
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
@@ -1342,13 +1462,13 @@ class SetupCompleteScreen(QWidget):
             "Restore your configs, stats and custom classes?",
             11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
         _note(self._restore_body, C_IW)
-        self._restore_status = _lbl("", 11, C_IW, align=Qt.AlignmentFlag.AlignLeft)
+        self._restore_status = _StatusLabel(FONT_BODY, C_IW)
         self._restore_status.setVisible(False)
 
-        self._restore_btn = _btn("Restore Saves", C_IW, size=12, h=40)
+        self._restore_btn = _btn("Restore Saves", C_IW, size=FONT_ACTION, h=BTN_MIN_H)
         self._restore_btn.setFixedWidth(200)
         self._restore_btn.clicked.connect(self._do_restore)
-        self._restore_skip = _btn("Skip", C_DARK_BTN, size=12, h=40)
+        self._restore_skip = _btn("Skip", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         self._restore_skip.setFixedWidth(120)
         self._restore_skip.clicked.connect(self._skip_restore)
 
@@ -1374,8 +1494,8 @@ class SetupCompleteScreen(QWidget):
         lay.addWidget(scroll, stretch=1)
 
         # ── Return action (pinned outside scroll) ─────────────────────────────
-        self._continue_btn = _btn("Continue to My Games", C_IW, size=11, h=42)
-        self._continue_btn.setFixedWidth(230)
+        self._continue_btn = _btn(LABELS["continue_to_library"], C_IW, size=FONT_ACTION, h=BTN_MIN_H)
+        self._continue_btn.setFixedWidth(300)
         self._continue_btn.clicked.connect(self._go_management)
         cw = QHBoxLayout(); cw.setContentsMargins(24,6,24,10)
         cw.addStretch(); cw.addWidget(self._continue_btn)
@@ -1389,7 +1509,7 @@ class SetupCompleteScreen(QWidget):
         self._intro.setText(
             "DeckOps set up controller layouts, GE-Proton and display settings. "
             "Open Steam or return to Game Mode to play.")
-        self._continue_btn.setText("Continue to My Games")
+        self._continue_btn.setText(LABELS["continue_to_library"])
         is_lcd = cfg.is_lcd()
         self._lcd_div.setVisible(is_lcd)
         self._lcd_hdr.setVisible(is_lcd)
@@ -1505,251 +1625,307 @@ class SetupCompleteScreen(QWidget):
     def _go_management(self):
         go_to(self.stack, "ManagementScreen")
 
+    # ── controller protocol (see ui_constants) ─────────────────────────────
+    def focus_target(self):
+        return self._continue_btn
+
+    def back_action(self):
+        self._go_management()
+
+    def escape_allowed(self):
+        # Leaving mid-restore could start an install over the same prefixes
+        return not getattr(self, "_restoring", False)
+
 
 # ── ConfigureScreen ───────────────────────────────────────────────────────────
 class ConfigureScreen(QWidget):
+    # Sections, and where each one's status line goes
+    _SECTIONS = ("maintenance", "tweaks", "support", "danger")
+
     def __init__(self, stack):
         super().__init__(); self.stack=stack; self.screen_name = "ConfigureScreen"
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         hdr, hl = _header_bar()
-        t = _lbl("SETTINGS", 16, C_TEXT, bold=True, wrap=False)
+        t = _lbl(screen_title("ConfigureScreen").upper(), 16, C_TEXT, bold=True, wrap=False)
         hl.insertSpacing(2, 20); hl.insertWidget(3, t)
-        back = _btn("<< Back", C_DARK_BTN, size=12, h=40); back.setFixedWidth(140)
-        back.clicked.connect(lambda: go_to(self.stack, "ManagementScreen"))
+        back = _btn(LABELS["back"], C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H); back.setFixedWidth(140)
+        back.clicked.connect(self.back_action)
+        self._back_btn = back
         hl.addWidget(back)
         lay.addWidget(hdr)
 
-        # Scroll only kicks in on windows smaller than the Deck screen
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        # Three columns fit the 1280x800 Deck screen without scrolling; a
+        # smaller window reflows to two or one column and scrolls.
+        scroll = _no_focus_scroll(QScrollArea()); scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         inner = QWidget()
         self._settings_scroll = scroll
         self._settings_cols = QGridLayout(inner)
-        self._settings_cols.setContentsMargins(20,16,20,16)
-        self._settings_cols.setSpacing(24)
-        self._left_panel = QWidget(); left = QVBoxLayout(self._left_panel)
-        left.setContentsMargins(0,0,0,0); left.setSpacing(10)
-        self._right_panel = QWidget(); right = QVBoxLayout(self._right_panel)
-        right.setContentsMargins(0,0,0,0); right.setSpacing(10)
-        self._settings_narrow = None
-        self._layout_settings()
+        self._settings_cols.setContentsMargins(20,14,20,14)
+        self._settings_cols.setHorizontalSpacing(20)
+        self._settings_cols.setVerticalSpacing(16)
+        self._status_labels = {}
+        self._task_buttons = []
 
-        def _head(col, text, color=C_TEXT, first=False):
-            if not first: col.addSpacing(12)
-            col.addWidget(_lbl(text, 13, color, bold=True, align=Qt.AlignmentFlag.AlignLeft))
+        def _panel(name, title, color=C_TEXT, frame_style=None):
+            panel = QFrame(); panel.setObjectName(name)
+            panel.setStyleSheet(frame_style or
+                                f"QFrame#{name}{{background:{C_CARD};border:1px solid {C_LINE};border-radius:8px;}}")
+            col = QVBoxLayout(panel); col.setContentsMargins(14,10,14,12); col.setSpacing(6)
+            col.addWidget(_lbl(title, 13, color, bold=True, align=Qt.AlignmentFlag.AlignLeft))
+            return panel, col
+
+        def _status(col, section):
+            # Each section reports next to the buttons that were pressed
+            lbl = _StatusLabel(FONT_BODY, C_DIM, auto_hide=True)
+            lbl.setObjectName(f"status_{section}")
+            col.addWidget(lbl)
+            self._status_labels[section] = lbl
+            return lbl
 
         def _desc(col, text):
-            """The small grey line under a section heading."""
-            lbl = _lbl(text, 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+            """The small grey line under an action."""
+            lbl = _lbl(text, 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
             col.addWidget(lbl)
             return lbl
 
-        # ── Left: Background Music ────────────────────────────────────────
-        _head(left, "Background Music", first=True)
-        _desc(left, "Plays music inside DeckOps. The slider sets the volume.")
+        def _action(col, text, slot, desc=None, task=True, color=C_DARK_BTN):
+            b = _btn(text, color, size=FONT_ACTION, h=BTN_MIN_H)
+            b.setMinimumWidth(0)
+            b.clicked.connect(slot)
+            col.addSpacing(4)
+            col.addWidget(b)
+            if desc:
+                _desc(col, desc)
+            if task:
+                self._task_buttons.append(b)
+            return b
+
+        # ── Maintenance ───────────────────────────────────────────────────
+        self._maint_panel, mcol = _panel("Maintenance", "Maintenance")
+        self._repair_btn = _action(mcol, "Repair Shortcuts", self._repair_shortcuts,
+                                   "Re-adds missing DeckOps shortcuts and repairs launch menus and "
+                                   "launch options. Closes Steam.")
+        self._ctrl_btn = _action(mcol, "Re-apply Controller Layout", self._apply_controller_profiles,
+                                 "Steam Deck: the bundled 'Call of Duty with controller support' layout "
+                                 "for DeckOps games. Closes Steam.")
+        self._check_btn = _action(mcol, "Check My Setup", self._check_setup,
+                                  "Checks each game's files, GE-Proton and launch option. Changes "
+                                  "nothing; Fix runs that game's Update.")
+        self._backup_btn = _action(mcol, "Back Up My Saves Now", self._backup_saves_now,
+                                   "Copies saves, stats and Plutonium mods to a folder that survives "
+                                   "an uninstall. Steam can stay open.")
+        # LCD only
+        self._shader_row = QWidget()
+        sr_lay = QVBoxLayout(self._shader_row); sr_lay.setContentsMargins(0,0,0,0); sr_lay.setSpacing(6)
+        self._shader_btn = _action(sr_lay, "Clear Shader Cache", self._clear_shader_cache,
+                                   "Clears the shader cache of every game you have set up. LCD only.")
+        mcol.addWidget(self._shader_row)
+        # Kept for showEvent's LCD toggle; the sections have no dividers
+        self._shader_hdiv = QWidget(); self._shader_hdiv.setFixedHeight(0)
+        mcol.addWidget(self._shader_hdiv)
+        mcol.addSpacing(4)
+        _status(mcol, "maintenance")
+        mcol.addStretch()
+
+        # ── Game tweaks ───────────────────────────────────────────────────
+        self._tweaks_panel, gcol = _panel("GameTweaks", "Game tweaks")
+        self._name_note = _lbl("Player name in IW4x and Plutonium offline", FONT_BODY, C_DIM,
+                               align=Qt.AlignmentFlag.AlignLeft)
+        gcol.addWidget(self._name_note)
+        nr = QHBoxLayout(); nr.setSpacing(8)
+        self._name_input = QLineEdit()
+        self._name_input.setPlaceholderText("Enter player name...")
+        self._name_input.setFixedHeight(BTN_MIN_H)
+        self._name_input.setMaxLength(32)
+        self._name_input.setFont(font(FONT_ACTION))
+        self._name_input.setStyleSheet(
+            f"QLineEdit{{background:{C_SURFACE};color:{C_TEXT};border:1px solid {C_LINE};"
+            "border-radius:6px;padding:0 10px;}"
+            f"QLineEdit:focus{{border:2px solid {C_FOCUS};}}"
+            f"QLineEdit:disabled{{background:{C_CARD};color:{C_DIM};border-color:{C_LINE};}}"
+        )
+        save_btn = _btn("Save", C_IW, size=FONT_ACTION, h=BTN_MIN_H)
+        save_btn.setFixedWidth(90)
+        save_btn.clicked.connect(self._save_name)
+        self._save_name_btn = save_btn
+        self._task_buttons.append(save_btn)
+        nr.addWidget(self._name_input, stretch=1); nr.addWidget(save_btn)
+        gcol.addLayout(nr)
+        self._deadzone_btn = _action(gcol, "Re-apply Deadzone", self._apply_deadzone,
+                                     "Stick deadzone 0.05 min / 0.00 max, also set when the library opens. "
+                                     "Other settings are kept.")
+        self._fps_btn = _action(gcol, "Apply 90 FPS / 90 FOV", self._apply_fps_fov,
+                                "Game configs of MW1, MW2/MW3 multiplayer, WaW, BO1 and BO2. "
+                                "Steam can stay open.")
+        self._cap_btn = _action(gcol, "", self._toggle_dxvk_cap,
+                                "The MW2 and MW3 campaigns ignore their configs: this limits them to "
+                                "90 FPS with DXVK (FOV 90 is set at every start). Closes Steam.")
+        self._refresh_cap_btn()
+        gcol.addSpacing(4)
+        _status(gcol, "tweaks")
+        gcol.addSpacing(6)
+        gcol.addWidget(_lbl("Background music", FONT_BODY, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         mr = QHBoxLayout(); mr.setSpacing(12)
         self._music_on = _saved_music_enabled()
         music_volume = _saved_music_volume()
         self._music_toggle = _btn(
             "Music: ON" if self._music_on else "Music: OFF",
             C_IW if self._music_on else C_DARK_BTN,
-            size=12, h=40,
+            size=FONT_ACTION, h=BTN_MIN_H,
         )
-        self._music_toggle.setFixedWidth(160)
+        self._music_toggle.setFixedWidth(140)
         self._music_toggle.clicked.connect(self._toggle_music)
         self._vol_slider = QSlider(Qt.Orientation.Horizontal); self._vol_slider.setRange(0,100)
         self._vol_slider.setValue(int(round(music_volume*100)))
-        self._vol_label = _lbl(f"{self._vol_slider.value()}%", 12, C_DIM, wrap=False)
+        self._vol_slider.setAccessibleName("Music volume")
+        self._vol_label = _lbl(f"{self._vol_slider.value()}%", FONT_BODY, C_DIM, wrap=False)
         self._vol_label.setFixedWidth(44)
         self._vol_slider.valueChanged.connect(self._set_volume)
         mr.addWidget(self._music_toggle); mr.addWidget(self._vol_slider,stretch=1); mr.addWidget(self._vol_label)
-        left.addLayout(mr)
+        gcol.addLayout(mr)
+        gcol.addStretch()
 
-        # ── Left: Controller Profiles ─────────────────────────────────────
-        _head(left, "Controller Profiles")
-        _desc(left, "Steam Deck: applies the bundled 'Call of Duty with controller support' "
-                    "layout to DeckOps games. Other controller types keep their Steam layouts. Closes Steam.")
-        ctrl_btn = _btn("Re-apply Layout", C_DARK_BTN, size=12, h=40)
-        ctrl_btn.setFixedWidth(220)
-        ctrl_btn.clicked.connect(self._apply_controller_profiles)
-        left.addWidget(ctrl_btn)
-
-        # ── Left: Shortcuts ───────────────────────────────────────────────
-        _head(left, "Shortcuts")
-        _desc(left, "Re-adds any missing DeckOps shortcuts and repairs the launch menus and "
-                    "launch options of your games. Closes Steam.")
-        sc_fix_btn = _btn("Repair Shortcuts", C_DARK_BTN, size=12, h=40)
-        sc_fix_btn.setFixedWidth(220); sc_fix_btn.clicked.connect(self._repair_shortcuts)
-        left.addWidget(sc_fix_btn)
-
-        # ── Left: Save Backup ─────────────────────────────────────────────
-        _head(left, "Save Backup")
-        _desc(left, "Copies your saves, stats and Plutonium mods to a folder that survives an "
-                    "uninstall. Steam can stay open.")
-        backup_btn = _btn("Back Up My Saves Now", C_DARK_BTN, size=12, h=40)
-        backup_btn.setFixedWidth(220); backup_btn.clicked.connect(self._backup_saves_now)
-        left.addWidget(backup_btn)
-
-        # ── Left: Check My Setup ──────────────────────────────────────────
-        _head(left, "Check My Setup")
-        _desc(left, "Checks each game's folder, mod files, GE-Proton and Steam launch option. It "
-                    "changes nothing; Fix runs that game's Update.")
-        check_btn = _btn("Check My Setup", C_DARK_BTN, size=12, h=40)
-        check_btn.setFixedWidth(220); check_btn.clicked.connect(self._check_setup)
-        left.addWidget(check_btn)
-
-        # ── Left: Player Name ─────────────────────────────────────────────
-        _head(left, "Player Name")
-        self._name_note = _desc(left, "Your name in IW4x and Plutonium offline.")
-        nr = QHBoxLayout(); nr.setSpacing(12)
-        self._name_input = QLineEdit()
-        self._name_input.setPlaceholderText("Enter player name...")
-        self._name_input.setFixedHeight(40)
-        self._name_input.setMaxLength(32)
-        self._name_input.setStyleSheet(
-            f"QLineEdit{{background:{C_SURFACE};color:{C_TEXT};border:1px solid {C_LINE};"
-            "border-radius:6px;padding:0 10px;font-size:13px;}"
-            f"QLineEdit:focus{{border:2px solid {C_FOCUS};}}"
-            f"QLineEdit:disabled{{background:{C_CARD};color:{C_DIM};border-color:{C_LINE};}}"
-        )
-        save_btn = _btn("Save", C_IW, size=12, h=40)
-        save_btn.setFixedWidth(90)
-        save_btn.clicked.connect(self._save_name)
-        nr.addWidget(self._name_input, stretch=1); nr.addWidget(save_btn)
-        left.addLayout(nr)
-
-        # ── Left: Controller stick deadzone ─────────────────────────────
-        _head(left, "Controller Deadzone")
-        _desc(left, "Automatically sets supported games to 0.05 minimum and 0.00 maximum "
-                    "when the library opens. Re-apply to existing configs without replacing other settings.")
-        deadzone_btn = _btn("Re-apply Deadzone", C_DARK_BTN, size=12, h=40)
-        deadzone_btn.setFixedWidth(220); deadzone_btn.clicked.connect(self._apply_deadzone)
-        left.addWidget(deadzone_btn)
-
-        # ── Left: FPS and FOV ─────────────────────────────────────────────
-        _head(left, "FPS and FOV")
-        _desc(left, "Writes 90 FOV and a 90 FPS limit into the game configs of MW1 (campaign and "
-                    "multiplayer), MW2 and MW3 multiplayer, WaW, BO1 and BO2 (every mode). "
-                    "Nothing else in those files changes. Steam can stay open.")
-        fps_btn = _btn("Apply 90 FPS / 90 FOV", C_DARK_BTN, size=12, h=40)
-        fps_btn.setFixedWidth(220); fps_btn.clicked.connect(self._apply_fps_fov)
-        left.addWidget(fps_btn)
-        left.addSpacing(6)
-        left.addWidget(_lbl("MW2 and MW3 campaign", 12, C_DIM, bold=True, align=Qt.AlignmentFlag.AlignLeft))
-        _desc(left, "These two campaigns ignore their config files, so the button above does nothing "
-                    "for them.\n"
-                    "FOV: DeckOps sets it to 90 by itself every time you start the game.\n"
-                    "FPS: use the button below. It limits the frame rate to 90 with DXVK, and "
-                    "changing it closes Steam.")
-        self._cap_btn = _btn("", C_DARK_BTN, size=12, h=40)
-        self._cap_btn.setFixedWidth(300); self._cap_btn.clicked.connect(self._toggle_dxvk_cap)
-        self._refresh_cap_btn()
-        left.addWidget(self._cap_btn)
-
-        # ── Left: Shader Cache (LCD only) ─────────────────────────────────
-        self._shader_row = QWidget()
-        sr_lay = QVBoxLayout(self._shader_row); sr_lay.setContentsMargins(0,0,0,0); sr_lay.setSpacing(10)
-        sr_lay.addSpacing(12)
-        sr_lay.addWidget(_lbl("Shader Cache", 13, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft))
-        _desc(sr_lay, "Clears the shader cache of every game you have set up. LCD only.")
-        sc_btn = _btn("Clear Shader Cache", C_DARK_BTN, size=12, h=40)
-        sc_btn.setFixedWidth(220)
-        sc_btn.clicked.connect(self._clear_shader_cache)
-        sr_lay.addWidget(sc_btn)
-        left.addWidget(self._shader_row)
-        # Kept for showEvent's LCD toggle; the two-column layout has no dividers
-        self._shader_hdiv = QWidget(); self._shader_hdiv.setFixedHeight(0)
-        left.addWidget(self._shader_hdiv)
-        left.addStretch()
-
-        # ── Right: Links ──────────────────────────────────────────────────
-        _head(right, "Links", first=True)
-        _desc(right, "Support on Discord, and the Stable and Nightly project pages.")
-        lr = QHBoxLayout(); lr.setSpacing(12)
-        discord_btn = _btn("Discord", C_DARK_BTN, size=12, h=40)
-        discord_btn.setFixedWidth(120)
-        discord_btn.clicked.connect(lambda: self._open_url("https://discord.gg/bkSQeq5Azk"))
-        stable_btn = _btn("Stable", C_DARK_BTN, size=12, h=40)
-        stable_btn.setFixedWidth(120)
-        stable_btn.clicked.connect(lambda: self._open_url(f"https://github.com/{GITHUB_USER}/DeckOps"))
-        nightly_btn = _btn("Nightly", C_DARK_BTN, size=12, h=40)
-        nightly_btn.setFixedWidth(120)
-        nightly_btn.clicked.connect(lambda: self._open_url(f"https://github.com/{GITHUB_USER}/DeckOps-Nightly"))
-        lr.addWidget(discord_btn); lr.addWidget(stable_btn); lr.addWidget(nightly_btn); lr.addStretch()
-        right.addLayout(lr)
-
-        # ── Right: Updates & Logs ─────────────────────────────────────────
-        _head(right, "Updates & Logs")
-        _desc(right, "Checks for a new DeckOps version. The log shows what DeckOps has done; "
-                     "copy it when you report a problem.")
-        self._update_btn = _btn("Check for Updates", C_DARK_BTN, size=12, h=40)
-        self._update_btn.setFixedWidth(220)
+        # ── Support ───────────────────────────────────────────────────────
+        self._support_panel, scol = _panel("Support", "Support")
+        # The one place DeckOps updates are checked and installed; the Library
+        # only shows a notice that leads here.
+        self._update_btn = _btn("Check for Updates", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        self._update_btn.setMinimumWidth(0)
         self._update_btn.clicked.connect(self._check_for_updates)
-        right.addWidget(self._update_btn)
-        self._update_status = _lbl("", 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        right.addWidget(self._update_status)
-        udr = QHBoxLayout(); udr.setSpacing(12)
-        log_btn = _btn("Copy Log", C_DARK_BTN, size=12, h=40)
-        log_btn.setFixedWidth(130)
-        view_log_btn = _btn("View Log", C_DARK_BTN, size=12, h=40)
-        view_log_btn.setFixedWidth(130)
+        scol.addWidget(self._update_btn)
+        self._update_status = _StatusLabel(FONT_BODY, C_DIM, auto_hide=True)
+        scol.addWidget(self._update_status)
+        udr = QHBoxLayout(); udr.setSpacing(8)
+        log_btn = _btn("Copy Log", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        view_log_btn = _btn("View Log", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        for b in (log_btn, view_log_btn):
+            b.setMinimumWidth(0)
         view_log_btn.clicked.connect(self._view_log)
-        udr.addWidget(log_btn); udr.addWidget(view_log_btn); udr.addStretch()
-        right.addLayout(udr)
-        self._log_status = _lbl("", 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        right.addWidget(self._log_status)
+        udr.addWidget(log_btn, 1); udr.addWidget(view_log_btn, 1)
+        scol.addSpacing(4)
+        scol.addLayout(udr)
+        self._log_status = _StatusLabel(FONT_BODY, C_DIM, auto_hide=True)
+        scol.addWidget(self._log_status)
         log_btn.clicked.connect(lambda: _copy_log_to_clipboard(self._log_status))
+        lr = QHBoxLayout(); lr.setSpacing(8)
+        discord_btn = _btn("Discord", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        discord_btn.clicked.connect(lambda: self._open_url("https://discord.gg/bkSQeq5Azk"))
+        stable_btn = _btn("Stable", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        stable_btn.clicked.connect(lambda: self._open_url(f"https://github.com/{GITHUB_USER}/DeckOps"))
+        nightly_btn = _btn("Nightly", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        nightly_btn.clicked.connect(lambda: self._open_url(f"https://github.com/{GITHUB_USER}/DeckOps-Nightly"))
+        for b in (discord_btn, stable_btn, nightly_btn):
+            b.setMinimumWidth(0)
+            lr.addWidget(b, 1)
+        scol.addSpacing(4)
+        scol.addLayout(lr)
+        _desc(scol, "Get help on Discord; the Stable and Nightly project pages.")
+        self._status_labels["support"] = self._update_status
+        self._about_label = _lbl("", 10, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        scol.addSpacing(4)
+        scol.addWidget(self._about_label)
 
-        # ── Right: Danger Zone ────────────────────────────────────────────
-        danger = QFrame(); danger.setObjectName("DangerZone")
-        danger.setStyleSheet("QFrame#DangerZone{background:#291B20;border:1px solid #A24848;"
-                             "border-radius:8px;}")
-        dz = QVBoxLayout(danger); dz.setContentsMargins(14,12,14,14); dz.setSpacing(8)
-        _head(dz, "Danger Zone", "#FF9292", first=True)
-        _desc(dz, "Full Uninstall removes DeckOps files, shortcuts and mod clients. "
-                  "Reset Config clears setup and starts the wizard again. "
-                  "Your save backups are kept; both actions ask for confirmation.")
-        uninstall_btn = _btn("Full Uninstall...", C_RED_BTN, size=12, h=40)
-        reset_cfg_btn = _btn("Reset DeckOps Config...", C_RED_BTN, size=12, h=40)
+        # ── Danger Zone ───────────────────────────────────────────────────
+        danger, dz = _panel("DangerZone", "Danger Zone", "#FF9292",
+                            "QFrame#DangerZone{background:#291B20;border:1px solid #A24848;"
+                            "border-radius:8px;}")
+        _desc(dz, "Both ask first. Your save backups are kept.")
+        dr = QHBoxLayout(); dr.setSpacing(8)
+        uninstall_btn = _btn("Full Uninstall...", C_RED_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        reset_cfg_btn = _btn("Reset Config...", C_RED_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        reset_cfg_btn.setToolTip("Reset DeckOps Config: clears setup and starts the wizard again")
+        reset_cfg_btn.setAccessibleName("Reset DeckOps Config")
+        uninstall_btn.setToolTip("Removes DeckOps files, shortcuts and mod clients")
+        for b in (uninstall_btn, reset_cfg_btn):
+            b.setMinimumWidth(0)
+            dr.addWidget(b, 1)
+            self._task_buttons.append(b)
         uninstall_btn.clicked.connect(self._confirm_uninstall)
         reset_cfg_btn.clicked.connect(self._confirm_reset)
-        dz.addWidget(uninstall_btn)
-        dz.addWidget(reset_cfg_btn)
-        right.addWidget(danger)
+        dz.addLayout(dr)
+        _status(dz, "danger")
+        self._danger_panel = danger
 
-        # ── Right: About; status stays visible below the scroll ───────────
-        right.addSpacing(12)
-        self._about_label = _lbl("", 11, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        right.addWidget(self._about_label)
-        right.addStretch()
+        self._support_col = QWidget()
+        sc = QVBoxLayout(self._support_col); sc.setContentsMargins(0,0,0,0); sc.setSpacing(16)
+        sc.addWidget(self._support_panel); sc.addWidget(danger); sc.addStretch()
+
+        self._active_status = self._status_labels["maintenance"]
+        self._settings_columns = 0
+        self._settings_narrow = None
+        self._layout_settings()
 
         scroll.setWidget(inner)
         lay.addWidget(scroll, stretch=1)
-        self.status = _lbl("", 12, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
-        self.status.setContentsMargins(20, 6, 20, 6)
-        lay.addWidget(self.status)
+
+        _chain_focus([back] + self._focus_order_body())
+
+    def _focus_order_body(self):
+        return [self._repair_btn, self._ctrl_btn, self._check_btn, self._backup_btn, self._shader_btn,
+                self._name_input, self._save_name_btn, self._deadzone_btn, self._fps_btn, self._cap_btn,
+                self._music_toggle, self._vol_slider,
+                self._update_btn] + self._support_panel.findChildren(QPushButton)[1:] + \
+               self._danger_panel.findChildren(QPushButton)
+
+    # ── per-section status ──────────────────────────────────────────────────
+    @property
+    def status(self):
+        """The status line of the section whose action ran last."""
+        return self._active_status
+
+    def _use_status(self, section):
+        self._active_status = self._status_labels[section]
+        return self._active_status
+
+    def _set_tasks_enabled(self, enabled):
+        for b in self._task_buttons:
+            b.setEnabled(enabled)
+        self._name_input.setEnabled(enabled)
+
+    # ── controller protocol (see ui_constants) ─────────────────────────────
+    def focus_target(self):
+        return next((b for b in self._task_buttons if b.isEnabled()), self._back_btn)
+
+    def back_action(self):
+        go_to(self.stack, "ManagementScreen")
+
+    def escape_allowed(self):
+        return not (getattr(self, "_settings_running", False) or getattr(self, "_updating", False))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._layout_settings()
 
     def _layout_settings(self):
-        narrow = self.width() < 1080
-        if narrow == self._settings_narrow:
+        w = self.width()
+        columns = 3 if w >= 1100 else 2 if w >= 760 else 1
+        if columns == self._settings_columns:
             return
-        self._settings_narrow = narrow
-        for panel in (self._left_panel, self._right_panel):
+        self._settings_columns = columns
+        self._settings_narrow = columns < 3
+        panels = (self._maint_panel, self._tweaks_panel, self._support_col)
+        for panel in panels:
             self._settings_cols.removeWidget(panel)
-        self._settings_cols.addWidget(self._left_panel, 0, 0)
-        self._settings_cols.addWidget(self._right_panel, 1 if narrow else 0, 0 if narrow else 1)
-        self._settings_cols.setColumnStretch(0, 1)
-        self._settings_cols.setColumnStretch(1, 0 if narrow else 1)
+        if columns == 3:
+            spots = ((0, 0), (0, 1), (0, 2))
+        elif columns == 2:
+            spots = ((0, 0), (0, 1), (1, 0))
+        else:
+            spots = ((0, 0), (1, 0), (2, 0))
+        for panel, (r, c) in zip(panels, spots):
+            self._settings_cols.addWidget(panel, r, c, Qt.AlignmentFlag.AlignTop)
+        for c in range(3):
+            self._settings_cols.setColumnStretch(c, 1 if c < columns else 0)
 
     def showEvent(self, event):
         super().showEvent(event)
         if event.spontaneous():     # window restored: don't overwrite what's being typed
             return
+        # Land on the first section action, not on Back (which Qt may pick
+        # while the previous screen's focused widget is hidden)
+        _focus_first(self.focus_target())
         # Sync music toggle with the persistent control, if it changed outside Settings.
         self._sync_music_toggle()
         # Refresh dynamic state
@@ -1885,24 +2061,36 @@ class ConfigureScreen(QWidget):
         took_lock = not inhibit.busy()
         if took_lock:
             inhibit.start("DeckOps is changing Steam settings")
+        # Only one task at a time: the others are greyed out until this one ends
+        # (success or failure). Focus returns to the button that started it.
+        fw = QApplication.focusWidget()
+        pressed = fw if fw in self._task_buttons else None
+        self._set_tasks_enabled(False)
 
         def _release(_ok):
             self._settings_running = False
             if took_lock:
                 inhibit.stop()
+            try:
+                self._set_tasks_enabled(True)
+                if pressed is not None and self.isVisible() and QApplication.activeModalWidget() is None:
+                    pressed.setFocus(Qt.FocusReason.OtherFocusReason)
+            except RuntimeError:
+                pass        # screen closed while the task ran
         s.done.connect(_release)
         return True
 
     def _apply_controller_profiles(self):
+        st = self._use_status("maintenance")
         s = _Sigs()
         if not self._settings_task(s):
             return
-        self.status.setText("Re-applying controller profiles...")
-        s.log.connect(lambda msg: self.status.setText(msg))
+        st.setText("Re-applying controller profiles...")
+        s.log.connect(lambda msg: st.setText(msg))
         # The worker's own explanation, kept: the generic line below used to replace
         # it the instant `done` fired, so the real reason was never readable.
         reason = []
-        s.done.connect(lambda ok: self.status.setText(
+        s.done.connect(lambda ok: st.setText(
             "✓  Steam Deck layout applied." if ok else
             f"✗  {reason[0]}" if reason else "✗  Could not apply Steam Deck layout; see log."
         ))
@@ -1935,6 +2123,7 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _repair_shortcuts(self):
+        self._use_status("maintenance")
         s = _Sigs()
         if not self._settings_task(s):
             return
@@ -1942,8 +2131,9 @@ class ConfigureScreen(QWidget):
 
     def _start_shortcut_repair(self, s, errors=None, verify_cap=False):
         """Run the shared repair worker after the Settings task slot is reserved."""
-        self.status.setText("Checking shortcuts...")
-        s.log.connect(lambda msg: self.status.setText(msg))
+        st = self.status
+        st.setText("Checking shortcuts...")
+        s.log.connect(lambda msg: st.setText(msg))
         def _run():
             ok = False
             try:
@@ -1978,10 +2168,11 @@ class ConfigureScreen(QWidget):
             s.done.emit(False)
 
     def _save_name(self):
+        st = self._use_status("tweaks")
         typed = self._name_input.text().strip()
         name = cfg.clean_player_name(typed)
         if not name:
-            self.status.setText("Please enter a name (letters, numbers and most symbols; "
+            st.setText("Please enter a name (letters, numbers and most symbols; "
                                 "not \" \\ / $ ` ; < > : | ? *).")
             return
         s = _Sigs()
@@ -1989,8 +2180,8 @@ class ConfigureScreen(QWidget):
             return
         self._name_input.setText(name)
         cfg.set_player_name(name)
-        self.status.setText(f"Updating player name to \"{name}\"...")
-        s.log.connect(lambda msg: self.status.setText(msg))
+        st.setText(f"Updating player name to \"{name}\"...")
+        s.log.connect(lambda msg: st.setText(msg))
         def _run():
             try:
                 from game_config import rename_player
@@ -2014,6 +2205,7 @@ class ConfigureScreen(QWidget):
 
     def _toggle_dxvk_cap(self):
         """Apply the cap with shortcut repair, restoring the old value on failure."""
+        st = self._use_status("tweaks")
         s = _Sigs()
         if not self._settings_task(s):
             return  # A busy click must not change the config or the button.
@@ -2027,13 +2219,13 @@ class ConfigureScreen(QWidget):
             self._refresh_cap_btn()
         except Exception as ex:
             s.done.emit(False)  # Release the Settings task slot even if saving failed.
-            self.status.setText(f"✗  Could not change FPS limit: {ex}")
+            st.setText(f"✗  Could not change FPS limit: {ex}")
             return
 
         errors = []
         def _finish(ok):
             if ok:
-                self.status.setText("✓  FPS limit updated. Shortcuts repaired; safe to reopen Steam.")
+                st.setText("✓  FPS limit updated. Shortcuts repaired; safe to reopen Steam.")
                 return
             reason = errors[0] if errors else "unknown error"
             try:
@@ -2046,20 +2238,21 @@ class ConfigureScreen(QWidget):
                     cfg.save(config)
                 self._refresh_cap_btn()
             except Exception as ex:
-                self.status.setText(f"✗  Shortcut repair failed ({reason}); "
+                st.setText(f"✗  Shortcut repair failed ({reason}); "
                                     f"could not restore FPS limit: {ex}")
                 return
-            self.status.setText(f"✗  Shortcut repair failed ({reason}). "
+            st.setText(f"✗  Shortcut repair failed ({reason}). "
                                 "FPS limit restored to its previous setting.")
         s.done.connect(_finish)
         self._start_shortcut_repair(s, errors, verify_cap=True)
 
     def _apply_deadzone(self):
+        st = self._use_status("tweaks")
         s = _Sigs()
         if not self._settings_task(s):
             return
-        self.status.setText("Applying controller stick deadzones...")
-        s.log.connect(lambda msg: self.status.setText(msg))
+        st.setText("Applying controller stick deadzones...")
+        s.log.connect(lambda msg: st.setText(msg))
         def _run():
             try:
                 from game_config import set_deadzone
@@ -2086,11 +2279,12 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _apply_fps_fov(self):
+        st = self._use_status("tweaks")
         s = _Sigs()
         if not self._settings_task(s):
             return
-        self.status.setText("Setting 90 FPS and 90 FOV...")
-        s.log.connect(lambda msg: self.status.setText(msg))
+        st.setText("Setting 90 FPS and 90 FOV...")
+        s.log.connect(lambda msg: st.setText(msg))
         def _run():
             try:
                 from game_config import set_fps_fov
@@ -2116,11 +2310,12 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _backup_saves_now(self):
+        st = self._use_status("maintenance")
         s = _Sigs()
         if not self._settings_task(s):
             return
-        self.status.setText("Backing up your saves...")
-        s.log.connect(lambda msg: self.status.setText(msg))
+        st.setText("Backing up your saves...")
+        s.log.connect(lambda msg: st.setText(msg))
         def _run():
             try:
                 from save_backup import backup_saves, describe_backup
@@ -2136,11 +2331,12 @@ class ConfigureScreen(QWidget):
         threading.Thread(target=_run, daemon=True).start()
 
     def _clear_shader_cache(self):
+        st = self._use_status("maintenance")
         s = _Sigs()
         if not self._settings_task(s):
             return
-        self.status.setText("Clearing shader cache...")
-        s.log.connect(lambda msg: self.status.setText(msg))
+        st.setText("Clearing shader cache...")
+        s.log.connect(lambda msg: st.setText(msg))
         def _run():
             try:
                 from cache_cleanup import cleanup_shader_cache, STEAM_APPIDS
@@ -2166,10 +2362,11 @@ class ConfigureScreen(QWidget):
 
     def _check_setup(self):
         """Run setup_check in the background, then show the report."""
+        st = self._use_status("maintenance")
         s = _Sigs()
         if not self._settings_task(s):
             return
-        self.status.setText("Checking your setup...")
+        st.setText("Checking your setup...")
         self._setup_results = None
         # Looked up here: the worker must not walk the widget stack from its thread
         mgmt = get_screen(self.stack, "ManagementScreen")
@@ -2198,7 +2395,7 @@ class ConfigureScreen(QWidget):
                 s.done.emit(True)
 
         def _show(msg):
-            self.status.setText(msg)
+            st.setText(msg)
             if self._setup_results:
                 self._show_setup_report(*self._setup_results)
         s.log.connect(_show)
@@ -2215,46 +2412,53 @@ class ConfigureScreen(QWidget):
                           "Everything looks fine." if not bad else
                           f"{len(bad)} of {len(results)} item(s) need attention.",
                           13, C_TEXT, bold=True, align=Qt.AlignmentFlag.AlignLeft))
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll = _no_focus_scroll(QScrollArea()); scroll.setWidgetResizable(True)
         inner = QWidget(); rows = QVBoxLayout(inner); rows.setSpacing(8)
+        fixes = []
         for r in results:
             row = QHBoxLayout()
-            text = f"✓  {r['name']}" if not r["problems"] else \
-                f"⚠  {r['name']}\n" + "\n".join("     • " + p for p in r["problems"])
-            row.addWidget(_lbl(text, 11, C_DIM if not r["problems"] else C_TREY,
+            text = _plain_marks(f"✓  {r['name']}") if not r["problems"] else \
+                _plain_marks(f"⚠  {r['name']}") + "\n" + "\n".join("     • " + p for p in r["problems"])
+            row.addWidget(_lbl(text, FONT_BODY, C_DIM if not r["problems"] else C_TREY,
                                align=Qt.AlignmentFlag.AlignLeft), stretch=1)
             if r["fixable"]:
-                fix = _btn("Fix", C_IW, size=11, h=36); fix.setFixedWidth(90)
+                fix = _btn("Fix", C_IW, size=FONT_ACTION, h=BTN_MIN_H); fix.setFixedWidth(90)
+                fix.setAccessibleName(f"Fix {r['name']}")
                 if r.get("fix") == "shortcuts":      # Repair Shortcuts, not a game's Update
                     fix.clicked.connect(lambda _c=False: (dlg.accept(), self._repair_shortcuts()))
                 else:
                     fix.clicked.connect(lambda _c=False, k=r["key"]: (dlg.accept(), self._fix_game(k)))
-                row.addWidget(fix)
+                row.addWidget(fix, 0, Qt.AlignmentFlag.AlignTop)
+                fixes.append(fix)
             rows.addLayout(row)
         rows.addStretch()
         scroll.setWidget(inner)
         vl.addWidget(scroll, stretch=1)
-        close = _btn("Close", C_DARK_BTN, size=11, h=40); close.setFixedWidth(130)
+        close = _btn("Close", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H); close.setFixedWidth(130)
         close.clicked.connect(dlg.reject)
         br = QHBoxLayout(); br.addStretch(); br.addWidget(close); br.addStretch()
         vl.addLayout(br)
+        _chain_focus(fixes + [close])
+        # Open on the first action (a Fix, else Close), not on the scroll area
+        (fixes[0] if fixes else close).setFocus(Qt.FocusReason.OtherFocusReason)
         self._setup_dialog = dlg
         dlg.exec()
 
     def _fix_game(self, key):
         """Fix = the game's normal Update (reinstalls the client, GE-Proton,
         launch options; closes Steam itself)."""
+        st = self._use_status("maintenance")
         gd = next((g for g in ALL_GAMES if key in g.get("keys", [])), None)
         mgmt = get_screen(self.stack, "ManagementScreen")
-        if not mgmt.installed:          # My Games hasn't scanned yet: use the check's scan
+        if not mgmt.installed:          # the Library hasn't scanned yet: use the check's scan
             mgmt.installed = dict(getattr(self, "_setup_installed", None) or {})
         if not gd or not mgmt.installed.get(key):
-            self.status.setText("That game could not be found; open My Games and try again.")
+            st.setText("That game could not be found; open the Game Library and try again.")
             return
         # _update refuses (busy, or nothing it can update) on the Library's status
         # line, which is not on screen here: Fix used to do nothing and say nothing.
         if mgmt._update(gd, [key]) is False:
-            self.status.setText(mgmt._status.text() or "Update has nothing to repair for this game.")
+            st.setText(mgmt._status.text() or "Update has nothing to repair for this game.")
 
     def _view_log(self):
         from ui_constants import LOG_PATH
@@ -2278,21 +2482,31 @@ class ConfigureScreen(QWidget):
             f"QPlainTextEdit:disabled{{background:{C_CARD};color:{C_DIM};border-color:{C_LINE};}}")
         txt.setPlainText(tail)
         vl.addWidget(txt, stretch=1)
-        br = QHBoxLayout()
-        copy_btn = _btn("Copy to Clipboard", C_DARK_BTN, size=11, h=40)
+        br = QHBoxLayout(); br.setSpacing(12)
+        # The confirmation shows here, in the dialog, not behind it on Settings
+        copied = _StatusLabel(FONT_BODY, C_DIM)
+        copied.setObjectName("viewLogStatus")
+        copy_btn = _btn("Copy to Clipboard", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         copy_btn.clicked.connect(lambda: (
             QApplication.clipboard().setText(tail),
-            self.status.setText("Log copied to clipboard."),
+            copied.setText("Log copied to clipboard."),
         ))
-        br.addStretch(); br.addWidget(copy_btn); br.addStretch()
+        close = _btn("Close", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H); close.setFixedWidth(130)
+        close.clicked.connect(dlg.reject)
+        br.addWidget(copied, 1, Qt.AlignmentFlag.AlignVCenter)
+        br.addWidget(copy_btn); br.addWidget(close)
         vl.addLayout(br)
         txt.verticalScrollBar().setValue(txt.verticalScrollBar().maximum())
+        _chain_focus([copy_btn, close, txt])
+        copy_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._log_dialog = dlg
         dlg.exec()
 
     def _open_url(self, url):
         _detached_open(["xdg-open", url])
 
     def _confirm_uninstall(self):
+        self._use_status("danger")
         reply = QMessageBox.warning(
             self, "Full Uninstall",
             "This removes DeckOps's files, shortcuts, controller layouts and mod client "
@@ -2306,17 +2520,18 @@ class ConfigureScreen(QWidget):
             self._run_uninstaller()
 
     def _run_uninstaller(self):
+        st = self._use_status("danger")
         uninstall_script = os.path.join(PROJECT_ROOT, "deckops_uninstall.sh")
         if not os.path.exists(uninstall_script):
-            self.status.setText("✗  Uninstall script not found.")
+            st.setText("✗  Uninstall script not found.")
             return
         # quit() skips the window's "stop it part way?" question, so check here: an
         # uninstall during an install or a Steam change would cut that off mid-write
         busy = inhibit.busy()
         if busy:
-            self.status.setText(f"✗  Wait for this to finish first: {str(busy).rstrip('.')}.")
+            st.setText(f"✗  Wait for this to finish first: {str(busy).rstrip('.')}.")
             return
-        self.status.setText("Launching uninstaller...")
+        st.setText("Launching uninstaller...")
         # Konsole first so the user can see progress; xterm if it isn't there. Only the
         # launch is in the try: an error from quitting (after Konsole started) used to
         # start a second uninstaller in xterm.
@@ -2329,7 +2544,7 @@ class ConfigureScreen(QWidget):
             except Exception as ex:
                 error = ex
         if error is not None:
-            self.status.setText(f"✗  Could not launch uninstaller: {error}")
+            st.setText(f"✗  Could not launch uninstaller: {error}")
             return
         # Close DeckOps — the uninstaller will remove our files
         _kill_audio()
@@ -2564,6 +2779,10 @@ class ConfigureScreen(QWidget):
         python = sys.executable
         entry = os.path.join(PROJECT_ROOT, "src", "main.py")
         _log.info("Relaunching: %s %s", python, entry)
+        # execv replaces this process without running any cleanup: release the
+        # sleep inhibitor (and the busy flag) now, or the relaunched DeckOps
+        # starts with a leaked inhibitor nothing will ever stop.
+        self._end_update()
         try:
             os.execv(python, [python, entry])
         except OSError as ex:
@@ -2581,11 +2800,12 @@ class ConfigureScreen(QWidget):
             self._update_status.setStyleSheet(f"color:{C_TREY};")
 
     def _confirm_reset(self):
+        st = self._use_status("danger")
         # Like the uninstall: a running task (or install) still writes deckops.json,
         # which would bring back half a config right after the wipe.
         busy = inhibit.busy()
         if busy:
-            self.status.setText(f"✗  Wait for this to finish first: {str(busy).rstrip('.')}.")
+            st.setText(f"✗  Wait for this to finish first: {str(busy).rstrip('.')}.")
             return
         reply = QMessageBox.warning(
             self, "Reset Config",
@@ -2600,6 +2820,7 @@ class ConfigureScreen(QWidget):
             self._reset_deckops()
 
     def _reset_deckops(self):
+        st = self._use_status("danger")
         cfg.reset()
         # The screens keep what the old setup chose and found; setup starts clean
         for name in ("SetupScreen",):
@@ -2610,7 +2831,7 @@ class ConfigureScreen(QWidget):
         if library is not None:
             library.installed = {}
         self._reload_saved_settings()
-        self.status.setText("Config wiped. Restarting setup...")
+        st.setText("Config wiped. Restarting setup...")
         QTimer.singleShot(1500, lambda: go_to(self.stack, "BootstrapScreen"))
 
 
@@ -2634,7 +2855,7 @@ class UpdateScreen(QWidget):
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
         hdr, hl = _header_bar()
-        hl.addWidget(_lbl("GAME MAINTENANCE", 11, C_IW, bold=True, wrap=False))
+        hl.addWidget(_lbl(screen_title("UpdateScreen").upper(), 12, C_IW, bold=True, wrap=False))
         lay.addWidget(hdr)
 
         content = QWidget(); body = QVBoxLayout(content)
@@ -2642,7 +2863,8 @@ class UpdateScreen(QWidget):
         self.title = _lbl("GAME UPDATES", 18, C_TEXT, bold=True,
                           align=Qt.AlignmentFlag.AlignLeft)
         body.addWidget(self.title)
-        self.cur = _lbl("Preparing...", 12, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
+        self.cur = _StatusLabel(FONT_ACTION, C_TEXT)
+        self.cur.setText("Preparing...")
         self.cur.setAccessibleName("Current update status")
         body.addWidget(self.cur)
         self.bar = QProgressBar(); self.bar.setRange(0, 100)
@@ -2651,14 +2873,18 @@ class UpdateScreen(QWidget):
         self.bar.setFixedHeight(22)
         body.addWidget(self.bar)
 
+        # Label, copy result and button share one vertically centred row
         lr = QHBoxLayout(); lr.setSpacing(8)
-        lr.addWidget(_lbl("OPERATION LOG", 10, C_DIM, bold=True,
-                          align=Qt.AlignmentFlag.AlignLeft, wrap=False), 1)
-        self._log_status = _lbl("", 10, C_DIM, align=Qt.AlignmentFlag.AlignRight)
-        lr.addWidget(self._log_status, 2)
-        log_btn = _btn("Copy Log", C_DARK_BTN, size=10, h=36)
+        center = Qt.AlignmentFlag.AlignVCenter
+        self._log_heading = _lbl("OPERATION LOG", 10, C_DIM, bold=True,
+                                 align=Qt.AlignmentFlag.AlignLeft | center, wrap=False)
+        lr.addWidget(self._log_heading, 1, center)
+        self._log_status = _StatusLabel(10, C_DIM, Qt.AlignmentFlag.AlignRight | center)
+        lr.addWidget(self._log_status, 2, center)
+        log_btn = _btn("Copy Log", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         log_btn.clicked.connect(lambda: _copy_log_to_clipboard(self._log_status))
-        lr.addWidget(log_btn)
+        self._copy_log_btn = log_btn
+        lr.addWidget(log_btn, 0, center)
         body.addLayout(lr)
 
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
@@ -2678,19 +2904,19 @@ class UpdateScreen(QWidget):
         self._footer = footer
         actions = QHBoxLayout(footer)
         actions.setContentsMargins(0,4,0,0); actions.setSpacing(8)
-        self.steam_btn = _btn("I've closed Plutonium", C_TREY, size=11, h=44)
+        self.steam_btn = _btn("I've closed Plutonium", C_TREY, size=FONT_ACTION, h=BTN_MIN_H)
         self.steam_btn.setVisible(False)
         self.steam_btn.setMaximumWidth(280)
         self.steam_btn.clicked.connect(lambda: self._steam_closed.set())
-        self.back_btn = _btn("Back to My Games", C_DARK_BTN, size=11, h=44)
-        self.back_btn.setMaximumWidth(220)
+        self.back_btn = _btn(LABELS["back_to_library"], C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        self.back_btn.setMaximumWidth(260)
         self.back_btn.setVisible(False)
         self.back_btn.clicked.connect(self._go_back)
-        self.retry_btn = _btn("Retry Failed Updates", C_IW, size=11, h=44)
-        self.retry_btn.setMaximumWidth(220)
+        self.retry_btn = _btn("Retry Failed Updates", C_IW, size=FONT_ACTION, h=BTN_MIN_H)
+        self.retry_btn.setMaximumWidth(260)
         self.retry_btn.setVisible(False)
         self.retry_btn.clicked.connect(self._retry_failed)
-        self.stop_btn = _btn("Stop After Current Step", C_DARK_BTN, size=11, h=44)
+        self.stop_btn = _btn("Stop After Current Step", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         self.stop_btn.setVisible(False)
         self.stop_btn.clicked.connect(self._request_stop)
         actions.addStretch()
@@ -2701,6 +2927,9 @@ class UpdateScreen(QWidget):
         actions.addStretch()
         body.addWidget(footer)
         lay.addWidget(content, stretch=1)
+        # The footer actions first, then the log controls
+        _chain_focus([self.steam_btn, self.stop_btn, self.retry_btn, self.back_btn, log_btn, self.log])
+        self._running = False
 
         self._s = _Sigs()
         self._s.progress.connect(self._on_progress)
@@ -2712,6 +2941,26 @@ class UpdateScreen(QWidget):
         self._ask_event = threading.Event()
         self._ask_yes = False
         self._cancelled = False
+
+    # ── controller protocol (see ui_constants) ─────────────────────────────
+    def focus_target(self):
+        """The action that matters now: the Plutonium confirmation, Retry,
+        Back, or Stop while the update runs."""
+        for b in (self.steam_btn, self.retry_btn, self.back_btn, self.stop_btn):
+            if not b.isHidden() and b.isEnabled():
+                return b
+        return None
+
+    def escape_allowed(self):
+        return not self._running
+
+    def back_action(self):
+        if not self._running:
+            self._go_back()
+
+    def _land_focus(self):
+        if self.isVisible():
+            _focus_first([self.steam_btn, self.retry_btn, self.back_btn, self.stop_btn])
 
     def _on_progress(self, percent, message):
         # Steps (and some installers) can report 100 independently. Only the
@@ -2732,9 +2981,11 @@ class UpdateScreen(QWidget):
         self.steam_btn.setVisible(True)
         self.cur.setText("Close the Plutonium window, then press the button below to continue.")
         self.cur.setStyleSheet(f"color:{C_TREY};background:transparent;")
+        self._land_focus()
 
     def _plutonium_closed(self):
         self.steam_btn.setVisible(False)
+        self._land_focus()
         if self._stop_requested.is_set():
             return
         self.cur.setText("Checking Plutonium and finishing game updates...")
@@ -2822,9 +3073,18 @@ class UpdateScreen(QWidget):
         if self._took_inhibit:
             inhibit.start("DeckOps is updating")
         _log_to_file("── Update started ──")
+        self._running = True
+        self._land_focus()
         QTimer.singleShot(400, lambda: threading.Thread(target=self._run, daemon=True).start())
 
     def _on_done(self, ok):
+        self._running = False
+        try:
+            self._show_result(ok)
+        finally:
+            self._land_focus()
+
+    def _show_result(self, ok):
         if getattr(self, "_took_inhibit", True):
             inhibit.stop()
         self._took_inhibit = False
@@ -2834,7 +3094,7 @@ class UpdateScreen(QWidget):
         if ok:
             self.bar.setValue(100)
             self.bar.setFormat("%p% complete")
-            self.cur.setText("Complete. It is now safe to open Steam or return to My Games.")
+            self.cur.setText("Complete. It is now safe to open Steam or return to the Game Library.")
             self.cur.setStyleSheet(f"color:{C_IW};background:transparent;")
             return
         self.bar.setFormat("%p% reached")
@@ -2851,7 +3111,7 @@ class UpdateScreen(QWidget):
             names = ", ".join(dict.fromkeys(gd["base"] for _, gd, _ in self._failed_games))
             self.cur.setText(f"Update incomplete: {names}. Retry failed modes or check the log.")
         else:
-            self.cur.setText("Update failed. Check the log, then return to My Games to try again.")
+            self.cur.setText("Update failed. Check the log, then return to the Game Library to try again.")
 
     def _retry_failed(self):
         retry_games = list(self._failed_games)

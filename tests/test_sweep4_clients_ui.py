@@ -296,13 +296,13 @@ class InstallScreenTests(unittest.TestCase):
         self.assertNotIn("⚠", self.screen.summary.text())
 
     def test_a_failed_rescan_does_not_hand_old_games_to_set_up(self):
-        welcome = ui_install.WelcomeScreen(self.stack)
-        welcome.steam_installed = {"t4mp": {}}
-        welcome.own_installed = {"cod4mp": {}}
-        welcome.installed = {"t4mp": {}, "cod4mp": {}}
+        # The first-run scan now lives on Select Games (SetupScreen)
+        select = ui_install.SetupScreen(self.stack)
+        select.steam_installed = {"t4mp": {}}
+        select.own_installed = {"cod4mp": {}}
         with patch.object(ui_install.threading, "Thread"):
-            welcome._start_scan()
-        self.assertEqual((welcome.steam_installed, welcome.own_installed, welcome.installed), ({}, {}, {}))
+            select._start_scan()
+        self.assertEqual((select.steam_installed, select.own_installed), ({}, {}))
 
 
 @unittest.skipIf(QApplication is None, "PyQt is not installed")

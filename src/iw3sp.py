@@ -28,6 +28,7 @@ from steam_common import sha1_file as _sha1, write_json
 _CDN          = "https://jerryalt.codeberg.page"
 METADATA_FILE = "deckops_iw3sp.json"
 COD4_APPID    = "7940"
+MOD_EXE       = "iw3sp_mod.exe"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -99,6 +100,13 @@ def install_iw3sp(game: dict, steam_root: str,
         files = _get_manifest()
     except Exception as ex:
         raise RuntimeError(f"Failed to fetch IW3SP-MOD file list: {ex}") from ex
+    # An empty or truncated list used to "install" nothing and still save the
+    # metadata and report success, leaving a launch option pointing at an
+    # iw3sp_mod.exe that was never downloaded.
+    if not isinstance(files, list) or not files:
+        raise RuntimeError("The IW3SP-MOD file list is empty; nothing to install. Try again later.")
+    if not any(isinstance(e, (list, tuple)) and e and e[0] == MOD_EXE for e in files):
+        raise RuntimeError(f"The IW3SP-MOD file list is incomplete (no {MOD_EXE}). Try again later.")
 
     # Validate *all* paths before hashing or writing any files. The CDN's
     # manifest is remote input, including paths for files already installed.
@@ -133,6 +141,9 @@ def install_iw3sp(game: dict, steam_root: str,
             commit_staged_files(install_dir, staging, [n for n, _, _, _ in todo])
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+
+    if not os.path.isfile(os.path.join(install_dir, MOD_EXE)):
+        raise RuntimeError(f"IW3SP-MOD install is incomplete: {MOD_EXE} is missing.")
 
     # Restore iw3sp.exe from legacy backup if the old exe-swap is present
     iw3sp_bak = os.path.join(install_dir, "iw3sp.exe.bak")

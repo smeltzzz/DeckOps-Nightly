@@ -10,12 +10,60 @@ CLEAR='\033[0m'
 
 info()    { printf "${CYAN}${BOLD}[DeckOps]${CLEAR} %s\n" "$1"; }
 success() { printf "${GREEN}${BOLD}[  OK  ]${CLEAR} %s\n" "$1"; }
-warn()    { printf "${YELLOW}${BOLD}[ WARN ]${CLEAR} %s\n" "$1"; }
+warn()    { LAST_WARN="$1"; printf "${YELLOW}${BOLD}[ WARN ]${CLEAR} %s\n" "$1"; }
 skip()    { printf "         %s\n" "$1"; }
+
+# The app opens this script with `konsole -e` / `xterm -e`, whose window closes
+# the moment it exits: every early stop (Steam would not close, no Steam root,
+# a failed hand-over) flashed its reason past and vanished. A failed exit now
+# says why in a dialog and, in a terminal, waits for Enter (from the terminal,
+# like install.sh's die(); without one -- a test, a pipe -- it never blocks).
+LAST_WARN=""
+CLEAN_PY_HELPERS=""
+pause_if_terminal() {
+    [ -t 1 ] || return 0
+    printf "  Press Enter to close..."
+    read -r _ </dev/tty 2>/dev/null || true
+    echo ""
+}
+# ask_no_default <text> <yes-label> <no-label>: a Yes/No question whose answer
+# defaults to No. Without zenity the missing command's status (127) used to
+# read as No without asking; now it asks in the terminal, like the save backup
+# question. No terminal either: No.
+ask_no_default() {
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --question --title="$APP_TITLE Uninstaller" --text="$1" \
+            --ok-label="$2" --cancel-label="$3" 2>/dev/null
+        return $?
+    fi
+    local ans=""
+    printf '\n%b\n' "$1"
+    printf "  %s? [y/N] " "$2"
+    read -r ans </dev/tty 2>/dev/null || ans=""
+    echo ""
+    case "$ans" in [yY]*) return 0 ;; esac
+    return 1
+}
+on_exit() {
+    local rc=$?
+    [ -z "$CLEAN_PY_HELPERS" ] || rm -rf "$CLEAN_PY_HELPERS"
+    if [ "$rc" -ne 0 ]; then
+        local msg="${LAST_WARN:-The uninstaller stopped before it finished.}"
+        if command -v zenity >/dev/null 2>&1; then
+            zenity --error --no-markup --title="${APP_TITLE:-DeckOps} Uninstaller" \
+                --text="Uninstall did not finish."$'\n\n'"$msg" 2>/dev/null
+        fi
+        pause_if_terminal
+    fi
+    exit "$rc"
+}
+trap on_exit EXIT
 
 # Set by any step that could not remove or restore something; the final
 # message then says the uninstall finished with warnings instead of fully.
 FAILED=0
+# Set when the player chose to keep the IW4x DLC maps (the summary then says so)
+IW4X_DLC_KEPT=""
 # rm_path <path> <label> [dir]: remove a file (or with "dir", a folder) and
 # say so; a failed removal is a warning and sets FAILED, never "not found".
 rm_path() {
@@ -41,7 +89,10 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 BRANCH=""
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/deckops_identity.sh" ]; then
+# Only a sibling that is part of a DeckOps tree we own, never a stray copy in
+# a shared directory such as /tmp (same guard as launcher.sh and install.sh).
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/deckops_identity.sh" ] && \
+   [ -O "$SCRIPT_DIR/deckops_identity.sh" ] && [ -f "$SCRIPT_DIR/src/identity.py" ]; then
     source "$SCRIPT_DIR/deckops_identity.sh"
 elif [ -f "$HOME/DeckOps-Nightly/deckops_identity.sh" ]; then
     source "$HOME/DeckOps-Nightly/deckops_identity.sh"
@@ -138,13 +189,44 @@ echo ""
 
 # Use Steam's own shutdown command for a clean exit. This ensures Steam
 # flushes config files and syncs cloud saves before exiting.
+# The Steam client itself, not its helpers (wrapper.kill_steam's pattern): a bare
+# "ubuntu12_32/steam" also matches steam-launch-wrapper and steam-runtime-*.
+STEAM_CLIENT_PATTERN='ubuntu12_32/steam( |$)'
+steam_running() {
+    pgrep -x "steam" > /dev/null 2>&1 || pgrep -f "steam.sh" > /dev/null 2>&1
+}
+# SIGTERM makes the client shut down cleanly and write its config, like
+# `steam -shutdown`; never SIGKILL (that can corrupt localconfig.vdf).
+term_steam() {
+    pkill -TERM -f "$STEAM_CLIENT_PATTERN" > /dev/null 2>&1
+}
 close_steam() {
-    if pgrep -x "steam" > /dev/null 2>&1 || pgrep -f "steam.sh" > /dev/null 2>&1; then
-        steam -shutdown 2>/dev/null
+    if steam_running; then
+        # Flatpak Steam has no `steam` on PATH: the bare `steam -shutdown` did
+        # nothing there, and the wait below ran out after 120 s and stopped the
+        # uninstall every time.
+        local asked=""
+        if command -v steam > /dev/null 2>&1; then
+            steam -shutdown 2>/dev/null && asked=1
+        elif command -v flatpak > /dev/null 2>&1; then
+            if command -v timeout > /dev/null 2>&1; then
+                timeout 30 flatpak run com.valvesoftware.Steam -shutdown > /dev/null 2>&1 && asked=1
+            else
+                flatpak run com.valvesoftware.Steam -shutdown > /dev/null 2>&1 && asked=1
+            fi
+        fi
+        [ -n "$asked" ] || term_steam
 
         # Wait for Steam to finish closing
         local deadline=$((SECONDS + 120))
-        while pgrep -x "steam" > /dev/null 2>&1 || pgrep -f "steam.sh" > /dev/null 2>&1; do
+        local nudge=$((SECONDS + 20))
+        while steam_running; do
+            # The shutdown request was accepted but Steam is still up (an old
+            # client, a command that only reached a helper): ask the client once
+            if [ -n "$asked" ] && [ $SECONDS -ge $nudge ]; then
+                term_steam
+                asked=""
+            fi
             if [ $SECONDS -ge $deadline ]; then
                 warn "Steam did not close within 120 seconds."
                 warn "Please close Steam manually and re-run the uninstaller."
@@ -514,6 +596,13 @@ PYEOF
     fi
     success "$APP_TITLE removed. $OTHER_TITLE and shared game setup were kept."
     info "Steam games and shortcuts shared by both branches were left in place."
+    # The terminal closes on exit, so this result used to be shown to nobody
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --info --no-markup --title="$APP_TITLE Uninstaller" \
+            --text="$APP_TITLE removed."$'\n\n'"$OTHER_TITLE and the game setup both branches share were kept." \
+            --timeout=15 2>/dev/null
+    fi
+    pause_if_terminal
     exit 0
 fi
 
@@ -694,6 +783,8 @@ echo ""
 # src/ (it is already gone by now), so the helpers are written to a temp dir and
 # put on PYTHONPATH.
 DECKOPS_PY_HELPERS="$(mktemp -d)"
+# Removed by on_exit (the script's one EXIT trap)
+CLEAN_PY_HELPERS="$DECKOPS_PY_HELPERS"
 export PYTHONPATH="$DECKOPS_PY_HELPERS${PYTHONPATH:+:$PYTHONPATH}"
 cat > "$DECKOPS_PY_HELPERS/deckops_vdf.py" <<'PYEOF'
 """Read Steam's binary shortcuts.vdf and tell DeckOps' shortcuts from the user's.
@@ -871,8 +962,6 @@ def entries(data):
         if fields is not None:
             yield fields, is_deckops(fields)
 PYEOF
-
-trap 'rm -rf "$DECKOPS_PY_HELPERS"' EXIT
 
 info "Restoring non-Steam (My Own) game executables..."
 
@@ -1061,12 +1150,9 @@ if [ -n "$STEAM_ROOT" ]; then
             _has_dlc_iwds=true
         fi
         if $_has_dlc_iwds; then
-            zenity --question \
-                --title="$APP_TITLE Uninstaller" \
-                --text="Remove free MW2 DLC maps (~3 GB)?\n\nThese can be re-downloaded if you reinstall later." \
-                --ok-label="Remove" \
-                --cancel-label="Keep" 2>/dev/null
-            [ $? -eq 0 ] && _remove_mw2_dlc=true
+            ask_no_default "Remove free MW2 DLC maps (~3 GB)?\n\nThese can be re-downloaded if you reinstall later." \
+                "Remove" "Keep" && _remove_mw2_dlc=true
+            $_remove_mw2_dlc || IW4X_DLC_KEPT=1
         fi
         if $_remove_mw2_dlc; then
             for d in "main/iw4x/x86" "iw4x" "iw4x-updoot"; do
@@ -1094,6 +1180,10 @@ if [ -n "$STEAM_ROOT" ]; then
 
     cod4_dir=$(find_install_dir 7940) || true
     if [ -n "$cod4_dir" ]; then
+        # Read before the loop below deletes the metadata: only an install
+        # DeckOps set up with CoD4R has an Mods/mp_bots of ours.
+        _had_cod4r=""
+        [ -f "$cod4_dir/deckops_cod4r.json" ] && _had_cod4r=1
         # Before the metadata below is deleted -- it tells CoD4x and CoD4R apart.
         restore_cod4_audio "$cod4_dir"
         for f in "cod4x_021.dll" "cod4x_loader.exe" "cod4x.exe" "deckops_cod4x.json" "servercache.dat"; do
@@ -1109,9 +1199,15 @@ if [ -n "$STEAM_ROOT" ]; then
         for f in "cod4r_patchv2.ff" "cod4r_controls.ff" "cod4r_ambfix.ff" "qol.ff"; do
             rm_path "$cod4_dir/zone/english/$f" "zone/english/$f"
         done
-        for d in "userraw" "Mods/mp_bots"; do
-            rm_path "${cod4_dir:?}/$d" "$d/" dir
-        done
+        # userraw/ is the player's: CoD4R keeps their identity key there
+        # (cod4r_id.key -- lose it and the account is gone) and DeckOps writes
+        # nothing else into it. It used to be deleted along with everything.
+        [ ! -d "$cod4_dir/userraw" ] || skip "Kept userraw/ (your CoD4R identity key and player files)"
+        if [ -n "$_had_cod4r" ]; then
+            rm_path "${cod4_dir:?}/Mods/mp_bots" "Mods/mp_bots/" dir
+        elif [ -d "$cod4_dir/Mods/mp_bots" ]; then
+            skip "Kept Mods/mp_bots/ (not installed by DeckOps)"
+        fi
     fi
 
     # This is player data, not a DeckOps-owned cache. A skipped or incomplete
@@ -1258,7 +1354,7 @@ info "Removing mod client files from non-Steam (My Own) game folders..."
 # For games added via the My Own flow, the install dir isnt in any Steam
 # library. We find them by scanning shortcuts.vdf for known exe names and
 # cleaning up the same files we would for Steam installs.
-python3 - << 'PYEOF'
+DECKOPS_DLC_KEPT_FLAG="$DECKOPS_PY_HELPERS/iw4x_dlc_kept" python3 - << 'PYEOF'
 import os, shutil, filecmp, hashlib, json
 
 import deckops_vdf
@@ -1299,7 +1395,10 @@ OWN_CLEANUP = {
                   "Cod4R-DedRun.exe", "CoD4R-Launcher.exe",
                   "deckops_cod4r.json",
                   "pbgame.htm", "eula.txt"],
-        "dirs":  ["userraw", "Mods/mp_bots"],
+        # Never userraw/: the player's CoD4R identity key (cod4r_id.key) lives there
+        "dirs":  [],
+        # Only when deckops_cod4r.json shows DeckOps installed CoD4R here
+        "cod4r_dirs": ["Mods/mp_bots"],
         "subdirs": {
             "main": ["jcod4r_00.iwd", "xcommon_glyphs.iwd",
                      "xcommon_cod4qol.iwd", "xcommon_cod4r_weapons.iwd"],
@@ -1516,6 +1615,9 @@ for uid in os.listdir(USERDATA_DIR):
                         print(f"    Failed to remove t7x/: {ex}")
             continue
 
+        # Before the files loop below deletes the metadata it is read from
+        had_cod4r = os.path.exists(os.path.join(install_dir, "deckops_cod4r.json"))
+
         if cleanup.get("restore_cod4_audio"):
             restore_cod4_audio(install_dir)
 
@@ -1553,7 +1655,7 @@ for uid in os.listdir(USERDATA_DIR):
                 except Exception as ex:
                     print(f"    Failed to remove {fname}: {ex}")
 
-        for dname in cleanup["dirs"]:
+        for dname in cleanup["dirs"] + (cleanup.get("cod4r_dirs", []) if had_cod4r else []):
             dpath = os.path.join(install_dir, dname)
             if os.path.isdir(dpath):
                 try:
@@ -1589,6 +1691,13 @@ for uid in os.listdir(USERDATA_DIR):
             except OSError:
                 ans = ""
             remove_dlc = ans.lower().startswith("y")
+            # Tells the final summary not to claim the DLC maps were removed
+            flag = os.environ.get("DECKOPS_DLC_KEPT_FLAG")
+            if flag and not remove_dlc:
+                try:
+                    open(flag, "w").close()
+                except OSError:
+                    pass
         elif dlc_dirs:
             remove_dlc = True
 
@@ -1644,6 +1753,7 @@ if not cleaned:
     print("  No non-Steam game folders found to clean.")
 PYEOF
 echo ""
+[ ! -f "$DECKOPS_PY_HELPERS/iw4x_dlc_kept" ] || IW4X_DLC_KEPT=1
 
 HAS_VDF_LEDGER=""
 # vdf_edits.json.applied: a run that got past the ledger pass and stopped later.
@@ -2712,12 +2822,8 @@ PYEOF
         # Removing it now could lose saves that exist nowhere else.
         warn "Keeping Plutonium mods, custom maps and player data: the save backup was incomplete."
     else
-        zenity --question \
-            --title="$APP_TITLE Uninstaller" \
-            --text="Remove Plutonium mods, custom maps and player data?\n\nKeeping them lets a reinstall pick up where you left off.\nPlutonium itself is removed either way." \
-            --ok-label="Remove" \
-            --cancel-label="Keep" 2>/dev/null
-        [ $? -eq 0 ] && KEEP_PLUT_STORAGE=false
+        ask_no_default "Remove Plutonium mods, custom maps and player data?\n\nKeeping them lets a reinstall pick up where you left off.\nPlutonium itself is removed either way." \
+            "Remove" "Keep" && KEEP_PLUT_STORAGE=false
     fi
 
     found_any=0
@@ -2783,12 +2889,8 @@ PYEOF
                 skip "Unverified MW3 downgrade folder kept for appid $appid"
                 continue
             fi
-            zenity --question \
-                --title="$APP_TITLE Uninstaller" \
-                --text="Remove MW3 32-bit depot files (~10 GB)?\n\nKeeping them lets a reinstall skip the depot download.\nThey do not affect the normal Steam version of MW3." \
-                --ok-label="Remove" \
-                --cancel-label="Keep" 2>/dev/null
-            if [ $? -eq 0 ]; then
+            if ask_no_default "Remove MW3 32-bit depot files (~10 GB)?\n\nKeeping them lets a reinstall skip the depot download.\nThey do not affect the normal Steam version of MW3." \
+                    "Remove" "Keep"; then
                 rm -rf "$game_dir/downgrade" && success "Removed MW3 downgrade folder for appid $appid" || warn "Failed to remove downgrade folder for appid $appid"
             else
                 skip "Kept MW3 downgrade folder for appid $appid"
@@ -3859,7 +3961,7 @@ if [ -n "$STEAM_ROOT" ] && [ -s "$LCD_APPIDS_FILE" ]; then
     sc_count=0
     grid_count=0
     while IFS= read -r appid; do
-        [ -z "$appid" ] && continue
+        [[ "$appid" =~ ^[0-9]+$ ]] || continue
         sc_dir="$STEAM_ROOT/steamapps/shadercache/$appid"
         if [ -d "$sc_dir" ]; then
             rm -rf "$sc_dir" 2>/dev/null && sc_count=$((sc_count + 1))
@@ -3868,6 +3970,11 @@ if [ -n "$STEAM_ROOT" ] && [ -s "$LCD_APPIDS_FILE" ]; then
             [ -d "$uid_dir" ] || continue
             shopt -s nullglob
             for f in "$uid_dir/${appid}"*.{png,jpg,jpeg,webp,ico}; do
+                # Exactly this appid, like the artwork pass's (?!\d): a bare
+                # "${appid}*" also matched a longer appid that starts with it
+                _rest="${f##*/}"
+                _rest="${_rest#"$appid"}"
+                [[ "$_rest" == [0-9]* ]] && continue
                 if [ -f "$f" ]; then
                     rm -f "$f" 2>/dev/null && grid_count=$((grid_count + 1))
                 fi
@@ -4300,11 +4407,25 @@ else
     echo -e "${GREEN}${BOLD}  DeckOps fully uninstalled.${CLEAR}"
 fi
 echo ""
-echo "  Your Steam games are untouched."
+# Only claims what is true: with a failed step, "All ... removed" was printed
+# right under the warnings about what was not removed.
 echo "  Unrelated Plutonium data and backed-up saves were kept."
-echo "  All LCD HGL state and shortcuts removed."
-echo "  All IW3SP-MOD and IW4x client files removed."
-echo "  All DeckOps controller templates and profiles removed."
+if [ "$FAILED" -eq 0 ]; then
+    if [ "$COD4_NEEDS_VERIFY" = "1" ]; then
+        echo "  Your Steam games are untouched, except Call of Duty 4 needs a file check (see below)."
+    else
+        echo "  Your Steam games are untouched."
+    fi
+    echo "  All LCD HGL state and shortcuts removed."
+    if [ -n "$IW4X_DLC_KEPT" ]; then
+        echo "  All IW3SP-MOD and IW4x client files removed (IW4x DLC maps kept, as you chose)."
+    else
+        echo "  All IW3SP-MOD and IW4x client files removed."
+    fi
+    echo "  All DeckOps controller templates and profiles removed."
+elif [ -n "$IW4X_DLC_KEPT" ]; then
+    echo "  IW4x DLC maps were kept, as you chose."
+fi
 echo ""
 
 COD4_VERIFY_TEXT=""

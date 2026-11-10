@@ -444,12 +444,13 @@ class ManageSweep5Tests(unittest.TestCase):
         return self.settings.status.text()
 
     def test_deadzone_with_unwritable_files_is_not_reported_as_done(self):
+        # The status label shows the font-safe mark word, not the ⚠ glyph (sweep 6)
         text = self._run_task(self.settings._apply_deadzone, "game_config.set_deadzone")
-        self.assertTrue(text.startswith("⚠  Updated 2 file(s), 1 could not be written"), text)
+        self.assertTrue(text.startswith("WARNING  Updated 2 file(s), 1 could not be written"), text)
 
     def test_fps_fov_with_unwritable_files_is_not_reported_as_done(self):
         text = self._run_task(self.settings._apply_fps_fov, "game_config.set_fps_fov")
-        self.assertTrue(text.startswith("⚠  Updated 2 file(s), 1 could not be written"), text)
+        self.assertTrue(text.startswith("WARNING  Updated 2 file(s), 1 could not be written"), text)
 
     # ── D2: CoD4 launch option during Update ───────────────────────────────
     def test_update_fails_cod4_when_its_launch_option_is_written_nowhere(self):

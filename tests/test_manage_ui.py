@@ -97,7 +97,9 @@ class ManagementUITests(unittest.TestCase):
         _APP.setStyleSheet(_app_style())
         self.addCleanup(lambda: _APP.setStyleSheet(old_style))
 
-        for width, height, expected_columns in ((1280, 800, 5), (800, 500, 3)):
+        # Sweep 6 compact cards: four columns at 1280 (all cards on one screen),
+        # three at 800. Cover art sits beside the status, actions below both.
+        for width, height, expected_columns in ((1280, 800, 4), (800, 500, 3)):
             with self.subTest(window=f"{width}x{height}"), \
                  patch.object(ui_manage, "_header_path", return_value="/missing/deckops_art.jpg"):
                 # A fresh window at each size, not a resized window: this
@@ -118,35 +120,40 @@ class ManagementUITests(unittest.TestCase):
                     stack.grab().save(os.path.join(output, f"library_fixed_{width}.png"))
                 cards = screen._cards
                 self.assertEqual(len(cards), 7)
+                self.assertEqual(len({c.width() for c in cards}), 1)
+                self.assertEqual(len({c.height() for c in cards}), 1)
                 for card in cards:
                     with self.subTest(card=card._appid):
-                        self.assertEqual(card.width(), ui_manage._LIBRARY_CARD_W)
-                        self.assertEqual(card._img_container.height(), ui_manage._LIBRARY_COVER_H)
-                        badge_bottom = card._client_badge.mapTo(
-                            card, card._client_badge.rect().bottomLeft()).y()
-                        cover_top = card._img_container.mapTo(
-                            card, card._img_container.rect().topLeft()).y()
-                        cover_bottom = card._img_container.mapTo(
-                            card, card._img_container.rect().bottomLeft()).y()
-                        title_top = card._title_label.mapTo(
-                            card, card._title_label.rect().topLeft()).y()
-                        title_bottom = card._title_label.mapTo(
-                            card, card._title_label.rect().bottomLeft()).y()
-                        status_top = card._state_label.mapTo(
-                            card, card._state_label.rect().topLeft()).y()
-                        status_bottom = card._state_label.mapTo(
-                            card, card._state_label.rect().bottomLeft()).y()
-                        summary_top = card._summary_label.mapTo(
-                            card, card._summary_label.rect().topLeft()).y()
-                        summary_bottom = card._summary_label.mapTo(
-                            card, card._summary_label.rect().bottomLeft()).y()
-                        actions_top = card._btn_bar.mapTo(
-                            card, card._btn_bar.rect().topLeft()).y()
-                        self.assertLess(badge_bottom, cover_top)
-                        self.assertGreater(title_top, cover_bottom, (card.height(), card.sizeHint().height(), card._img_container.geometry(), card._title_label.geometry(), card._btn_bar.geometry()))
-                        self.assertGreater(status_top, title_bottom)
-                        self.assertGreater(summary_top, status_bottom)
-                        self.assertGreaterEqual(actions_top, summary_bottom)
+                        self.assertGreaterEqual(card.width(), ui_manage._LIBRARY_CARD_MIN_W)
+                        self.assertLessEqual(card.width(), ui_manage._LIBRARY_CARD_MAX_W)
+                        self.assertEqual((card._img_container.width(), card._img_container.height()),
+                                         (ui_manage._LIBRARY_COVER_W, ui_manage._LIBRARY_COVER_H))
+
+                        def rect(w):
+                            tl = w.mapTo(card, w.rect().topLeft())
+                            br = w.mapTo(card, w.rect().bottomRight())
+                            return tl.x(), tl.y(), br.x(), br.y()
+                        badge = rect(card._client_badge)
+                        cover = rect(card._img_container)
+                        title = rect(card._title_label)
+                        status = rect(card._state_label)
+                        summary = rect(card._summary_label)
+                        actions = rect(card._btn_bar)
+                        # badge above the art, never over it
+                        self.assertLess(badge[3], cover[1])
+                        # title, status and summary beside the art, stacked in order
+                        for text in (title, status, summary):
+                            self.assertGreater(text[0], cover[2])
+                            self.assertLessEqual(text[2], card.width())
+                        self.assertGreaterEqual(title[1], cover[1])
+                        self.assertGreater(status[1], title[3])
+                        self.assertGreater(summary[1], status[3])
+                        self.assertGreaterEqual(summary[3] - summary[1] + 1,
+                                                card._summary_label.heightForWidth(card._summary_label.width()))
+                        # the action row below everything, inside the card
+                        self.assertGreater(actions[1], cover[3])
+                        self.assertGreater(actions[1], summary[3])
+                        self.assertLessEqual(actions[3], card.height())
                         if card._appid is not None:
                             self.assertEqual(card._img.text(), "NO ARTWORK\nAVAILABLE")
                         else:
@@ -154,7 +161,7 @@ class ManagementUITests(unittest.TestCase):
                             self.assertIsNotNone(art)
                             self.assertFalse(art.isNull())
                             expected = card._raw_pixmap.scaled(
-                                ui_manage._LIBRARY_CARD_W, ui_manage._LIBRARY_COVER_H,
+                                ui_manage._LIBRARY_COVER_W, ui_manage._LIBRARY_COVER_H,
                                 Qt.AspectRatioMode.KeepAspectRatio,
                                 Qt.TransformationMode.SmoothTransformation)
                             self.assertEqual(art.size(), expected.size())
@@ -169,15 +176,15 @@ class ManagementUITests(unittest.TestCase):
                     self.assertFalse(cards[0].geometry().intersects(cards[3].geometry()))
                     stack.resize(1280, 800)
                     _APP.processEvents()
-                    self.assertEqual(screen._columns, 5)
-                    self.assertFalse(cards[0].geometry().intersects(cards[5].geometry()))
+                    self.assertEqual(screen._columns, 4)
+                    self.assertFalse(cards[0].geometry().intersects(cards[4].geometry()))
                 stack.close()
 
     def test_game_covers_are_contained_without_cropping(self):
         self.screen.set_installed({})
         card = self.screen._cards[0]
         self.assertEqual(ui_manage._LIBRARY_COVER_H,
-                         round(ui_manage._LIBRARY_CARD_W * ui_manage.IMG_RATIO))
+                         round(ui_manage._LIBRARY_COVER_W * ui_manage.IMG_RATIO))
         self.assertEqual(card._img.alignment(), Qt.AlignmentFlag.AlignCenter)
         for size in ((200, 400), (400, 200), (600, 900)):
             with self.subTest(image=size):
@@ -187,7 +194,7 @@ class ManagementUITests(unittest.TestCase):
                 card._scale_image()
                 visible = card._img.pixmap()
                 expected = source.scaled(
-                    ui_manage._LIBRARY_CARD_W, ui_manage._LIBRARY_COVER_H,
+                    ui_manage._LIBRARY_COVER_W, ui_manage._LIBRARY_COVER_H,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation)
                 self.assertEqual(visible.size(), expected.size())
@@ -218,7 +225,7 @@ class ManagementUITests(unittest.TestCase):
                     self.assertLessEqual(button.minimumSizeHint().width(), card.width() - 20)
         self.stack.resize(1280, 800)
         _APP.processEvents()
-        self.assertEqual(self.screen._columns, 5)
+        self.assertEqual(self.screen._columns, 4)
         self.assertLessEqual(self.screen._scroll.widget().width(),
                              self.screen._scroll.viewport().width())
         self.stack.resize(800, 500)
@@ -234,9 +241,16 @@ class ManagementUITests(unittest.TestCase):
         _APP.processEvents()
 
         toolbar = self.screen.layout().itemAt(1).widget()
-        buttons = toolbar.findChildren(QPushButton)
+        # DeckOps updates live in Settings (sweep 6): the Library toolbar only
+        # shows a notice button when the startup check found an update.
+        visible = [b for b in toolbar.findChildren(QPushButton) if b.isVisible()]
+        self.assertEqual([b.text() for b in visible], ["Add Games", "Update Games", "Settings"])
+        self.assertFalse(self.screen._deckops_update_btn.isVisible())
+        self.screen._on_startup_update_check(True)
+        _APP.processEvents()
+        buttons = [b for b in toolbar.findChildren(QPushButton) if b.isVisible()]
         self.assertEqual([b.text() for b in buttons],
-                         ["Add Games", "Update Games", "DeckOps Update", "Settings"])
+                         ["Add Games", "Update Games", "Update Available", "Settings"])
         self.assertEqual((self.stack.width(), self.stack.height()), (800, 500))
         for button in buttons:
             with self.subTest(button=button.text()):
@@ -245,6 +259,8 @@ class ManagementUITests(unittest.TestCase):
                 self.assertGreaterEqual(left, 0)
                 self.assertLess(right, self.screen.width())
                 self.assertGreaterEqual(button.width(), button.minimumSizeHint().width())
+                self.assertGreaterEqual(button.height(), ui_manage.BTN_MIN_H)
+                self.assertGreaterEqual(button.font().pointSize(), ui_manage.FONT_ACTION)
         for previous, following in zip(buttons, buttons[1:]):
             self.assertLess(previous.geometry().right(), following.geometry().left())
 
@@ -271,8 +287,9 @@ class ManagementUITests(unittest.TestCase):
         card = self.screen._cards[0]
         self.assertEqual(card._state_label.text(), "PARTIAL")
         labels = [b.text() for b in self.buttons(card)]
-        self.assertIn("Set Up Modes", labels)
-        self.assertIn("Game Options", labels)
+        # One primary action naming what it does, Game Options beside it
+        self.assertEqual(labels, ["Set Up 1 Mode", "Options"])
+        self.assertEqual(self.buttons(card)[1].accessibleName(), "Game Options")
         for button in self.buttons(card):
             self.assertLessEqual(button.minimumSizeHint().width(), card.width() - 20)
         with patch("preflight.check", return_value=[]), \
@@ -304,9 +321,21 @@ class ManagementUITests(unittest.TestCase):
         card = self.screen._cards[5]
         self.assertEqual(card._state_label.text(), "PARTIAL")
         labels = [b.text() for b in self.buttons(card)]
-        self.assertIn("Find Modes", labels)
-        self.assertIn("Game Options", labels)
-        self.assertNotIn("Set Up", labels)
+        # Sweep 6: one card action; finding the missing modes is in Game Options
+        self.assertEqual(labels, ["Game Options"])
+        seen = []
+
+        def pick_find(dialog):
+            buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+            seen.extend(buttons)
+            self.assertNotIn("Reinstall", buttons.get("Find Missing Modes").text())
+            buttons["Find Missing Modes"].click()
+
+        with patch.object(ui_manage.QDialog, "exec", pick_find), \
+             patch.object(self.screen, "_add_games") as add_games:
+            self.buttons(card)[0].click()
+        self.assertIn("Find Missing Modes", seen)
+        add_games.assert_called_once()
 
     def test_cancel_reinstall_keeps_setup_and_install_screen_unchanged(self):
         gd = ui_manage.ALL_GAMES[0]
@@ -424,19 +453,25 @@ class ManagementUITests(unittest.TestCase):
         self.stack.resize(800, 500)
         _APP.processEvents()
         self.assertLessEqual(self.stack.width(), 800)
+        # Sweep 6 sections: Maintenance | Game tweaks | Support + Danger Zone;
+        # two columns at 800 wide, three at 1280.
         self.assertTrue(settings._settings_narrow)
         self.assertLessEqual(settings._settings_scroll.widget().width(),
                              settings._settings_scroll.viewport().width())
+        self.assertEqual(settings._settings_cols.itemAtPosition(0, 1).widget(),
+                         settings._tweaks_panel)
         self.assertEqual(settings._settings_cols.itemAtPosition(1, 0).widget(),
-                         settings._right_panel)
+                         settings._support_col)
         danger = settings.findChild(ui_manage.QFrame, "DangerZone")
         self.assertIsNotNone(danger)
         self.assertIn("Full Uninstall...", [b.text() for b in self.buttons(danger)])
         self.stack.resize(1280, 800)
         _APP.processEvents()
         self.assertFalse(settings._settings_narrow)
-        self.assertEqual(settings._settings_cols.itemAtPosition(0, 1).widget(),
-                         settings._right_panel)
+        self.assertEqual(settings._settings_cols.itemAtPosition(0, 0).widget(),
+                         settings._maint_panel)
+        self.assertEqual(settings._settings_cols.itemAtPosition(0, 2).widget(),
+                         settings._support_col)
 
     def test_cap_toggle_while_settings_busy_leaves_config_and_ui_unchanged(self):
         state = {"dxvk_frame_cap": True, "steam_root": "/steam"}
@@ -625,7 +660,7 @@ class ManagementUITests(unittest.TestCase):
                 scroll = guide._guide_scroll
                 self.assertEqual((stack.width(), stack.height()), (width, height))
                 self.assertEqual(guide._heading.text(), "SETUP COMPLETE")
-                self.assertEqual(guide._continue_btn.text(), "Continue to My Games")
+                self.assertEqual(guide._continue_btn.text(), ui_manage.LABELS["continue_to_library"])
                 self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
                 self.assertLessEqual(scroll.widget().width(), scroll.viewport().width())
                 self.assertTrue(guide._restore_btn.isVisible())
@@ -657,7 +692,7 @@ class ManagementUITests(unittest.TestCase):
                 stack.setCurrentWidget(guide)
                 _APP.processEvents()
                 self.assertEqual(guide._heading.text(), "SETUP COMPLETE")
-                self.assertEqual(guide._continue_btn.text(), "Continue to My Games")
+                self.assertEqual(guide._continue_btn.text(), ui_manage.LABELS["continue_to_library"])
                 stack.close()
 
     def test_setup_complete_restore_section_recovers_and_records_the_answer(self):

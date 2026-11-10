@@ -353,7 +353,14 @@ def _set_music_muted(muted: bool):
         pass
 
 
+# Set while a fadeout runs: the mixer still reports busy until it ends, so an
+# unmute within the fade used to skip play() and the music stopped while the
+# button said MUSIC ON.
+_audio_fading = False
+
+
 def _start_audio():
+    global _audio_fading
     if _music_muted() or not _pygame_available():
         return
     if not os.path.exists(MUSIC_PATH):
@@ -362,6 +369,9 @@ def _start_audio():
         import pygame
         if not pygame.mixer.get_init():
             pygame.mixer.init()
+        if _audio_fading:
+            pygame.mixer.music.stop()
+            _audio_fading = False
         if not pygame.mixer.music.get_busy():
             pygame.mixer.music.load(MUSIC_PATH)
             pygame.mixer.music.set_volume(_audio_volume())
@@ -371,12 +381,14 @@ def _start_audio():
 
 
 def _fadeout_audio(ms: int = FADEOUT_MS):
+    global _audio_fading
     if not _pygame_available():
         return
     try:
         import pygame
         if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
             pygame.mixer.music.fadeout(ms)
+            _audio_fading = True
     except Exception:
         pass
 

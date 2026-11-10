@@ -12,9 +12,10 @@ import subprocess
 
 from qt import (
     QApplication, QLabel, QPushButton, QFrame, QHBoxLayout, QMessageBox, QWidget,
+    QAbstractButton, QScrollArea, QSizePolicy, QStackedWidget,
 )
-from qt import Qt, pyqtSignal, QObject, QUrl, QT6
-from qt import QFont, QFontDatabase
+from qt import Qt, pyqtSignal, QObject, QUrl, QT6, QTimer, QEvent
+from qt import QFont, QFontDatabase, QKeyEvent
 
 import config as cfg
 from identity import BUILD_BADGE, BRANCH
@@ -95,6 +96,54 @@ def _copy_log_to_clipboard(status_widget=None):
 # never used as the sole indication of success or failure.
 C_ACCENT    = C_IW if BRANCH == "stable" else C_TREY
 C_ACCENT_BG = "#203321" if BRANCH == "stable" else "#3A2619"
+C_FAIL_TEXT = "#FF817A"     # failure text on dark surfaces (log lines, marks)
+
+
+# ── Deck scale ────────────────────────────────────────────────────────────────
+# Minimum sizes for a 1280x800 7" screen read at arm's length and driven by a
+# controller. New and reworked screen code should use these, not literals.
+FONT_BODY       = 11    # body copy, status text, status bar
+FONT_ACTION     = 12    # minimum for anything the player activates (buttons, checkboxes)
+BTN_MIN_H       = 44    # minimum height of an activatable button
+CHECK_INDICATOR = 26    # QCheckBox indicator square, px
+FOCUS_RING_W    = 3     # focus ring width, px
+
+
+# ── Labels ────────────────────────────────────────────────────────────────────
+# One name per screen. The status bar shows SCREEN_TITLES[screen_name].upper();
+# a screen header that names the screen must use the same text (header labels
+# are upper-cased the same way), so the two never disagree.
+SCREEN_TITLES = {
+    "BootstrapScreen":     "Opening",
+    "SetupFlowScreen":     "Device Setup",
+    "SetupScreen":         "Select Games",
+    "InstallScreen":       "Installation",
+    "ManagementScreen":    "Game Library",
+    "ConfigureScreen":     "Settings",
+    "SetupCompleteScreen": "Field Guide",
+    "UpdateScreen":        "Game Updates",
+}
+
+
+def screen_title(name: str) -> str:
+    """Display title for a screen_name (falls back to the name itself)."""
+    return SCREEN_TITLES.get(name, name)
+
+
+# Standard button and navigation wording. "Game Library" is the only name for
+# the post-install home screen ("My Games" is retired).
+LABELS = {
+    "back":                 "Back",
+    "continue":             "Continue",
+    "back_to_library":      "Back to Game Library",
+    "continue_to_library":  "Continue to Game Library",
+    "back_to_selection":    "Back to Game Selection",
+    "library":              SCREEN_TITLES["ManagementScreen"],
+    "settings":             SCREEN_TITLES["ConfigureScreen"],
+    "field_guide":          SCREEN_TITLES["SetupCompleteScreen"],
+    "game_updates":         SCREEN_TITLES["UpdateScreen"],
+    "offline_badge":        "offline",
+}
 
 
 # ── Fonts ─────────────────────────────────────────────────────────────────────
@@ -175,6 +224,9 @@ ALL_GAMES = [
      "lcd_keys":["t6mp","t6sp","t6zm"],"lcd_client":"plutonium + t6sp-mod","lcd_appid":202970,
      "launch_note":"DeckOps creates Proton prefixes automatically."},
     {"base":"DeckOps: Plutonium Offline","keys":[],"appid":None,"dev":"trey","client":"lan",
+     # "client" stays "lan" (ui_manage keys the offline card on it); the visible
+     # library badge reads "offline", the name the rest of the UI uses.
+     "badge":LABELS["offline_badge"].upper(),
      "launch_note":"Offline Mode: the offline launcher, an Offline entry in each Plutonium game's launch menu, and bot matches."},
 ]
 
@@ -347,21 +399,30 @@ def _header_path(appid: int) -> str:
 def _button_style(color):
     """Shared button variant; light faction colors always use dark ink."""
     foreground = C_BG if color in (C_IW, C_TREY) else C_TEXT
+    # The ring is drawn in the button's own sheet: a per-widget sheet always wins
+    # over the app sheet, so the app's QPushButton:focus rule never reaches these.
+    # A transparent border of the same width keeps the size steady on focus; the
+    # white ring reads on every variant (dark, red, green and orange fills).
     return (
-        f"QPushButton{{background:{color};color:{foreground};border:2px solid transparent;"
+        f"QPushButton{{background:{color};color:{foreground};"
+        f"border:{FOCUS_RING_W}px solid transparent;"
         "border-radius:8px;padding:0 18px;}"
         f"QPushButton:hover{{border-color:{C_DIM};}}"
-        f"QPushButton:focus{{border-color:{C_FOCUS};}}"
+        f"QPushButton:focus{{border:{FOCUS_RING_W}px solid {C_FOCUS};}}"
         f"QPushButton:pressed{{background:{C_SURFACE};color:{C_TEXT};}}"
         f"QPushButton:disabled{{background:{C_CARD};color:{C_DIM};border-color:{C_LINE};}}"
     )
 
 
-def _btn(text, color, size=13, h=44):
+def _btn(text, color, size=13, h=BTN_MIN_H):
+    """Standard action button. Defaults are Deck scale (13pt bold, 44px); pass
+    smaller values only where space truly forces it. autoDefault makes Return /
+    Enter (the controller's A button) click the focused button outside dialogs too."""
     b = QPushButton(text); b.setFont(font(size, True)); b.setFixedHeight(h)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.setAccessibleName(text.replace("&&", "&"))
     b.setStyleSheet(_button_style(color))
+    b.setAutoDefault(True)
     return b
 
 def _lbl(text, size=14, color="#FFF", bold=False, align=Qt.AlignmentFlag.AlignCenter, wrap=True):
@@ -378,10 +439,15 @@ def _header_bar():
     t = QLabel("DECKOPS"); t.setFont(font(21, display=True))
     t.setStyleSheet(f"color:{C_TEXT};background:transparent;"); hl.addWidget(t)
     b = QLabel(BUILD_BADGE.upper()); b.setFont(font(9, bold=True))
+    b.setObjectName("deckopsBuildBadge")
     b.setStyleSheet(
         f"color:{C_ACCENT};background:{C_ACCENT_BG};border:1px solid {C_ACCENT};"
         "border-radius:4px;padding:3px 8px;")
-    hl.addWidget(b); hl.addStretch()
+    # A plain QLabel in an HBox stretched to the full 60px header height, so the
+    # badge became a tall orange slab. Keep it at its text height, centered.
+    b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+    b.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    hl.addWidget(b, 0, Qt.AlignmentFlag.AlignVCenter); hl.addStretch()
     return hdr, hl
 
 def _badge(text, color, w, h=30, size=10, radius=6):
@@ -393,15 +459,90 @@ def _badge(text, color, w, h=30, size=10, radius=6):
     return b
 
 def _back_row(lay, slot):
-    b = _btn("← Back", C_DARK_BTN, size=12, h=40); b.setFixedWidth(120)
+    b = _btn(LABELS["back"], C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H); b.setFixedWidth(120)
     b.clicked.connect(slot)
     row = QHBoxLayout(); row.addWidget(b); row.addStretch(); lay.addLayout(row)
     return b
 
+
+# ── Status marks ──────────────────────────────────────────────────────────────
+# ✓ ✗ ⚠ ⏳ ← are not in the bundled fonts (Atkinson Hyperlegible, Russo One), so
+# on a Deck they fell back to whatever the system had, or drew as boxes. Worker
+# code may keep writing them (the log file is fine with them); anything shown in
+# the UI goes through _log_html / _plain_marks, or uses _mark / MARK_* directly.
+# The replacements are plain ASCII words, which every bundled face covers, and
+# color is never the only signal.
+
+MARK_OK   = "OK"
+MARK_FAIL = "FAILED"
+MARK_WARN = "WARNING"
+MARK_WAIT = "WAIT"
+
+_MARK_STYLE = {
+    "ok":   (MARK_OK,   C_IW),
+    "fail": (MARK_FAIL, C_FAIL_TEXT),
+    "warn": (MARK_WARN, C_TREY),
+    "wait": (MARK_WAIT, C_DIM),
+}
+# Unsupported glyph -> mark kind (None: decorative, dropped)
+_GLYPH_KIND = {
+    "\u2713": "ok", "\u2714": "ok",          # ✓ ✔
+    "\u2717": "fail", "\u2718": "fail",      # ✗ ✘
+    "\u26a0": "warn",                        # ⚠
+    "\u23f3": "wait",                        # ⏳
+    "\u2190": None,                          # ←
+}
+_VS16 = "\ufe0f"     # emoji presentation selector that may trail ⚠
+
+
+def _mark(kind: str) -> str:
+    """Rich-text status mark for QLabel/QMessageBox/appendHtml: a bold, colored word.
+    kind is "ok", "fail", "warn" or "wait"."""
+    word, color = _MARK_STYLE[kind]
+    return f'<b style="color:{color}">{word}</b>'
+
+
+def _split_mark(text: str):
+    """(leading whitespace, mark kind or None, rest) for a line that may start
+    with one of the unsupported status glyphs."""
+    stripped = text.lstrip()
+    lead = text[:len(text) - len(stripped)]
+    first = stripped[:1]
+    if first in _GLYPH_KIND and _GLYPH_KIND[first]:
+        rest = stripped[1:]
+        if rest.startswith(_VS16):
+            rest = rest[1:]
+        return lead, _GLYPH_KIND[first], rest
+    return lead, None, text
+
+
+def _strip_glyphs(text: str) -> str:
+    for g in _GLYPH_KIND:
+        text = text.replace(g, "")
+    return text.replace(_VS16, "")
+
+
+def _plain_marks(text: str) -> str:
+    """Plain-text version of a status string for QLabel.setText / button text:
+    a leading ✓ ✗ ⚠ ⏳ becomes OK / FAILED / WARNING / WAIT, and any other
+    unsupported glyph (a trailing ✓, "← Back") is dropped."""
+    lead, kind, rest = _split_mark(text)
+    if kind:
+        return lead + _MARK_STYLE[kind][0] + _strip_glyphs(rest).rstrip()
+    out = _strip_glyphs(text)
+    return out.strip() if out != text else out
+
+
 def _log_html(text: str) -> str:
-    """Colorize a log line by its leading marker. Everything else stays dim."""
-    color = {"✓": C_IW, "✗": "#FF817A", "⚠": C_TREY}.get(text.lstrip()[:1], C_DIM)
-    body = html.escape(text).replace("\n", "<br>").replace("  ", "&nbsp;&nbsp;")
+    """Colorize a log line by its leading marker. Everything else stays dim.
+    The marker itself is replaced by a supported-font word (see _mark)."""
+    lead, kind, rest = _split_mark(text)
+    color = _MARK_STYLE[kind][1] if kind else C_DIM
+
+    def esc(s):
+        return html.escape(_strip_glyphs(s)).replace("\n", "<br>").replace("  ", "&nbsp;&nbsp;")
+
+    body = esc(lead) + (_mark(kind) if kind else "") + esc(rest)
     return f'<span style="color:{color};white-space:pre-wrap">{body}</span>'
 
 
@@ -488,12 +629,12 @@ def _show_preflight(parent, checks) -> bool:
     if level == _pf.OK:
         return True
 
-    icons = {_pf.OK: "\u2713", _pf.WARN: "\u26a0", _pf.BLOCK: "\u2717"}
+    kinds = {_pf.OK: "ok", _pf.WARN: "warn", _pf.BLOCK: "fail"}
     colors = {_pf.OK: C_IW, _pf.WARN: C_TREY, _pf.BLOCK: C_TREY}
     rows = []
     for c in checks:
         rows.append(
-            f'<div style="color:{colors[c.level]}"><b>{icons[c.level]}&nbsp;&nbsp;'
+            f'<div style="color:{colors[c.level]}"><b>{_mark(kinds[c.level])}&nbsp;&nbsp;'
             f'{html.escape(c.title)}</b></div>'
             f'<div style="color:#999999;margin-bottom:6px">'
             f'&nbsp;&nbsp;&nbsp;&nbsp;{html.escape(c.detail)}</div>')
@@ -571,6 +712,7 @@ class _Sigs(QObject):
 
 def _app_style():
     check = os.path.join(PROJECT_ROOT, "assets", "images", "check.svg").replace("\\", "/")
+    ring, ind = FOCUS_RING_W, CHECK_INDICATOR
     return f"""
 QWidget {{ background-color:{C_BG}; color:{C_TEXT}; }}
 QLabel {{ background:transparent; }}
@@ -582,14 +724,26 @@ QScrollBar::handle:vertical:hover {{ background:{C_DIM}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
 QProgressBar {{ background:{C_SURFACE}; color:{C_TEXT}; border:1px solid {C_LINE}; border-radius:6px; text-align:center; }}
 QProgressBar::chunk {{ background:{C_ACCENT}; border-radius:5px; }}
-QCheckBox, QRadioButton {{ spacing:8px; background:transparent; }}
-QCheckBox::indicator {{ width:20px; height:20px; border:2px solid {C_LINE}; border-radius:5px; background:{C_SURFACE}; }}
+QCheckBox, QRadioButton {{ spacing:10px; background:transparent; font-size:{FONT_ACTION}pt; border:{ring}px solid transparent; border-radius:6px; padding:2px 6px; }}
+QCheckBox::indicator {{ width:{ind}px; height:{ind}px; border:2px solid {C_LINE}; border-radius:6px; background:{C_SURFACE}; }}
 QCheckBox::indicator:checked {{ background:{C_IW}; border-color:{C_IW}; image:url("{check}"); }}
 QCheckBox::indicator:disabled {{ background:{C_CARD}; border-color:{C_LINE}; }}
-QRadioButton::indicator {{ width:20px; height:20px; }}
+QRadioButton::indicator {{ width:{ind}px; height:{ind}px; }}
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{ background:{C_CARD}; color:{C_TEXT}; border:1px solid {C_LINE}; border-radius:7px; padding:6px 10px; selection-background-color:{C_IW}; selection-color:{C_BG}; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{ border:2px solid {C_FOCUS}; }}
-QPushButton:focus, QCheckBox:focus, QRadioButton:focus {{ border:2px solid {C_FOCUS}; }}
+QPushButton:focus, QCheckBox:focus, QRadioButton:focus {{ outline:none; border:{ring}px solid {C_FOCUS}; }}
+QMessageBox QPushButton, QDialogButtonBox QPushButton {{ min-height:{BTN_MIN_H}px; min-width:110px; padding:0 14px; font-size:{FONT_ACTION}pt; font-weight:bold; background:{C_DARK_BTN}; color:{C_TEXT}; border:{ring}px solid {C_LINE}; border-radius:8px; }}
+QMessageBox QPushButton:hover, QDialogButtonBox QPushButton:hover {{ border-color:{C_DIM}; }}
+QMessageBox QPushButton:focus, QDialogButtonBox QPushButton:focus {{ border:{ring}px solid {C_FOCUS}; }}
+QMessageBox QPushButton:pressed, QDialogButtonBox QPushButton:pressed {{ background:{C_SURFACE}; }}
+QMessageBox QLabel {{ font-size:{FONT_BODY}pt; }}
+QSlider {{ background:transparent; min-height:32px; border:2px solid transparent; border-radius:6px; }}
+QSlider:focus {{ border:2px solid {C_FOCUS}; }}
+QSlider::groove:horizontal {{ height:8px; background:{C_SURFACE}; border:1px solid {C_LINE}; border-radius:4px; }}
+QSlider::sub-page:horizontal {{ background:{C_ACCENT}; border-radius:4px; }}
+QSlider::handle:horizontal {{ background:{C_TEXT}; width:22px; margin:-8px 0; border:2px solid {C_LINE}; border-radius:11px; }}
+QSlider::handle:horizontal:focus {{ background:{C_ACCENT}; border:{ring}px solid {C_FOCUS}; }}
+QSlider::handle:horizontal:disabled {{ background:{C_LINE}; }}
 QToolTip {{ background:{C_SURFACE}; color:{C_TEXT}; border:1px solid {C_LINE}; padding:6px; }}
 """
 
@@ -615,3 +769,359 @@ def get_screen(stack, name):
         if getattr(w, "screen_name", w.__class__.__name__) == name:
             return w
     return None
+
+
+# ── Controller navigation ────────────────────────────────────────────────────
+#
+# In Game Mode Steam turns the D-pad into arrow keys and A into Return/Enter;
+# B is usually Escape. Qt alone handles none of that well: QCheckBox ignores
+# Return, a non-dialog QPushButton ignores Return unless autoDefault, and a
+# QScrollArea swallows arrows to scroll instead of moving to its buttons.
+#
+# Screen protocol (all optional, looked up on the current QStackedWidget page):
+#   back_action()     Escape/B calls it when nothing modal is open.
+#   escape_allowed()  return False to ignore Escape for now (install running).
+#   focus_target()    widget to focus when the screen is shown and nothing on
+#                     it has focus yet; default is the first focusable widget.
+#
+# The filter only acts inside widgets opted in with _nav_scope (DeckOpsWindow
+# is, and so is every dialog parented to it).
+#
+# Helpers for screen code:
+#   _no_focus_scroll(sa)   scroll area never takes focus; follows focused child
+#   _scroll_area(widget)   new QScrollArea(widgetResizable) set up the same way
+#   _chain_focus([w, ...]) explicit tab/D-pad order
+#   _focus_first(w | [w])  focus first visible, enabled candidate (deferred)
+
+_ACTIVATE_KEYS = (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Select)
+_PREV_KEYS = (Qt.Key.Key_Up, Qt.Key.Key_Left)
+_NEXT_KEYS = (Qt.Key.Key_Down, Qt.Key.Key_Right)
+_NAV_KEYS = _PREV_KEYS + _NEXT_KEYS
+
+
+def _policy_bits(widget) -> int:
+    p = widget.focusPolicy()
+    return int(getattr(p, "value", p))
+
+
+def _tab_focusable(widget) -> bool:
+    """Reachable by Tab / D-pad right now: TabFocus policy, visible, enabled."""
+    try:
+        tab = int(getattr(Qt.FocusPolicy.TabFocus, "value", Qt.FocusPolicy.TabFocus))
+        return bool(_policy_bits(widget) & tab) and widget.isVisible() and widget.isEnabled()
+    except RuntimeError:        # deleted C++ object
+        return False
+
+
+def _has_focusable_child(widget) -> bool:
+    for child in widget.findChildren(QWidget):
+        if _tab_focusable(child) and not isinstance(child, QScrollArea):
+            return True
+    return False
+
+
+def _is_nav_candidate(widget) -> bool:
+    # A QScrollArea holding focusable widgets is a container, never a stop: it
+    # used to take first focus on several screens and then ate the D-pad.
+    if not _tab_focusable(widget):
+        return False
+    if isinstance(widget, QScrollArea) and _has_focusable_child(widget):
+        return False
+    return True
+
+
+def _first_focusable(target):
+    """First visible, enabled, Tab-focusable widget: the first such entry of a
+    list, or for a widget itself-or-descendant in focus-chain order. None if none."""
+    if target is None:
+        return None
+    if isinstance(target, (list, tuple)):
+        for w in target:
+            if w is not None and _is_nav_candidate(w):
+                return w
+        return None
+    if _is_nav_candidate(target):
+        return target
+    w = target.nextInFocusChain()
+    seen = 0
+    while w is not None and w is not target and seen < 2000:
+        if target.isAncestorOf(w) and _is_nav_candidate(w):
+            return w
+        w = w.nextInFocusChain(); seen += 1
+    return None
+
+
+def _focus_first(target, reason=Qt.FocusReason.TabFocusReason):
+    """Focus the first visible, enabled candidate of a widget or list. Deferred
+    with QTimer.singleShot(0) so it works from showEvent (children are not
+    visible yet there)."""
+    def go():
+        try:
+            w = _first_focusable(target)
+        except RuntimeError:
+            return
+        if w is not None:
+            w.setFocus(reason)
+    QTimer.singleShot(0, go)
+
+
+def _chain_focus(widgets):
+    """Set the Tab / D-pad order to follow the given list. None entries and
+    widgets that can never take focus (NoFocus) are skipped; hidden or disabled
+    ones stay in the chain because Qt skips them at navigation time, so a button
+    shown or enabled later still lands in the right place."""
+    nofocus = int(getattr(Qt.FocusPolicy.NoFocus, "value", Qt.FocusPolicy.NoFocus))
+    chain = [w for w in widgets if w is not None and _policy_bits(w) != nofocus]
+    for a, b in zip(chain, chain[1:]):
+        QWidget.setTabOrder(a, b)
+    return chain
+
+
+_SCROLL_FOLLOW_APP = None
+
+
+def _scroll_to_focus(_old, new):
+    if new is None:
+        return
+    try:
+        p = new.parentWidget()
+        while p is not None:
+            if isinstance(p, QScrollArea) and p.widget() is not None and p.widget().isAncestorOf(new):
+                p.ensureWidgetVisible(new, 24, 24)
+            p = p.parentWidget()
+    except RuntimeError:
+        pass
+
+
+def _install_scroll_follow():
+    """Once per QApplication: scroll every QScrollArea that holds the newly
+    focused widget so the widget is on screen."""
+    global _SCROLL_FOLLOW_APP
+    app = QApplication.instance()
+    if app is None or _SCROLL_FOLLOW_APP is app:
+        return
+    app.focusChanged.connect(_scroll_to_focus)
+    _SCROLL_FOLLOW_APP = app
+
+
+def _no_focus_scroll(sa):
+    """Keep a QScrollArea out of the focus chain (so the D-pad goes to the
+    widgets inside it, not to the area's own scrolling) and have it scroll the
+    focused child into view. Returns sa."""
+    sa.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    _install_scroll_follow()
+    return sa
+
+
+def _scroll_area(widget=None, resizable=True):
+    """QScrollArea factory: frameless, widgetResizable, no focus of its own."""
+    sa = QScrollArea()
+    sa.setWidgetResizable(resizable)
+    sa.setFrameShape(QFrame.Shape.NoFrame)
+    if widget is not None:
+        sa.setWidget(widget)
+    return _no_focus_scroll(sa)
+
+
+def _current_page(widget):
+    """The visible screen for a widget: the current page of its window's stack
+    (DeckOpsWindow.stack), else the window itself."""
+    win = widget.window()
+    stack = getattr(win, "stack", None)
+    if isinstance(stack, QStackedWidget) and stack.currentWidget() is not None:
+        return stack.currentWidget()
+    return win
+
+
+def _screen_back_action(screen):
+    """The screen's Escape handler, or None (none defined, or opted out)."""
+    allowed = getattr(screen, "escape_allowed", None)
+    if callable(allowed):
+        try:
+            if not allowed():
+                return None
+        except Exception:
+            _log.debug("escape_allowed failed", exc_info=True)
+            return None
+    action = getattr(screen, "back_action", None) or getattr(screen, "_on_escape", None)
+    return action if callable(action) else None
+
+
+def _screen_focus_target(screen):
+    target = getattr(screen, "focus_target", None)
+    if callable(target):
+        try:
+            w = target()
+        except Exception:
+            _log.debug("focus_target failed", exc_info=True)
+            w = None
+        if w is not None and _tab_focusable(w):
+            return w
+    return _first_focusable(screen)
+
+
+def _ensure_focus_in(screen):
+    """Deferred: when nothing inside screen has focus (and no dialog is up),
+    focus its focus_target() or first focusable widget. A screen's own
+    _focus_first from showEvent runs first and wins."""
+    def go():
+        try:
+            if screen is None or not screen.isVisible() or QApplication.activeModalWidget():
+                return
+            fw = QApplication.focusWidget()
+            if fw is not None and (fw is screen or screen.isAncestorOf(fw)):
+                return
+            w = _screen_focus_target(screen)
+            if w is not None:
+                w.setFocus(Qt.FocusReason.TabFocusReason)
+        except RuntimeError:
+            pass
+    QTimer.singleShot(0, go)
+
+
+def _consumes_arrows(widget) -> bool:
+    """Widgets that keep their own arrow keys (text cursor, slider, spin box,
+    list/combo, scrolling a text-only area). Buttons and checkboxes do not."""
+    if isinstance(widget, QAbstractButton):
+        return False
+    if isinstance(widget, QScrollArea):
+        # A plain scroll area with nothing focusable inside scrolls; one holding
+        # buttons is a container the D-pad should move through.
+        return not _has_focusable_child(widget)
+    return True
+
+
+_NAV_PROP = "deckopsNav"
+
+
+def _nav_scope(widget, enabled=True):
+    """Turn controller navigation on (or off) for widget and everything under it,
+    including dialogs parented to it. The nearest ancestor with the property set
+    decides; DeckOpsWindow turns it on. Use enabled=False on a custom widget that
+    handles its own arrow keys."""
+    widget.setProperty(_NAV_PROP, bool(enabled))
+    return widget
+
+
+def _nav_enabled(widget) -> bool:
+    w = widget
+    while w is not None:
+        v = w.property(_NAV_PROP)
+        if v is not None:
+            return bool(v)
+        w = w.parentWidget()        # crosses into a dialog's parent window
+    return False
+
+
+class _ControllerNav(QObject):
+    """Application event filter mapping controller keys onto focus navigation.
+    Only acts inside widgets that opted in with _nav_scope (any other window in
+    the process, e.g. a test's, keeps plain Qt keys)."""
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() != QEvent.Type.KeyPress or not isinstance(obj, QWidget):
+                return False
+            if not _nav_enabled(obj):
+                return False
+            return self._key(obj, event)
+        except RuntimeError:        # receiver deleted mid-event
+            return False
+
+    def _key(self, obj, event):
+        key = event.key()
+        if key not in _ACTIVATE_KEYS and key not in _NAV_KEYS and key != Qt.Key.Key_Escape:
+            return False
+        mods = event.modifiers()
+        keypad = int(getattr(Qt.KeyboardModifier.KeypadModifier, "value",
+                             Qt.KeyboardModifier.KeypadModifier))
+        if (int(getattr(mods, "value", mods)) & ~keypad) != 0:
+            return False        # Shift+Tab-like combos and shortcuts stay Qt's
+        fw = QApplication.focusWidget()
+        # An app filter sees the event again for each parent it propagates to;
+        # act once, on the widget that has focus (or the window, if none does).
+        if fw is not None:
+            if obj is not fw:
+                return False
+        elif not obj.isWindow():
+            return False
+        if QApplication.activePopupWidget() is not None:
+            return False
+
+        if key == Qt.Key.Key_Escape:
+            return self._escape(obj)
+
+        if fw is None:
+            # Nothing focused (screen just shown): the first press only lands focus.
+            w = _screen_focus_target(_current_page(obj))
+            if w is None:
+                return False
+            w.setFocus(Qt.FocusReason.TabFocusReason)
+            return True
+
+        if key in _ACTIVATE_KEYS:
+            if isinstance(fw, QAbstractButton):
+                if event.isAutoRepeat():
+                    return True             # holding A must not fire repeatedly
+                if fw.isEnabled():
+                    fw.click()              # QCheckBox/QRadioButton toggle, QPushButton clicks
+                return True
+            return False
+
+        # Arrow keys
+        if _consumes_arrows(fw):
+            return False
+        self._move(fw, key in _NEXT_KEYS)
+        return True
+
+    @staticmethod
+    def _move(fw, forward):
+        tab = QKeyEvent(QEvent.Type.KeyPress,
+                        Qt.Key.Key_Tab if forward else Qt.Key.Key_Backtab,
+                        Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(fw, tab)
+        # Skip containers that still sit in the chain (a QScrollArea of buttons
+        # that was not given _no_focus_scroll).
+        for _ in range(8):
+            now = QApplication.focusWidget()
+            if now is None or now is fw or _is_nav_candidate(now):
+                break
+            QApplication.sendEvent(now, QKeyEvent(
+                QEvent.Type.KeyPress, Qt.Key.Key_Tab if forward else Qt.Key.Key_Backtab,
+                Qt.KeyboardModifier.NoModifier))
+
+    @staticmethod
+    def _escape(obj):
+        if QApplication.activeModalWidget() is not None:
+            return False                    # the dialog's own Escape = reject
+        page = _current_page(obj)
+        action = _screen_back_action(page)
+        if action is None:
+            return False
+        action()
+        return True
+
+
+_NAV_FILTER = None
+
+
+def install_controller_nav(app=None, scope=None):
+    """Install the controller-navigation event filter (once per QApplication)
+    and the focus-follows-scroll hook; scope, if given, is opted in with
+    _nav_scope. Returns the filter."""
+    global _NAV_FILTER
+    if scope is not None:
+        _nav_scope(scope)
+    app = app or QApplication.instance()
+    if app is None:
+        return None
+    if _NAV_FILTER is not None:
+        try:
+            if _NAV_FILTER.parent() is app:
+                return _NAV_FILTER
+        except RuntimeError:
+            pass
+    _NAV_FILTER = _ControllerNav(app)
+    app.installEventFilter(_NAV_FILTER)
+    _install_scroll_follow()
+    return _NAV_FILTER

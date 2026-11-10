@@ -135,14 +135,17 @@ class SetupUITests(unittest.TestCase):
         self.assertIn(f"color:{ui_theme.C_TEXT}", style)
         self.assertIn(f"border:2px solid {ui_theme.C_LINE}", style)
         self.assertIn(f"border-color:{ui_theme.C_IW}", style)
+        # Select Games runs the game scan itself (no separate results screen)
         welcome = QWidget()
-        welcome.screen_name = "WelcomeScreen"
+        welcome.screen_name = "SetupScreen"
         self.stack.addWidget(welcome)
         library = QWidget()
         library.screen_name = "ManagementScreen"
         self.stack.addWidget(library)
         self.wizard._finish()
         self.assertIs(self.stack.currentWidget(), welcome)
+        self.assertTrue(welcome._scan_pending)
+        self.assertFalse(welcome._from_manage)
         # Re-running the wizard after first run returns to the library instead.
         self.settings.values["first_run_complete"] = True
         self.stack.setCurrentWidget(self.wizard)

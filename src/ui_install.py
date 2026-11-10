@@ -1,14 +1,15 @@
 """
 ui_install.py — Install pipeline screens for DeckOps
 
-Screens: WelcomeScreen, SetupScreen, InstallScreen
+Screens: SetupScreen (Select Games, which also runs the first-run game scan
+inline), InstallScreen.
 Extracted from ui_qt.py — all hardcoded stack indices replaced with named lookups.
 """
 
 import html, os, threading, time
 
 from qt import (
-    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLayout,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLayout,
     QLabel, QCheckBox, QProgressBar,
     QPlainTextEdit, QFileDialog, QMessageBox,
 )
@@ -20,184 +21,45 @@ import inhibit
 from net import DownloadError
 
 from ui_constants import (
-    C_BG, C_CARD, C_SURFACE, C_LINE, C_TEXT, C_IW, C_TREY, C_DIM, C_DARK_BTN,
-    font, _btn, _lbl, _title_block, _header_bar, _log_to_file, _log_html, _copy_log_to_clipboard, _Sigs,
+    C_BG, C_CARD, C_SURFACE, C_LINE, C_TEXT, C_IW, C_TREY, C_DIM, C_DARK_BTN, C_ACCENT,
+    font, _btn, _button_style, _lbl, _header_bar, _log_to_file, _log_html, _copy_log_to_clipboard, _Sigs,
     ALL_GAMES, KEY_CLIENT, KEY_MODE_LABEL,
     _active_keys, _active_client,
     _show_preflight,
     go_to, get_screen,
+    FONT_BODY, FONT_ACTION, BTN_MIN_H, LABELS,
+    _no_focus_scroll, _scroll_area, _chain_focus, _focus_first,
+    _plain_marks,
 )
+# _BaseInstallScreen has its own _mark(key, status) for result rows
+from ui_constants import _mark as _mark_html
+
+_SELECTABLE = Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
 
 
-# ── WelcomeScreen ─────────────────────────────────────────────────────────────
-class WelcomeScreen(QWidget):
-    def __init__(self, stack):
-        super().__init__(); self.stack=stack; self.installed={}; self.screen_name = "WelcomeScreen"
-        self.steam_installed={}; self.own_installed={}; self.steam_root=""
-        lay = QVBoxLayout(self); lay.setContentsMargins(24,12,24,16); lay.setSpacing(8)
-        _title_block(lay, main_size=30)
-        self.status = _lbl("Scanning for games...", 14, C_DIM)
-        lay.addWidget(self.status)
-        self.bar = QProgressBar(); self.bar.setMaximum(100); self.bar.setTextVisible(False)
-        self.bar.setFixedHeight(14)
-        bw = QHBoxLayout(); bw.addStretch(); bw.addWidget(self.bar,6); bw.addStretch()
-        lay.addLayout(bw)
-        self.results = _lbl("", 13, C_IW, align=Qt.AlignmentFlag.AlignLeft)
-        self.results.setTextFormat(Qt.TextFormat.RichText)
-        self.notice = _lbl(
-            "Before you continue:\n"
-            "•  Downgrading a game (MW3) can take a long time and needs at least "
-            "that game's full size free on the drive.\n"
-            "•  On a handheld, plug it in. DeckOps keeps the device awake during the install.\n"
-            "•  Use a stable internet connection.\n"
-            "•  Keep the device somewhere it can cool down, not on a blanket.",
-            12, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
-        self.notice.setStyleSheet(
-            f"color:{C_TREY};background:{C_SURFACE};border:1px solid {C_TREY};"
-            "border-radius:8px;padding:10px 16px;")
-        self.notice.setVisible(False)
-        # Results and safety advice can scroll independently of the navigation.
-        self.details = QScrollArea(); self.details.setWidgetResizable(True)
-        self.details.setFrameShape(QScrollArea.Shape.NoFrame)
-        details_body = QWidget(); mid = QVBoxLayout(details_body)
-        mid.setContentsMargins(4, 4, 4, 4); mid.setSpacing(8)
-        mid.addWidget(self.results); mid.addWidget(self.notice); mid.addStretch()
-        self.details.setWidget(details_body)
-        lay.addWidget(self.details, 1)
-        self._scanning = False
-        self.back = _btn("Back", C_DARK_BTN, size=11, h=42)
-        self.back.clicked.connect(self._go_back)
-        self.retry = _btn("Scan Again", C_DARK_BTN, size=11, h=42)
-        self.retry.clicked.connect(self._start_scan)
-        self.cont = _btn("Continue >>", C_IW, size=11, h=42)
-        self.cont.setVisible(False)
-        self.cont.clicked.connect(self._go_next)
-        cw = QHBoxLayout(); cw.setSpacing(8)
-        cw.addWidget(self.back); cw.addWidget(self.retry); cw.addWidget(self.cont, 1)
-        lay.addLayout(cw)
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        if e.spontaneous():     # window restored, not a screen change
-            return
-        self._start_scan()
-
-    def _go_back(self):
-        go_to(self.stack, "SetupFlowScreen" if cfg.is_first_run() else "ManagementScreen")
-
-    def _start_scan(self):
-        if self._scanning: return
-        self._scanning = True
-        # A failed rescan must not hand the previous scan's games on to Set Up
-        self.steam_installed, self.own_installed, self.installed = {}, {}, {}
-        self.bar.setValue(20); self.results.setText(""); self.notice.setVisible(False)
-        self.cont.setVisible(False); self.retry.setVisible(False); self.back.setVisible(False)
-        self.status.setText("Scanning for Steam and games...")
-        self.status.setStyleSheet(f"color:{C_DIM};background:transparent;")
-        self._s = _Sigs()
-        self._s.done.connect(self._on_scanned)
-        threading.Thread(target=self._do_scan, daemon=True).start()
-
-    def _do_scan(self):
-        root, merged = "", {}
-        self._scan_error = False
-        try:
-            root = find_steam_root() or ""
-            if root: merged = find_all_games(root)
-        except Exception as ex:
-            self._scan_error = True
-            _log_to_file(f"[WelcomeScreen] scan failed: {ex}")
-        self.steam_root, self._merged = root, merged
-        self._s.done.emit(bool(root))
-
-    def _on_scanned(self, steam_found):
-        self._scanning = False
-        self.back.setVisible(True)
-        if getattr(self, "_scan_error", False):
-            self.bar.setValue(100); self.retry.setVisible(True)
-            self.status.setText("Game scan couldn't finish. Try again" +
-                                (", or choose a game folder manually." if self.steam_root else
-                                 " after opening Steam once."))
-            self.status.setStyleSheet(f"color:{C_TREY};background:transparent;")
-            if cfg.is_first_run() and self.steam_root:
-                self.cont.setText("Choose Folder >>"); self.cont.setVisible(True)
-            return
-        if not steam_found:
-            self.bar.setValue(100); self.retry.setVisible(True)
-            self.status.setText("Steam not found. Install Steam and open it once, then scan again.")
-            self.status.setStyleSheet(f"color:{C_TREY};background:transparent;")
-            return
-        self.bar.setValue(70)
-        merged = self._merged
-        self.steam_installed = {k: v for k, v in merged.items() if v.get("source") != "own"}
-        self.own_installed = {k: v for k, v in merged.items() if v.get("source") == "own"}
-        self.installed = merged
-        if cfg.is_lcd():
-            lcd_allowed = set()
-            for g in ALL_GAMES:
-                lcd_allowed.update(g.get("lcd_keys", g["keys"]))
-            self.installed = {k:v for k,v in self.installed.items() if k in lcd_allowed}
-            self.steam_installed = {k:v for k,v in self.steam_installed.items() if k in lcd_allowed}
-            self.own_installed = {k:v for k,v in self.own_installed.items() if k in lcd_allowed}
-        self._show_results()
-
-    def _show_results(self):
-        self.bar.setValue(100)
-        self.cont.setText("Continue >>")
-        if not self.installed:
-            self.retry.setVisible(True)
-            self.status.setStyleSheet(f"color:{C_TREY};background:transparent;")
-            if cfg.is_first_run():
-                self.status.setText(
-                    "No supported games found. If your games are in a custom folder, "
-                    "continue and use Choose Folder.")
-                self.cont.setText("Choose Folder >>"); self.cont.setVisible(True)
-            else:
-                self.status.setText("No supported games found.")
-            return
-        unique = len({gd["base"] for gd in ALL_GAMES
-                      if any(k in self.installed for k in _active_keys(gd))})
-        self.status.setText(f"Found {unique} supported game(s)!")
-        self.status.setStyleSheet(f"color:{C_IW};background:transparent;")
-        lines = []
-        for source, games, color in (("Steam", self.steam_installed, C_IW),
-                                     ("Non-Steam", self.own_installed, C_TREY)):
-            for key, game in sorted(games.items(), key=lambda item: item[1].get("order", 99)):
-                gd = next((g for g in ALL_GAMES if key in _active_keys(g)), None)
-                name = gd["base"] if gd else game.get("name", key)
-                mode = SetupScreen._mode_name(key)
-                lines.append(f'<span style="color:{color}">'
-                             f'{html.escape(name)} · {html.escape(mode)} · {source}</span>')
-        self.results.setText("<br>".join(lines)); self.cont.setVisible(True)
-        self.notice.setVisible(cfg.is_first_run())
-
-    def _go_next(self):
-        if cfg.is_first_run():
-            s = get_screen(self.stack, "SetupScreen")
-            s.steam_installed = self.steam_installed
-            # Keep the games the user added with Choose Folder: this scan
-            # doesn't know their folders, and Back -> Continue used to replace
-            # the list with it, dropping those games.
-            folder_found = {k: v for k, v in (getattr(s, "_folder_found", None) or {}).items()
-                            if k not in self.steam_installed}
-            s.own_installed   = {**self.own_installed, **folder_found}
-            s.steam_root      = self.steam_root
-            s._from_manage = False
-            go_to(self.stack, "SetupScreen")
-        else:
-            get_screen(self.stack, "ManagementScreen").set_installed(self.installed)
-            go_to(self.stack, "ManagementScreen")
+def _plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
 
 
 # ── SetupScreen ───────────────────────────────────────────────────────────────
 class SetupScreen(QWidget):
     """
     Unified game selection. Shows Steam and non-Steam games in one list.
+
+    On first run it also runs the game scan itself, with an inline scanning
+    state (busy bar, scan errors, Scan Again), so device setup leads straight
+    here instead of through a separate results screen. SetupFlowScreen sets
+    _scan_pending before opening it; ManagementScreen._add_games fills the
+    lists itself and sets _from_manage.
     """
+    _INTRO = "Choose games and modes. DeckOps creates their Proton prefixes."
+
     def __init__(self, stack):
         super().__init__(); self.stack=stack; self.screen_name = "SetupScreen"
         self.steam_installed={}; self.own_installed={}; self.steam_root=""
         self._from_manage = False  # set by ManagementScreen._add_games on entry
+        self._scan_pending = False  # set by SetupFlowScreen._finish: scan on show
+        self._scanning = False; self._scan_error = False; self._merged = {}
         self._checks={}
         self._choices = {}  # key -> explicit choice, including choices across Back and folder scans
         self._extra_choices = {}
@@ -205,6 +67,7 @@ class SetupScreen(QWidget):
         self._folder_found = {}
         self._iw4x_dlc_cb = None; self._iw4x_dlc_present = False
         self._lan_cb = None
+        self._focus_list = []   # list widgets in visual order, for the D-pad chain
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
 
@@ -213,22 +76,48 @@ class SetupScreen(QWidget):
         # ── Content area ───────────────────────────────────────────────
         content = QWidget()
         clay = QVBoxLayout(content); clay.setContentsMargins(16,10,16,12); clay.setSpacing(6)
-        clay.addWidget(_lbl(
-            "Choose games and modes. DeckOps creates their Proton prefixes.", 11, C_DIM,
-            align=Qt.AlignmentFlag.AlignLeft))
+        # Intro and the select buttons share one row so the list keeps its height at 800x500
         selrow = QHBoxLayout(); selrow.setSpacing(8)
-        selrow.addWidget(_lbl("Scroll for more games", 10, C_DIM,
-                              align=Qt.AlignmentFlag.AlignLeft, wrap=False))
-        selrow.addStretch()
+        intro_col = QVBoxLayout(); intro_col.setSpacing(2)
+        self.intro = _lbl(self._INTRO, FONT_BODY, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        intro_col.addWidget(self.intro)
+        # Only while the list can actually scroll (a static hint was wrong when it couldn't)
+        self.scroll_hint = _lbl("Scroll for more games", 10, C_DIM,
+                                align=Qt.AlignmentFlag.AlignLeft, wrap=False)
+        self.scroll_hint.setVisible(False)
+        intro_col.addWidget(self.scroll_hint)
+        selrow.addLayout(intro_col, 1)
+        self._select_btns = []
         for _txt, _on in (("Select All", True), ("Select None", False)):
-            _b = _btn(_txt, C_DARK_BTN, size=10, h=32)
-            _b.setMinimumWidth(max(110, _b.sizeHint().width()))
+            _b = _btn(_txt, C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+            _b.setMinimumWidth(max(120, _b.sizeHint().width()))
             _b.clicked.connect(lambda _c, v=_on: self._set_all(v))
             selrow.addWidget(_b)
+            self._select_btns.append(_b)
+        self.sel_all, self.sel_none = self._select_btns
         clay.addLayout(selrow)
+
+        # Inline scan state (first run): status, busy bar, Scan Again
+        self.scan_box = QWidget()
+        sb = QVBoxLayout(self.scan_box); sb.setContentsMargins(0, 4, 0, 4); sb.setSpacing(8)
+        self.scan_status = _lbl("", 13, C_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        sb.addWidget(self.scan_status)
+        self.scan_bar = QProgressBar(); self.scan_bar.setRange(0, 0)
+        self.scan_bar.setTextVisible(False); self.scan_bar.setFixedHeight(12)
+        sb.addWidget(self.scan_bar)
+        self.rescan_btn = _btn("Scan Again", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        self.rescan_btn.clicked.connect(self._start_scan)
+        rr = QHBoxLayout(); rr.addWidget(self.rescan_btn); rr.addStretch(); sb.addLayout(rr)
+        sb.addStretch(1)        # keeps the scan state at the top while the list is hidden
+        self.scan_box.setVisible(False)
+        clay.addWidget(self.scan_box)
+
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        _no_focus_scroll(scroll)
+        scroll.verticalScrollBar().rangeChanged.connect(
+            lambda _lo, hi: self.scroll_hint.setVisible(hi > 0 and not scroll.isHidden()))
         # One fluid column: the mode labels never compete with fixed-width badges.
         # Extras live in the same scroll area, leaving navigation visible at 800x500.
         self._lw = QWidget(); self._list = QVBoxLayout(self._lw)
@@ -248,19 +137,20 @@ class SetupScreen(QWidget):
         scroll.setWidget(self._lw); self.scroll = scroll
         clay.addWidget(scroll, stretch=1)
 
-        self.warning = _lbl("", 10, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
+        self.warning = _lbl("", FONT_BODY, C_TREY, align=Qt.AlignmentFlag.AlignLeft)
         self.warning.setVisible(False); clay.addWidget(self.warning)
         brow = QHBoxLayout(); brow.setSpacing(6)
-        back = _btn("Back", C_DARK_BTN, size=10, h=40)
+        back = _btn(LABELS["back"], C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         self.back = back
         back.clicked.connect(self._go_back)
-        self._folder_btn = _btn("Choose Folder", C_DARK_BTN, size=10, h=40)
+        self._folder_btn = _btn("Choose Folder", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         self._folder_btn.clicked.connect(self._pick_folder)
-        self.inst_btn = _btn("Review and install", C_IW, size=10, h=40)
+        self.inst_btn = _btn("Review and install", C_IW, size=FONT_ACTION, h=BTN_MIN_H)
         self.inst_btn.clicked.connect(self._go_install)
         brow.addWidget(back); brow.addWidget(self._folder_btn)
         brow.addWidget(self.inst_btn, stretch=1); clay.addLayout(brow)
         lay.addWidget(content, stretch=1)
+        self._chain()
 
     def reset_state(self):
         """Forget everything chosen or found this session (after Reset Config): the folder
@@ -274,10 +164,136 @@ class SetupScreen(QWidget):
         if e.spontaneous():     # window restored: keep the user's ticks
             return
         self.warning.setVisible(False)
-        self._build()
+        if self._scan_pending:
+            self._scan_pending = False
+            self._start_scan()
+            return
+        if not self._scanning:
+            self._build()
+
+    # ── Controller protocol (see ui_constants) ─────────────────────────
+    def focus_target(self):
+        for w in (self.inst_btn, self.rescan_btn, self._folder_btn, self.back):
+            if w.isVisible() and w.isEnabled():
+                return w
+        return None
+
+    def back_action(self):
+        self._go_back()
+
+    def _chain(self):
+        """D-pad / Tab order: selection buttons, the list top to bottom, then the footer."""
+        _chain_focus([self.rescan_btn, self.sel_all, self.sel_none, *self._focus_list,
+                      self.back, self._folder_btn, self.inst_btn])
 
     def _go_back(self):
-        go_to(self.stack, "ManagementScreen" if self._from_manage else "WelcomeScreen")
+        if self._from_manage:
+            target = "ManagementScreen"
+        else:
+            target = "SetupFlowScreen" if cfg.is_first_run() else "ManagementScreen"
+        go_to(self.stack, target)
+
+    # ── First-run game scan (inline) ───────────────────────────────────
+    def _set_list_visible(self, on):
+        self.scroll.setVisible(on)
+        for b in self._select_btns:
+            b.setVisible(on)
+        if not on:
+            self.scroll_hint.setVisible(False)
+        else:
+            self.scroll_hint.setVisible(self.scroll.verticalScrollBar().maximum() > 0)
+
+    def _start_scan(self):
+        if self._scanning:
+            return
+        self._scanning = True
+        self._scan_error = False
+        # A failed rescan must not hand the previous scan's games on. Games added
+        # with Choose Folder are kept: this scan doesn't know their folders.
+        self.steam_installed = {}
+        self.own_installed = dict(self._folder_found or {})
+        self._merged = {}
+        self.intro.setText(self._INTRO)
+        self.intro.setStyleSheet(f"color:{C_DIM};background:transparent;")
+        self.scan_status.setText("Scanning for Steam and games...")
+        self.scan_status.setStyleSheet(f"color:{C_DIM};background:transparent;")
+        self.scan_bar.setVisible(True); self.rescan_btn.setVisible(False)
+        self.scan_box.setVisible(True)
+        self._set_list_visible(False)
+        self.inst_btn.setEnabled(False); self._folder_btn.setEnabled(False)
+        self._game_scan_sigs = _Sigs()
+        self._game_scan_sigs.done.connect(self._on_scanned)
+        threading.Thread(target=self._do_scan, daemon=True).start()
+
+    def _do_scan(self):
+        root, merged = "", {}
+        self._scan_error = False
+        try:
+            root = find_steam_root() or ""
+            if root: merged = find_all_games(root)
+        except Exception as ex:
+            self._scan_error = True
+            _log_to_file(f"[SetupScreen] scan failed: {ex}")
+        self.steam_root, self._merged = root, merged
+        self._game_scan_sigs.done.emit(bool(root))
+
+    @staticmethod
+    def _found_text(installed):
+        games = len({gd["base"] for gd in ALL_GAMES
+                     if any(k in installed for k in _active_keys(gd))})
+        active = {k for gd in ALL_GAMES for k in _active_keys(gd)}
+        modes = [k for k in installed if k in active]
+        if "iw5mp" in modes and "iw5mp_ds" in modes:
+            modes.remove("iw5mp_ds")        # one row: the server is covered by MP
+        return f"Found {_plural(games, 'game')} ({_plural(len(modes), 'mode')})."
+
+    def _scan_problem(self, text, folder):
+        self.intro.setText(self._INTRO)
+        self.intro.setStyleSheet(f"color:{C_DIM};background:transparent;")
+        self.scan_status.setText(text)
+        self.scan_status.setStyleSheet(f"color:{C_TREY};background:transparent;")
+        self.scan_box.setVisible(True); self.scan_bar.setVisible(False)
+        self.rescan_btn.setVisible(True)
+        self._folder_btn.setEnabled(folder)
+        self.inst_btn.setEnabled(bool(self.steam_installed or self.own_installed))
+
+    def _on_scanned(self, steam_found):
+        self._scanning = False
+        self.scan_bar.setVisible(False)
+        self._set_list_visible(True)
+        self._folder_btn.setEnabled(True); self.inst_btn.setEnabled(True)
+        if self._scan_error:
+            self._scan_problem(
+                "Game scan couldn't finish. Try again" +
+                (", or choose a game folder manually." if self.steam_root else
+                 " after opening Steam once."), folder=bool(self.steam_root))
+        elif not steam_found:
+            self._scan_problem("Steam not found. Install Steam and open it once, then scan again.",
+                               folder=False)
+        else:
+            merged = self._merged or {}
+            steam = {k: v for k, v in merged.items() if v.get("source") != "own"}
+            own = {k: v for k, v in merged.items() if v.get("source") == "own"}
+            if cfg.is_lcd():
+                lcd_allowed = set()
+                for g in ALL_GAMES:
+                    lcd_allowed.update(g.get("lcd_keys", g["keys"]))
+                steam = {k: v for k, v in steam.items() if k in lcd_allowed}
+                own = {k: v for k, v in own.items() if k in lcd_allowed}
+            # Keep the games the user added with Choose Folder (Scan Again used to drop them)
+            folder_found = {k: v for k, v in (self._folder_found or {}).items() if k not in steam}
+            self.steam_installed = steam
+            self.own_installed = {**own, **folder_found}
+            installed = {**self.steam_installed, **self.own_installed}
+            if not installed:
+                self._scan_problem("No supported games found. If your games are in a custom "
+                                   "folder, use Choose Folder.", folder=True)
+            else:
+                self.scan_box.setVisible(False)
+                self.intro.setText(f"{self._found_text(installed)} {self._INTRO}")
+                self.intro.setStyleSheet(f"color:{C_TEXT};background:transparent;")
+        self._build()
+        _focus_first([self.inst_btn, self.rescan_btn, self._folder_btn, self.back])
 
     def _set_all(self, on):
         """Only touches rows the user could tick anyway."""
@@ -300,6 +316,7 @@ class SetupScreen(QWidget):
         self._checks.clear()
         self._iw4x_dlc_cb = None; self._iw4x_dlc_present = False
         self._lan_cb = None
+        self._focus_list = []
 
         all_installed = {**self.steam_installed, **self.own_installed}
 
@@ -348,12 +365,12 @@ class SetupScreen(QWidget):
                 mode_source = "Steam" if is_steam else "Non-Steam" if is_own else "Not found"
                 if configured:
                     cb.setAccessibleName(f"{gd['base']} · {mode} · Already set up")
-                    cb.setToolTip("Already set up. Use Game Options → Reinstall Game "
+                    cb.setToolTip("Already set up. Use Game Options > Reinstall Game "
                                   "to set this mode up again.")
                 else:
                     cb.setAccessibleName(f"{gd['base']} · {mode} · {mode_source}")
                     cb.setToolTip(cb.accessibleName())
-                cb.setFont(font(10))
+                cb.setFont(font(FONT_ACTION))
                 if configured:
                     # The theme does not tint disabled controls, so say it in colour too.
                     cb.setStyleSheet(f"QCheckBox{{color:{C_DIM};}}")
@@ -362,12 +379,14 @@ class SetupScreen(QWidget):
                 if installed and not configured:
                     cb.toggled.connect(lambda checked, k=key: self._choices.__setitem__(k, checked))
                 modes.addWidget(cb)
+                self._focus_list.append(cb)
                 self._checks[key] = (cb, gd, source)
             modes.addStretch()
             outer.addLayout(modes)
             self._add_row(gd, cw)
 
         self._build_extras(all_installed)
+        self._chain()
 
     def _build_extras(self, all_installed):
         """Optional add-ons, one tile each. Always shown so users know they exist: a tile greys out
@@ -386,7 +405,8 @@ class SetupScreen(QWidget):
             if checked is None and not missing:
                 v.addWidget(_lbl(f"{title}: Already Installed", 12, C_DIM, bold=True, align=Qt.AlignmentFlag.AlignLeft))
             else:
-                cb = QCheckBox(title); cb.setFont(font(11, True))
+                cb = QCheckBox(title); cb.setFont(font(FONT_ACTION, True))
+                self._focus_list.append(cb)
                 cb.setChecked(self._extra_choices.get(title, bool(checked)) and not missing)
                 if not missing:
                     cb.toggled.connect(lambda on, name=title: self._extra_choices.__setitem__(name, on))
@@ -418,8 +438,13 @@ class SetupScreen(QWidget):
             from iw4x import is_iw4x_dlc_installed
             idir = all_installed["iw4mp"].get("install_dir", "")
             self._iw4x_dlc_present = bool(idir) and is_iw4x_dlc_installed(idir)
+            # An MW2 MP that is already set up can't be ticked here, so "tick it" was a dead end
+            mw2 = self._checks.get("iw4mp", (None,))[0]
+            needs = ("MW2 Multiplayer is already set up: to add the maps, set it up again via "
+                     "Game Options > Reinstall Game" if mw2 is not None and not mw2.isEnabled()
+                     else "tick MW2 Multiplayer")
             cb = (tile("IW4x DLC maps", "Free MW2 DLC maps") if self._iw4x_dlc_present else
-                  tile("IW4x DLC maps", "Free MW2 DLC maps, ~3 GB, recommended", True, "iw4mp", "tick MW2 Multiplayer"))
+                  tile("IW4x DLC maps", "Free MW2 DLC maps, ~3 GB, recommended", True, "iw4mp", needs))
             if cb: self._iw4x_dlc_cb = cb
         self._extras.setVisible(self._tiles.count() > 0)
 
@@ -428,9 +453,10 @@ class SetupScreen(QWidget):
         row.setContentsMargins(10, 6, 10, 6)
         row.addWidget(_lbl(f"{gd['base']} · Not found", 11, C_DIM,
                            align=Qt.AlignmentFlag.AlignLeft), 1)
-        btn = _btn("Get Free MW3 Server", C_DARK_BTN, size=10, h=36)
+        btn = _btn("Get Free MW3 Server", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
         btn.clicked.connect(self._add_mw3_ds)
         row.addWidget(btn)
+        self._focus_list.append(btn)
         self._add_row(gd, cw)
 
     def _add_mw3_ds(self):
@@ -527,8 +553,10 @@ class SetupScreen(QWidget):
         self.own_installed = own
         self._folder_found = own  # rescans all saved folders; don't keep removed games
         self._folder_btn.setEnabled(True); self.inst_btn.setEnabled(True)
+        if added:
+            self.scan_box.setVisible(False)     # a scan problem shown above is resolved
         self._build()
-        self.warning.setText(f"Found {added} new game(s)." if added else "No new supported games in that folder.")
+        self.warning.setText(f"Found {_plural(added, 'new game')}." if added else "No new supported games in that folder.")
         self.warning.setStyleSheet(f"color:{C_IW if added else C_TREY};background:transparent;")
         self.warning.setVisible(True)
 
@@ -567,12 +595,21 @@ class SetupScreen(QWidget):
             extras.append("IW4x DLC maps (~3 GB)")
         if self._lan_cb:
             extras.append("Plutonium Offline: " + ("on" if self._lan_cb.isChecked() else "off"))
+        # The safety notes used to sit on a separate results screen before this one
+        notes = ["On a handheld, plug it in. DeckOps keeps the device awake during the install.",
+                 "Use a stable internet connection.",
+                 "Keep the device somewhere it can cool down, not on a blanket."]
+        if any(key in ("iw5mp", "iw5mp_ds") for key, _gd, _g in steam_selected):
+            notes.insert(0, "MW3 multiplayer needs older game files: the download can take a long "
+                            "time and needs about the game's full size free on the drive.")
         msg.setText("<b>Set up these games and modes?</b><br><br>" + games +
                     ("<br><br><b>Options:</b> " + html.escape(", ".join(extras)) if extras else "") +
+                    "<br><br><b>Before you continue:</b><br>" +
+                    "<br>".join(f"• {html.escape(n)}" for n in notes) +
                     "<br><br>Downloads and game-file changes may take time. "
                     "You can return to selection without losing your choices.")
         start = msg.addButton("Start Installation", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Back to Selection", QMessageBox.ButtonRole.RejectRole)
+        msg.addButton(LABELS["back_to_selection"], QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         return msg.clickedButton() is start
 
@@ -624,6 +661,16 @@ class SetupScreen(QWidget):
 
 class _SteamStillRunning(RuntimeError):
     """Steam could not be closed, so the install stops before Steam's files."""
+
+
+class _DowngradeSkipped(Exception):
+    """Skip MW3 was pressed while DepotDownloader waited for the QR scan. Raised from
+    its callbacks, so run_depot_download_qr stops (and kills DepotDownloader)."""
+
+
+# _plut_bootstrap's reason when the user pressed "Skip Plutonium games"
+_PLUT_SKIPPED = "Plutonium games skipped by user"
+_DG_SKIPPED = "skipped by user"
 
 
 # LCD Plutonium own games get their shortcut from heroic, not write_own_shortcuts
@@ -691,6 +738,17 @@ class _BaseInstallScreen(QWidget):
         self._plan = []; self._bands = {}
         self._phase_i = -1; self._phase_id = None
         self._last_pct = 0; self._t0 = 0.0
+        self._running = False           # worker running: Escape/B does nothing
+        self._last_complete = False
+        self._visited = set()           # plan phases actually entered this run
+        self._last_log = ""             # newest log line, shown under the current step
+        self._details_open = False      # raw log shown
+        self._plut_skip = False         # "Skip Plutonium games" pressed on the login wait
+        self._dg_skip = False           # "Skip MW3" pressed on the depot / QR wait
+        self._dg_skipped_ids = set()
+        self._dg_token = 0              # invalidates a pending re-arm of the depot button
+        self._dg_copied = False
+        self._dg_cmd_text = ""
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
 
@@ -703,7 +761,26 @@ class _BaseInstallScreen(QWidget):
         self.bar.setFixedHeight(22)
         bw = QHBoxLayout(); bw.addWidget(self.bar)
         clay.addLayout(bw)
-        self.stat = _lbl("", 13, C_IW); clay.addWidget(self.stat)
+        # Live progress text while a long step pulses: the headline keeps the step's
+        # name, and the messages that used to be overwritten by the pulse land here
+        self.detail = _lbl("", FONT_BODY, C_DIM)
+        self.detail.setVisible(False); clay.addWidget(self.detail)
+        self.stat = _lbl("", 12, C_IW); clay.addWidget(self.stat)
+
+        # Step checklist (done / now / next), built from the install plan: the
+        # main element while the install runs. The raw log is behind Show details.
+        self.steps = QLabel("")
+        self.steps.setTextFormat(Qt.TextFormat.RichText)
+        self.steps.setFont(font(13))
+        self.steps.setWordWrap(True)
+        self.steps.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.steps.setStyleSheet(
+            f"color:{C_TEXT};background:{C_SURFACE};border:1px solid {C_LINE};"
+            "border-radius:8px;padding:10px 14px;")
+        self.steps_scroll = _scroll_area(self.steps)
+        self.steps_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        clay.addWidget(self.steps_scroll, 1)
+
         self.iw5_qr_box = QWidget()
         self.iw5_qr_box.setVisible(False)
         qb = QVBoxLayout(self.iw5_qr_box)
@@ -722,26 +799,26 @@ class _BaseInstallScreen(QWidget):
         self.iw5_qr_info = _lbl(
             "Open the Steam app on your phone, tap the shield icon (Steam Guard),\n"
             "then tap \"Approve a sign-in\". Point your camera at the QR code above.",
-            11, C_DIM, align=Qt.AlignmentFlag.AlignCenter,
+            FONT_BODY, C_DIM, align=Qt.AlignmentFlag.AlignCenter,
         )
         qb.addWidget(self.iw5_qr_info)
+        self.qr_skip_btn = _btn("Skip MW3", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        self.qr_skip_btn.setAccessibleName("Skip MW3 and continue with the other games")
+        self.qr_skip_btn.clicked.connect(self._skip_mw3_qr)
+        qs = QHBoxLayout(); qs.addStretch(); qs.addWidget(self.qr_skip_btn); qs.addStretch()
+        qb.addLayout(qs)
         clay.addWidget(self.iw5_qr_box)
 
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFont(font(10))
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setFont(font(FONT_BODY))
         self.log.setStyleSheet(f"QPlainTextEdit{{color:{C_DIM};background:transparent;"
                                "border:none;padding:10px;}")
+        self.log.setVisible(False)
         clay.addWidget(self.log, stretch=1)
-
-        self._log_status = _lbl("", 11, C_DIM, wrap=False)
-        log_btn = _btn("Copy Log", C_DARK_BTN, size=11, h=40); log_btn.setFixedWidth(130)
-        log_btn.clicked.connect(lambda: _copy_log_to_clipboard(self._log_status))
-        lr = QHBoxLayout(); lr.addStretch(); lr.addWidget(log_btn); lr.addWidget(self._log_status); lr.addStretch()
-        clay.addLayout(lr)
 
         self.plut_warn = _lbl(
             "Wait for Plutonium to finish downloading. Log in, close its window, "
             "then confirm below. Do not continue while it is still open.",
-            11, C_TREY, align=Qt.AlignmentFlag.AlignCenter,
+            FONT_ACTION, C_TREY, align=Qt.AlignmentFlag.AlignCenter,
         )
         self.plut_warn.setStyleSheet(
             f"color:{C_TREY};background:{C_SURFACE};border:1px solid {C_TREY};"
@@ -750,44 +827,83 @@ class _BaseInstallScreen(QWidget):
         self.plut_warn.setVisible(False)
         clay.addWidget(self.plut_warn)
 
-        self.plut_btn = _btn("I've closed Plutonium  ✓", C_TREY, size=13, h=52)
+        self.plut_btn = _btn("I've closed Plutonium", C_TREY, size=13, h=52)
         self.plut_btn.setVisible(False)
         self.plut_btn.clicked.connect(self._confirm_plut)
-        pw = QHBoxLayout(); pw.addStretch(); pw.addWidget(self.plut_btn); pw.addStretch()
+        self.plut_skip_btn = _btn("Skip Plutonium games", C_DARK_BTN, size=FONT_ACTION, h=52)
+        self.plut_skip_btn.setVisible(False)
+        self.plut_skip_btn.clicked.connect(self._skip_plut)
+        pw = QHBoxLayout(); pw.setSpacing(8); pw.addStretch()
+        pw.addWidget(self.plut_btn); pw.addWidget(self.plut_skip_btn); pw.addStretch()
         clay.addLayout(pw)
 
-        self.iw5_dg_btn = _btn("Download complete, continue  ✓", C_IW, size=13, h=52)
-        self.iw5_dg_btn.setVisible(False)
-        self.iw5_dg_btn.clicked.connect(self._confirm_iw5_dg)
-        dw = QHBoxLayout(); dw.addStretch(); dw.addWidget(self.iw5_dg_btn); dw.addStretch()
-        clay.addLayout(dw)
-        self.manual_step = _lbl("", 10, C_TREY, align=Qt.AlignmentFlag.AlignCenter)
+        # Manual depot wait: instructions, then the command (selectable), then actions
+        self.manual_step = _lbl("", FONT_ACTION, C_TREY, align=Qt.AlignmentFlag.AlignCenter)
+        self.manual_step.setTextInteractionFlags(_SELECTABLE)
         self.manual_step.setVisible(False)
         clay.addWidget(self.manual_step)
+        self.dg_cmd = QLabel("")
+        self.dg_cmd.setWordWrap(True)
+        self.dg_cmd.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.dg_cmd.setTextInteractionFlags(_SELECTABLE)
+        self.dg_cmd.setAccessibleName("Steam Console command")
+        self.dg_cmd.setStyleSheet(
+            f"font-family: monospace; font-size:{FONT_ACTION}pt; color:{C_TEXT};"
+            f"background:{C_SURFACE};border:1px solid {C_LINE};border-radius:8px;padding:8px 12px;")
+        self.dg_cmd.setVisible(False)
+        clay.addWidget(self.dg_cmd)
+        self.dg_copy_btn = _btn("Copy command", C_DARK_BTN, size=FONT_ACTION, h=52)
+        self.dg_copy_btn.setVisible(False)
+        self.dg_copy_btn.clicked.connect(self._copy_dg_cmd)
+        self.iw5_dg_btn = _btn("Download complete, continue", C_IW, size=13, h=52)
+        self.iw5_dg_btn.setVisible(False)
+        self.iw5_dg_btn.clicked.connect(self._confirm_iw5_dg)
+        self.dg_skip_btn = _btn("Skip MW3", C_DARK_BTN, size=FONT_ACTION, h=52)
+        self.dg_skip_btn.setAccessibleName("Skip MW3 and continue with the other games")
+        self.dg_skip_btn.setVisible(False)
+        self.dg_skip_btn.clicked.connect(self._skip_mw3_manual)
+        dw = QHBoxLayout(); dw.setSpacing(8); dw.addStretch()
+        dw.addWidget(self.dg_copy_btn); dw.addWidget(self.iw5_dg_btn); dw.addWidget(self.dg_skip_btn)
+        dw.addStretch()
+        clay.addLayout(dw)
 
+        # Results: full height once the run ends (they used to be capped at 132px)
         self.summary = _lbl("", 12, C_TEXT, align=Qt.AlignmentFlag.AlignLeft)
         self.summary.setTextFormat(Qt.TextFormat.RichText)
+        self.summary.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.summary.setStyleSheet(
             f"color:{C_TEXT};background:{C_SURFACE};border:1px solid {C_LINE};"
             "border-radius:8px;padding:8px 12px;")
-        self.summary_scroll = QScrollArea(); self.summary_scroll.setWidgetResizable(True)
-        self.summary_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.summary_scroll.setMaximumHeight(132)
-        self.summary_scroll.setWidget(self.summary)
+        self.summary_scroll = _scroll_area(self.summary)
+        self.summary_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.summary_scroll.setVisible(False)
-        clay.addWidget(self.summary_scroll)
+        clay.addWidget(self.summary_scroll, 1)
 
-        self.retry_btn = _btn("Retry Failed", C_TREY, size=13, h=52)
+        self._log_status = _lbl("", FONT_BODY, C_DIM, wrap=False)
+        self.details_btn = _btn("Show details", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H)
+        self.details_btn.setMinimumWidth(150)
+        self.details_btn.clicked.connect(self._toggle_details)
+        log_btn = _btn("Copy Log", C_DARK_BTN, size=FONT_ACTION, h=BTN_MIN_H); log_btn.setMinimumWidth(130)
+        log_btn.clicked.connect(lambda: _copy_log_to_clipboard(self._log_status))
+        self.copy_log_btn = log_btn
+        lr = QHBoxLayout(); lr.setSpacing(8); lr.addStretch()
+        lr.addWidget(self.details_btn); lr.addWidget(log_btn); lr.addWidget(self._log_status); lr.addStretch()
+        clay.addLayout(lr)
+
+        self.retry_btn = _btn("Retry Failed", C_IW, size=13, h=52)
         self.retry_btn.setVisible(False)
         self.retry_btn.clicked.connect(self._retry_failed)
 
-        self.cont_btn = _btn("Continue  >>", C_IW, size=13, h=52)
+        self.cont_btn = _btn(LABELS["continue"], C_IW, size=13, h=52)
         self.cont_btn.setVisible(False)
         self.cont_btn.clicked.connect(lambda: go_to(self.stack, "SetupCompleteScreen"))
-        cw = QHBoxLayout(); cw.setSpacing(8)
-        cw.addWidget(self.retry_btn); cw.addWidget(self.cont_btn, 1)
-        clay.addLayout(cw)
+        self._btn_row = QHBoxLayout(); self._btn_row.setSpacing(8)
+        self._btn_row.addWidget(self.cont_btn, 1); self._btn_row.addWidget(self.retry_btn)
+        clay.addLayout(self._btn_row)
         lay.addWidget(content, stretch=1)
+        _chain_focus([self.qr_skip_btn, self.plut_btn, self.plut_skip_btn, self.dg_copy_btn,
+                      self.iw5_dg_btn, self.dg_skip_btn, self.details_btn, self.copy_log_btn,
+                      self.cont_btn, self.retry_btn])
 
         self._s = _Sigs()
         self._s.progress.connect(self._on_progress)
@@ -814,14 +930,89 @@ class _BaseInstallScreen(QWidget):
         self._pulse_msg   = ""
         self._pulse_count = 0
 
+    # ── Controller protocol (see ui_constants) ─────────────────────────
+    def escape_allowed(self):
+        return not self._running
+
+    def back_action(self):
+        if self._running:
+            return
+        if self._from_setup_selection and not self._last_complete:
+            go_to(self.stack, "SetupScreen")
+        elif self._from_manage:
+            go_to(self.stack, "ManagementScreen")
+        # First-run success: Continue leads on to the Field Guide; B does not
+
+    def focus_target(self):
+        for w in (self.plut_btn, self.iw5_dg_btn, self.dg_copy_btn, self.qr_skip_btn,
+                  self.retry_btn, self.cont_btn, self.details_btn):
+            if w.isVisible() and w.isEnabled():
+                return w
+        return None
+
+    def _set_primary(self, primary, secondary):
+        """Green and wide for the main action, dark for the other (UX-S8)."""
+        primary.setStyleSheet(_button_style(C_IW))
+        secondary.setStyleSheet(_button_style(C_DARK_BTN))
+        self._btn_row.setStretchFactor(primary, 1)
+        self._btn_row.setStretchFactor(secondary, 0)
+
+    def _toggle_details(self):
+        self._details_open = not self._details_open
+        self.log.setVisible(self._details_open)
+        self.details_btn.setText("Hide details" if self._details_open else "Show details")
+        if self._details_open:
+            sb = self.log.verticalScrollBar(); sb.setValue(sb.maximum())
+
+    def _render_steps(self):
+        plan = list(self._plan)
+        if not plan:
+            self.steps.setText("")
+            return
+        cur_i = self._phase_i
+
+        def row(tag, tag_color, text, text_color, bold=False):
+            t = f"<b>{html.escape(text)}</b>" if bold else html.escape(text)
+            return (f'<tr><td style="padding:3px 14px 3px 0"><b style="color:{tag_color}">{tag}</b></td>'
+                    f'<td style="padding:3px 0;color:{text_color}">{t}</td></tr>')
+
+        rows = []
+        for i, (pid, label, _w) in enumerate(plan):
+            if i < cur_i:
+                if pid in self._visited:
+                    rows.append(row("DONE", C_IW, label, C_DIM))
+                else:
+                    rows.append(row("SKIPPED", C_DIM, label, C_DIM))
+            elif i == cur_i:
+                rows.append(row("NOW", C_ACCENT, label, C_TEXT, bold=True))
+                if self._last_log:
+                    rows.append(f'<tr><td></td><td style="padding:0 0 4px 0;color:{C_DIM}">'
+                                f'{html.escape(self._last_log[:160])}</td></tr>')
+            else:
+                rows.append(row("NEXT", C_DIM, label, C_DIM))
+        self.steps.setText(f'<table cellspacing="0">{"".join(rows)}</table>')
+
     def _on_progress(self, p, m):
+        p = int(p)
+        pulsing = self._pulse_timer.isActive()
+        if pulsing and p > self._last_pct:
+            # A real percentage arrived: the bar shows it instead of the busy state
+            self.bar.setRange(0, 100)
         # Clamp. Phases are ordered, but a stray low value from an installer
         # that reports its own 0-100 must not rewind the bar.
-        self._last_pct = min(max(int(p), self._last_pct), 100)
+        self._last_pct = min(max(p, self._last_pct), 100)
         self.bar.setValue(self._last_pct)
-        if m: self.cur.setText(m)
+        if m:
+            m = _plain_marks(m)
+            if pulsing:
+                # The pulse owns the headline; it used to overwrite these messages
+                self.detail.setText(m); self.detail.setVisible(True)
+            else:
+                self.cur.setText(m)
         if self._plan and self._phase_i >= 0:
             self._update_stat()
+        if self._running:
+            self._render_steps()
 
     def _update_stat(self):
         if not self._plan: return
@@ -844,11 +1035,13 @@ class _BaseInstallScreen(QWidget):
             lo = 2 + int(acc / total * 96); acc += w
             self._bands[pid] = (lo, 2 + int(acc / total * 96), label)
         self._phase_i = -1; self._phase_id = None
+        self._visited = set()
 
     def _phase(self, pid):
         """Enter a phase and move the bar to the start of its band."""
         if pid not in self._bands: return
         self._phase_id = pid
+        self._visited.add(pid)
         self._phase_i = [p for p, _, _ in self._plan].index(pid)
         lo, _hi, label = self._bands[pid]
         self._s.progress.emit(lo, f"{label}...")
@@ -864,9 +1057,13 @@ class _BaseInstallScreen(QWidget):
         self._s.progress.emit(self._last_pct, msg)
 
     def _start_pulse(self, base_msg):
-        self._pulse_msg   = base_msg
+        self._pulse_msg   = _plain_marks(base_msg)
         self._pulse_count = 0
+        self.detail.setText(""); self.detail.setVisible(False)
+        # Busy bar until (unless) the step reports a real percentage
+        self.bar.setRange(0, 0)
         self._pulse_timer.start(500)
+        self._do_pulse()
 
     def _do_pulse(self):
         dots = "." * (self._pulse_count % 4)
@@ -875,14 +1072,34 @@ class _BaseInstallScreen(QWidget):
 
     def _stop_pulse(self):
         self._pulse_timer.stop()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(self._last_pct)
+        self.detail.setVisible(False)
 
+    # ── Plutonium login wait ───────────────────────────────────────────
     def _show_plut_wait(self):
         self.plut_warn.setVisible(True)
-        self.plut_btn.setVisible(True)
+        for b in (self.plut_btn, self.plut_skip_btn):
+            b.setEnabled(True); b.setVisible(True)
+        _focus_first([self.plut_btn])
 
     def _hide_plut_wait(self):
         self.plut_warn.setVisible(False)
         self.plut_btn.setVisible(False)
+        self.plut_skip_btn.setVisible(False)
+
+    def _confirm_plut(self):
+        # Disabled at once: a second tap must not reach a later wait
+        self.plut_btn.setEnabled(False); self.plut_skip_btn.setEnabled(False)
+        self._plut_event.set()
+
+    def _skip_plut(self):
+        self._plut_skip = True
+        self.plut_btn.setEnabled(False); self.plut_skip_btn.setEnabled(False)
+        self._plut_event.set()
+
+    # ── Manual (Steam Console) depot wait ──────────────────────────────
+    _DG_ARM_MS = 800    # the next depot's Continue ignores taps this long (double tap)
 
     def _show_iw5_dg_wait(self, cmd, step_label):
         # The worker is waiting for the Continue button this shows: a failure here
@@ -896,23 +1113,81 @@ class _BaseInstallScreen(QWidget):
         except Exception as ex:
             copied = False
             _log_to_file(f"[InstallScreen] could not copy the Steam console command: {ex}")
+        self._dg_copied = copied
+        self._dg_cmd_text = cmd
         self.manual_step.setText(
-            f"{step_label}: command copied. Paste it in Steam Console, "
-            "wait for the download to finish, then continue." if copied else
-            f"{step_label}: copy this into Steam Console, wait for the download to finish, "
-            f"then continue.\n{cmd}")
+            f"{step_label}: command copied. Paste it into the Steam Console, wait for the "
+            "download to finish, then continue." if copied else
+            f"{step_label}: copying didn't work. Select the command below or use Copy command, "
+            "paste it into the Steam Console, wait for the download to finish, then continue.")
         self.manual_step.setVisible(True)
-        self.iw5_dg_btn.setText(f"{step_label} complete, continue  ✓")
+        self.dg_cmd.setText(cmd); self.dg_cmd.setVisible(True)
+        self.dg_copy_btn.setVisible(True); self.dg_copy_btn.setEnabled(True)
+        self.dg_skip_btn.setVisible(True); self.dg_skip_btn.setEnabled(not self._dg_skip)
+        label = f"{step_label} downloaded, continue"
+        self.iw5_dg_btn.setText(label); self.iw5_dg_btn.setAccessibleName(label)
+        # Shown disabled: a double tap on the previous depot's Continue must not
+        # confirm this one. Armed after a short delay; the token drops stale timers.
+        self.iw5_dg_btn.setEnabled(False)
         self.iw5_dg_btn.setVisible(True)
+        self._dg_token += 1
+        token = self._dg_token
+        QTimer.singleShot(self._DG_ARM_MS, lambda: self._arm_iw5_dg(token))
+        _focus_first([self.dg_copy_btn])
+
+    def _arm_iw5_dg(self, token):
+        if token != self._dg_token or self.iw5_dg_btn.isHidden() or self._dg_skip:
+            return
+        self.iw5_dg_btn.setEnabled(True)
+        if self._dg_copied:
+            self.iw5_dg_btn.setFocus(Qt.FocusReason.TabFocusReason)
 
     def _hide_iw5_dg_wait(self):
-        self.iw5_dg_btn.setVisible(False)
-        self.manual_step.setVisible(False)
+        for w in (self.iw5_dg_btn, self.manual_step, self.dg_cmd, self.dg_copy_btn, self.dg_skip_btn):
+            w.setVisible(False)
 
     def _confirm_iw5_dg(self):
+        if not self.iw5_dg_btn.isEnabled():
+            return
+        # Disable before releasing the worker, so a second tap can't confirm the next depot
+        self.iw5_dg_btn.setEnabled(False)
+        self._dg_token += 1
         self._iw5_dg_event.set()
 
+    def _copy_dg_cmd(self):
+        cmd = self._dg_cmd_text
+        ok = False
+        app = QApplication.instance()
+        if app is not None and cmd:
+            app.clipboard().setText(cmd)
+            ok = True
+        try:
+            from depot_downgrade import copy_to_clipboard
+            ok = (copy_to_clipboard(cmd) is not False) or ok
+        except Exception as ex:
+            _log_to_file(f"[InstallScreen] could not copy the Steam console command: {ex}")
+        self.manual_step.setText(
+            "Command copied. Paste it into the Steam Console, wait for the download to finish, "
+            "then continue." if ok else
+            "Copying didn't work. Select the command below and copy it into the Steam Console.")
+
+    def _skip_mw3_manual(self):
+        self._dg_skip = True
+        self._dg_token += 1
+        self.dg_skip_btn.setEnabled(False); self.iw5_dg_btn.setEnabled(False)
+        self._iw5_dg_event.set()
+
+    def _skip_mw3_qr(self):
+        # The worker is inside DepotDownloader; its cancel watcher kills it within ~0.25 s
+        self._dg_skip = True
+        self.qr_skip_btn.setEnabled(False)
+        self._hide_iw5_qr()
+        self.cur.setText("Skipping MW3: stopping the download...")
+        self._append_log("Skipping MW3: stopping DepotDownloader...")
+
     def _show_iw5_qr(self, qr_text):
+        if self._dg_skip:
+            return              # a refreshed code after Skip MW3
         try:
             from depot_downgrade import qr_text_to_pixmap
             pm = qr_text_to_pixmap(qr_text, scale=8)
@@ -925,8 +1200,12 @@ class _BaseInstallScreen(QWidget):
             self.iw5_qr_lbl.setFixedSize(pm.size())
         else:
             self.iw5_qr_lbl.setText(qr_text)
+        was_shown = self.iw5_qr_box.isVisible()
         self.iw5_qr_box.setVisible(True)
+        self.qr_skip_btn.setEnabled(True)
         self.log.setMaximumHeight(0)
+        if not was_shown:
+            _focus_first([self.qr_skip_btn])
 
     def _hide_iw5_qr(self):
         self.iw5_qr_box.setVisible(False)
@@ -1027,7 +1306,7 @@ class _BaseInstallScreen(QWidget):
         on the old files.
         """
         from depot_downgrade import (
-            ensure_depotdownloader, run_depot_download_qr,
+            ensure_depotdownloader, run_depot_download_qr, DownloadCancelled,
             find_depot_stagings, merge_depots, open_steam_console,
             GAME_CONFIGS, required_space_gb, check_free_space_gb,
         )
@@ -1035,6 +1314,8 @@ class _BaseInstallScreen(QWidget):
         game_names = ", ".join(j[1] for j in dg_jobs)
         self._iw5_dg_event.clear()
         self._iw5_method = ""
+        self._dg_skip = False
+        self._dg_skipped_ids = set()
         self._dg_game_title = game_names
         self._s.iw5_dg_choose.emit()
         self._iw5_dg_event.wait()
@@ -1087,6 +1368,24 @@ class _BaseInstallScreen(QWidget):
                 "  Your login credentials will be deleted after the download."
             )
             self._s.progress.emit(self._ppct(2), "Setting up DepotDownloader...")
+
+            # Skip MW3 on the QR screen: run_depot_download_qr polls cancel=, kills
+            # DepotDownloader at once (it can sit silent for minutes waiting for a
+            # scan) and raises DownloadCancelled. The callbacks also raise, so the
+            # loop between depots stops too.
+            def _skip_check():
+                if self._dg_skip:
+                    raise _DowngradeSkipped()
+
+            def _on_qr(qr):
+                _skip_check(); self._s.iw5_qr_show.emit(qr)
+
+            def _on_qr_log(m):
+                _skip_check(); self._s.log.emit(f"  {m}")
+
+            def _on_qr_progress(m, _p):
+                _skip_check(); self._s.progress.emit(self._ppct(_p), m)
+
             try:
                 ensure_depotdownloader(
                     on_progress=lambda m: self._s.log.emit(f"  {m}"))
@@ -1103,6 +1402,7 @@ class _BaseInstallScreen(QWidget):
                         f".deckops_{game_id}_staging",
                     )
                     for depot in depots:
+                        _skip_check()
                         depot_id = depot["depot"]
                         depot_num += 1
                         _dp = int(5 + 80 * (depot_num - 1) / max(total_depots, 1))
@@ -1112,11 +1412,12 @@ class _BaseInstallScreen(QWidget):
                             staging_dir=staging,
                             depot_info=depot,
                             app_id=gcfg["app_id"],
-                            on_qr=lambda qr: self._s.iw5_qr_show.emit(qr),
+                            on_qr=_on_qr,
                             on_auth_success=lambda u: self._s.iw5_qr_hide.emit(),
-                            on_progress=lambda m, _p=_dp: self._s.progress.emit(self._ppct(_p), m),
-                            on_log=lambda m: self._s.log.emit(f"  {m}"),
+                            on_progress=lambda m, _p=_dp: _on_qr_progress(m, _p),
+                            on_log=_on_qr_log,
                             username=captured_user,
+                            cancel=lambda: self._dg_skip,
                         )
                         if result is None:
                             self._s.log.emit(f"✗  Depot {depot_id} download failed.")
@@ -1140,6 +1441,15 @@ class _BaseInstallScreen(QWidget):
                         continue
                     _merge(game_id, game_name, staging, install_dir)
 
+            except (_DowngradeSkipped, DownloadCancelled):
+                # Same state as a failed download: the partial download stays for a retry,
+                # nothing was merged, and the caller skips the client for these games
+                self._s.iw5_qr_hide.emit()
+                self._s.log.emit("✗  MW3 download skipped by user.")
+                for j in dg_jobs:
+                    if j[0] not in done_ids:
+                        failed_ids[j[0]] = _DG_SKIPPED
+                        self._dg_skipped_ids.add(j[0])
             except Exception as ex:
                 self._s.log.emit(f"✗  QR downgrade failed: {ex}")
                 for j in dg_jobs:
@@ -1161,6 +1471,10 @@ class _BaseInstallScreen(QWidget):
             # when Steam's is a different one, it needs the room too.
             steam_need = 0.0
             for game_id, game_name, install_dir, depots, cmds in dg_jobs:
+                if self._dg_skip:
+                    failed_ids[game_id] = _DG_SKIPPED
+                    self._dg_skipped_ids.add(game_id)
+                    continue
                 gcfg = GAME_CONFIGS[game_id]
                 try:
                     other_drive = os.stat(self.steam_root).st_dev != os.stat(install_dir).st_dev
@@ -1189,6 +1503,14 @@ class _BaseInstallScreen(QWidget):
                     self._s.iw5_dg_wait.emit(cmd, step)
                     self._iw5_dg_event.wait()
                     self._s.iw5_dg_go.emit()
+                    if self._dg_skip:
+                        break
+                if self._dg_skip:
+                    # Nothing is merged: the same state as a cancelled downgrade
+                    self._s.log.emit(f"✗  {game_name} download skipped by user.")
+                    failed_ids[game_id] = _DG_SKIPPED
+                    self._dg_skipped_ids.add(game_id)
+                    continue
 
                 # Steam saves each depot under the app it was requested from
                 # (MP, DS and DLC depots aren't under the base app)
@@ -1245,24 +1567,59 @@ class _BaseInstallScreen(QWidget):
     def _retryable(self):
         return [r for r in self._results if r["status"] in ("failed", "pending", "skipped")]
 
+    @staticmethod
+    def _what_to_do(r):
+        """One plain line telling the player what to do about a result row."""
+        status = r.get("status")
+        why = (r.get("reason") or "").lower()
+        if status == "ok":
+            return ""
+        if status not in ("failed", "skipped"):
+            return "Setup stopped before this game. Use Retry."
+        if "space" in why:
+            return "Free up space on that drive, then use Retry."
+        if "plutonium" in why:
+            if status == "skipped":
+                return "Use Retry when you are ready to log in to Plutonium."
+            return ("Use Retry, log in to Plutonium, let it finish downloading, and close its "
+                    "window before you confirm.")
+        if "mw3" in why or "downgrade" in why or "depot" in why:
+            if status == "skipped":
+                return "Use Retry when you have time for the MW3 download."
+            return "Use Retry and finish the MW3 download (QR scan or Steam Console)."
+        if "steam" in why and "running" in why:
+            return "Close Steam (Steam menu > Exit), then use Retry."
+        if status == "skipped":
+            return "Use Retry to set it up now, or later from Game Library > Add Games."
+        return "Use Retry. If it fails again, use Copy Log and ask for help on the Discord."
+
     def _render_summary(self):
-        icons = {"ok": ("✓", C_IW), "failed": ("✗", C_TREY),
-                 "skipped": ("–", C_DIM), "pending": ("–", C_DIM)}
-        counts = {status: sum(r["status"] == status for r in self._results)
+        counts = {status: sum(r.get("status") == status for r in self._results)
                   for status in ("ok", "failed", "skipped", "pending")}
         rows = [f'<b>{counts["ok"]} ready · {counts["failed"]} failed · '
                 f'{counts["skipped"]} skipped · {counts["pending"]} not attempted</b>']
         for r in self._results:
-            icon, col = icons.get(r["status"], icons["pending"])
-            label = html.escape(f"{r['name']} · {SetupScreen._mode_name(r['key'])}")
-            state = {"ok": "ready", "failed": "failed", "skipped": "skipped",
-                     "pending": "not attempted"}.get(r["status"], "not attempted")
-            txt = f'<span style="color:{col}">{icon}&nbsp;&nbsp;{label} — {state}</span>'
-            if r["reason"]:
-                txt += f'<span style="color:{C_DIM}"> · {html.escape(r["reason"][:120])}</span>'
+            status = r.get("status")
+            if status == "ok":
+                mark, col, state = _mark_html("ok"), C_IW, "ready"
+            elif status == "failed":
+                mark, col, state = _mark_html("fail"), C_TREY, "failed"
+            elif status == "skipped":
+                mark, col, state = f'<b style="color:{C_DIM}">SKIPPED</b>', C_DIM, "skipped"
+            else:
+                mark, col, state = f'<b style="color:{C_DIM}">NOT RUN</b>', C_DIM, "not attempted"
+            label = html.escape(f"{r.get('name', r['key'])} · {SetupScreen._mode_name(r['key'])}")
+            txt = f'{mark}&nbsp;&nbsp;<span style="color:{col}">{label} — {state}</span>'
+            if r.get("reason"):
+                txt += f'<span style="color:{C_DIM}"> · {html.escape(_plain_marks(r["reason"])[:160])}</span>'
+            todo = self._what_to_do(r)
+            if todo:
+                txt += (f'<br><span style="color:{C_TEXT}">&nbsp;&nbsp;&nbsp;&nbsp;'
+                        f'What to do: {html.escape(todo)}</span>')
             rows.append(txt)
         for note in getattr(self, "_notes", ()):
-            rows.append(f'<span style="color:{C_TREY}">⚠&nbsp;&nbsp;{html.escape(note[:160])}</span>')
+            rows.append(f'{_mark_html("warn")}&nbsp;&nbsp;'
+                        f'<span style="color:{C_TREY}">{html.escape(_plain_marks(note)[:160])}</span>')
         self.summary.setText("<br>".join(rows))
         self.summary.setVisible(True)
         self.summary_scroll.setVisible(True)
@@ -1286,9 +1643,12 @@ class _BaseInstallScreen(QWidget):
         at_bottom = sb.value() >= sb.maximum() - 4
         self.log.appendHtml(_log_html(text))
         if at_bottom: sb.setValue(sb.maximum())
-
-    def _confirm_plut(self):
-        self._plut_event.set()
+        # The newest line also shows under the current step while the log is collapsed
+        line = next((ln.strip() for ln in reversed(str(text).splitlines()) if ln.strip()), "")
+        if line:
+            self._last_log = _plain_marks(line)
+            if self._running:
+                self._render_steps()
 
     def _show_retry_dl_dialog(self, label, error_msg):
         self._retry_dl_choice = "skip"
@@ -1391,8 +1751,12 @@ class _BaseInstallScreen(QWidget):
         self._s.done.emit(complete)
 
     def _on_done(self, ok):
+        self._running = False
         self._stop_pulse()
         self._tick.stop()
+        # The results take the checklist's place, at full height
+        self.steps_scroll.setVisible(False)
+        self._hide_plut_wait(); self._hide_iw5_dg_wait()
         # A QR download that raised never hid its code, which also collapses the log
         self._hide_iw5_qr()
         inhibit.stop()
@@ -1401,6 +1765,7 @@ class _BaseInstallScreen(QWidget):
         self.offline_mode = None
         incomplete = self._retryable()
         complete = ok and bool(self._results) and not incomplete
+        self._last_complete = complete
         if self._results:
             self._render_summary()
         else:
@@ -1425,13 +1790,19 @@ class _BaseInstallScreen(QWidget):
             self.cur.setText(message)
             self.cur.setStyleSheet(f"color:{C_TREY};background:transparent;")
             self.retry_btn.setText(f"Retry Incomplete ({len(incomplete)})")
+            self.retry_btn.setAccessibleName(self.retry_btn.text())
             self.retry_btn.setVisible(bool(incomplete))
             if self._from_setup_selection:
                 try: self.cont_btn.clicked.disconnect()
                 except Exception: pass
-                self.cont_btn.setText("Back to Game Selection")
+                self.cont_btn.setText(LABELS["back_to_selection"])
+                self.cont_btn.setAccessibleName(LABELS["back_to_selection"])
                 self.cont_btn.clicked.connect(lambda: go_to(self.stack, "SetupScreen"))
+            if incomplete:
+                # Retry is the way forward after a failure; going back is secondary
+                self._set_primary(self.retry_btn, self.cont_btn)
         self.cont_btn.setVisible(True)
+        _focus_first([self.retry_btn, self.cont_btn])
         # Deferred to the end so Steam isn't killed mid-verify by the install
         if self._iw5_needs_verify:
             self._iw5_needs_verify = False
@@ -1450,16 +1821,24 @@ class _BaseInstallScreen(QWidget):
         self._reset_and_run()
 
     def _reset_and_run(self):
+        self._running = True
+        self._last_complete = False
+        self._plut_skip = False; self._dg_skip = False; self._dg_skipped_ids = set()
+        self._dg_token += 1
+        self._visited = set(); self._last_log = ""
+        self.bar.setRange(0, 100)
         self.bar.setValue(0); self.log.clear()
         self.log.setMaximumHeight(16777215)
+        self.log.setVisible(self._details_open)
+        self.steps.setText(""); self.steps_scroll.setVisible(True)
+        self.detail.setVisible(False)
         self.cur.setText("Preparing..."); self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
         self.stat.setText("")
-        self.plut_btn.setVisible(False)
-        self.plut_warn.setVisible(False)
-        self.iw5_dg_btn.setVisible(False)
-        self.manual_step.setVisible(False)
+        self._hide_plut_wait()
+        self._hide_iw5_dg_wait()
         self.iw5_qr_box.setVisible(False)
         self.summary_scroll.setVisible(False); self.retry_btn.setVisible(False)
+        self._set_primary(self.cont_btn, self.retry_btn)
         self._results = []
         self._plan = []; self._bands = {}
         self._phase_i = -1; self._phase_id = None
@@ -1487,12 +1866,13 @@ class _BaseInstallScreen(QWidget):
         self._from_setup_selection = self._selection_entry
         self._selection_entry = False
         if self._return_to_management:
-            self.cont_btn.setText("Back to My Games  >>")
+            self.cont_btn.setText(LABELS["back_to_library"])
             self.cont_btn.clicked.connect(self._go_management)
             self._return_to_management = False
         else:
-            self.cont_btn.setText("Continue  >>")
+            self.cont_btn.setText(LABELS["continue"])
             self.cont_btn.clicked.connect(lambda: go_to(self.stack, "SetupCompleteScreen"))
+        self.cont_btn.setAccessibleName(self.cont_btn.text())
         _log_to_file(f"── {self.screen_name} started ──")
         QTimer.singleShot(400, lambda: threading.Thread(target=self._run, daemon=True).start())
 
@@ -1510,7 +1890,7 @@ class _BaseInstallScreen(QWidget):
             # be a dead end, since Select Games greys out set-up games.
             self._fail_ok([r["key"] for r in self._results],
                           "setup stopped before Steam settings were applied (Steam still running)")
-            self._s.log.emit("Close Steam yourself (Steam menu → Exit), then run Set Up again. "
+            self._s.log.emit("Close Steam yourself (Steam menu > Exit), then run Set Up again. "
                              "Game files already downloaded are kept; Steam's settings were not changed.")
             self._s.progress.emit(100, "Install stopped: Steam is still running.")
             self._s.done.emit(False)
@@ -1907,6 +2287,8 @@ class _BaseInstallScreen(QWidget):
         # Clean up whenever the QR method ran -- also after a failure or an
         # error, when it used to be skipped (it only ran if a depot succeeded)
         self._dg_qr_started = None
+        self._dg_skipped_ids = set()
+        _dg_skipped_keys = set()
         if _dg_jobs:
             self._phase("depot")
             _dg_res = None
@@ -1927,11 +2309,16 @@ class _BaseInstallScreen(QWidget):
             if _dg_res is None:
                 _dg_res = {j[0]: "depot downgrade failed" for j in _dg_jobs}
             for _gid, _why in _dg_res.items():
-                _dg_fail(_dg_job_keys.get(_gid, ()), f"depot downgrade: {_why}")
+                if _gid in self._dg_skipped_ids:
+                    # Skip MW3: reported as skipped, never as ready (or as an error)
+                    _dg_skipped_keys.update(_dg_job_keys.get(_gid, ()))
+                    _dg_fail(_dg_job_keys.get(_gid, ()), "MW3 download skipped by user")
+                else:
+                    _dg_fail(_dg_job_keys.get(_gid, ()), f"depot downgrade: {_why}")
 
         # Their client is skipped below; Retry Failed offers them again
         for _k, _why in _dg_failed.items():
-            self._mark(_k, "failed", _why)
+            self._mark(_k, "skipped" if _k in _dg_skipped_keys else "failed", _why)
         if _dg_failed:
             self._s.log.emit("✗  Skipping the client install for "
                              + ", ".join(sorted(_dg_failed))
@@ -2051,6 +2438,11 @@ class _BaseInstallScreen(QWidget):
                     if is_lcd:
                         self._s.pulse_stop.emit()
 
+                    if self._plut_skip:
+                        self._s.log.emit("  Plutonium games skipped by user. Close the Plutonium "
+                                         "window if it is still open.")
+                        return _PLUT_SKIPPED
+
                     ready_check = is_plutonium_ready_lcd() if is_lcd else is_plutonium_ready()
                     if not ready_check:
                         self._s.log.emit(
@@ -2090,6 +2482,11 @@ class _BaseInstallScreen(QWidget):
                         if is_lcd:
                             self._s.pulse_stop.emit()
 
+                        if self._plut_skip:
+                            self._s.log.emit("  Plutonium games skipped by user. Close the "
+                                             "Plutonium window if it is still open.")
+                            return _PLUT_SKIPPED
+
                     self._s.log.emit("✓  Plutonium ready.")
                 return None
 
@@ -2099,11 +2496,16 @@ class _BaseInstallScreen(QWidget):
                 _plut_reason = f"Plutonium setup failed: {ex}"
             if _plut_reason:
                 plut_ok = False
-                self._s.log.emit(f"✗  {_plut_reason} -- skipping the Plutonium games, "
-                                 "continuing with the rest")
+                _plut_skipped = _plut_reason == _PLUT_SKIPPED
+                if _plut_skipped:
+                    self._s.log.emit("⚠  Skipping the Plutonium games, continuing with the rest")
+                else:
+                    self._s.log.emit(f"✗  {_plut_reason} -- skipping the Plutonium games, "
+                                     "continuing with the rest")
                 for _k, _gd, _g in self.selected:
-                    if KEY_CLIENT.get(_k) == "plutonium":
-                        self._mark(_k, "failed", _plut_reason)
+                    # Games whose downgrade already failed keep that reason
+                    if KEY_CLIENT.get(_k) == "plutonium" and _k not in _dg_failed:
+                        self._mark(_k, "skipped" if _plut_skipped else "failed", _plut_reason)
 
         # --- Kill Steam
         _kill_steam_once()

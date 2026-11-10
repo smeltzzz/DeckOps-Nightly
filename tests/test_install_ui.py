@@ -223,20 +223,25 @@ class InstallUITests(unittest.TestCase):
         self.assertFalse(self.setup._checks["t4mp"][0].isChecked())
         self.assertTrue(self.setup._lan_cb.isChecked())
 
-    def test_welcome_scan_shows_full_modes_and_safe_custom_folder_path(self):
-        welcome = ui_install.WelcomeScreen(self.stack)
-        self.stack.addWidget(welcome)
-        with patch.object(welcome, "_start_scan"):
-            self.stack.setCurrentWidget(welcome)
-        welcome._merged = {"t4mp": self.game("World at War - Multiplayer")}
-        welcome._on_scanned(True)
+    def test_first_run_scan_fills_selection_and_keeps_custom_folder_path(self):
+        # The old separate Welcome results screen is gone: Select Games scans inline.
+        self.setup._scanning = True
+        self.setup._merged = {"t4mp": self.game("World at War - Multiplayer")}
+        self.setup._on_scanned(True)
         _APP.processEvents()
-        self.assertIn("Call of Duty: World at War · Multiplayer · Steam", welcome.results.text())
-        self.assertLess(welcome.cont.mapTo(welcome, welcome.cont.rect().bottomRight()).y(), welcome.height())
-        welcome._merged = {}
-        welcome._on_scanned(True)
-        self.assertIn("Choose Folder", welcome.cont.text())
-        self.assertFalse(welcome.cont.isHidden())
+        self.assertTrue(self.setup._checks["t4mp"][0].isEnabled())
+        self.assertIn("Found 1 game (1 mode)", self.setup.intro.text())
+        self.assertTrue(self.setup.scan_box.isHidden())
+        self.assertLess(self.setup.inst_btn.mapTo(self.setup, self.setup.inst_btn.rect().bottomRight()).y(),
+                        self.setup.height())
+        self.setup._scanning = True
+        self.setup._merged = {}
+        self.setup._on_scanned(True)
+        self.assertIn("No supported games found", self.setup.scan_status.text())
+        self.assertIn("Choose Folder", self.setup.scan_status.text())
+        self.assertFalse(self.setup._folder_btn.isHidden())
+        self.assertTrue(self.setup._folder_btn.isEnabled())
+        self.assertFalse(self.setup.rescan_btn.isHidden())
 
     def screen(self, name):
         widget = QWidget()
@@ -245,28 +250,30 @@ class InstallUITests(unittest.TestCase):
         return widget
 
     def test_back_uses_entry_screen_without_looping(self):
-        welcome = self.screen("WelcomeScreen")
+        device_setup = self.screen("SetupFlowScreen")
         manage = self.screen("ManagementScreen")
         self.setup._go_back()
-        self.assertIs(self.stack.currentWidget(), welcome)
+        self.assertIs(self.stack.currentWidget(), device_setup)
         # ManagementScreen._add_games sets this flag before opening SetupScreen.
         self.setup._from_manage = True
         self.stack.setCurrentWidget(self.setup)
         self.setup.back.click()
         self.assertIs(self.stack.currentWidget(), manage)
-        self.stack.removeWidget(welcome)
-        # First-run entry from Welcome explicitly resets a prior management flag.
-        first_run = ui_install.WelcomeScreen(self.stack)
-        self.stack.addWidget(first_run)
-        with patch.object(first_run, "_start_scan"):
-            self.stack.setCurrentWidget(first_run)
-        first_run.steam_installed = {}
-        first_run.own_installed = {}
-        first_run._go_next()
+        # A first-run entry from device setup explicitly resets a prior management flag.
+        import ui_setup
+        with patch.object(ui_setup, "cfg", self.settings), \
+             patch.object(self.setup, "_start_scan") as scan:
+            ui_setup.SetupFlowScreen._finish(type("W", (), {"stack": self.stack})())
+        scan.assert_called_once()
         self.assertFalse(self.setup._from_manage)
         self.assertIs(self.stack.currentWidget(), self.setup)
         self.setup.back.click()
-        self.assertIs(self.stack.currentWidget(), first_run)
+        self.assertIs(self.stack.currentWidget(), device_setup)
+        # Not first run any more: Back from a non-management entry goes to the library
+        self.settings.completed.append("done")
+        self.stack.setCurrentWidget(self.setup)
+        self.setup.back.click()
+        self.assertIs(self.stack.currentWidget(), manage)
 
     def test_management_add_games_returns_to_selection_on_failure_and_manage_on_success(self):
         self.settings.completed.append("already complete")
@@ -309,12 +316,12 @@ class InstallUITests(unittest.TestCase):
             self.install._on_done(True)
         self.assertEqual(self.setup._choices, {})
         self.assertEqual(self.setup._extra_choices, {})
-        self.assertIn("My Games", self.install.cont_btn.text())
+        self.assertIn("Game Library", self.install.cont_btn.text())
         self.install.cont_btn.click()
         self.assertIs(self.stack.currentWidget(), manage)
 
     def test_first_run_install_returns_to_setup_on_failure_and_completion_on_success(self):
-        welcome = self.screen("WelcomeScreen")
+        device_setup = self.screen("SetupFlowScreen")
         complete = self.screen("SetupCompleteScreen")
         self.setup._from_manage = False
         self.setup.steam_installed = {"t4mp": self.game("World at War - Multiplayer")}
@@ -334,7 +341,7 @@ class InstallUITests(unittest.TestCase):
         self.install.cont_btn.click()
         self.assertIs(self.stack.currentWidget(), self.setup)
         self.setup.back.click()
-        self.assertIs(self.stack.currentWidget(), welcome)
+        self.assertIs(self.stack.currentWidget(), device_setup)
         self.stack.setCurrentWidget(self.setup)
         with patch.object(self.setup, "_preflight_ok", return_value=True), \
              patch.object(self.setup, "_review_install", return_value=True), \
@@ -358,7 +365,7 @@ class InstallUITests(unittest.TestCase):
         self.install._t0 = time.time()
         with patch.object(ui_install.inhibit, "stop"):
             self.install._on_done(False)
-        self.assertIn("My Games", self.install.cont_btn.text())
+        self.assertIn("Game Library", self.install.cont_btn.text())
         self.install.cont_btn.click()
         self.assertIs(self.stack.currentWidget(), manage)
 
@@ -506,14 +513,16 @@ class InstallUITests(unittest.TestCase):
         with patch("depot_downgrade.copy_to_clipboard", side_effect=OSError("no clipboard")):
             inst._show_iw5_dg_wait("download_depot 1 2 3", "Step 1")
         self.assertFalse(inst.iw5_dg_btn.isHidden())
-        self.assertIn("download_depot 1 2 3", inst.manual_step.text())
+        # The command now has its own selectable line (UI-7)
+        self.assertIn("download_depot 1 2 3", inst.dg_cmd.text())
+        self.assertFalse(inst.dg_cmd.isHidden())
 
     def test_iw5_wait_screen_shows_the_command_when_no_clipboard_helper_took_it(self):
         inst = self.install
         # copy_to_clipboard() returns False (no exception) without wl-copy/xclip
         with patch("depot_downgrade.copy_to_clipboard", return_value=False):
             inst._show_iw5_dg_wait("download_depot 1 2 3", "Step 1")
-        self.assertIn("download_depot 1 2 3", inst.manual_step.text())
+        self.assertIn("download_depot 1 2 3", inst.dg_cmd.text())
         self.assertNotIn("command copied", inst.manual_step.text())
 
     def test_iw5_wait_screen_says_copied_when_a_helper_took_it(self):

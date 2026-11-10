@@ -98,7 +98,9 @@ class IwSpStagingTests(_TmpCase):
         stale.mkdir(parents=True)
         (stale / "junk.bin").write_bytes(b"x" * 10)
         data = b"mod dll"
-        manifest = [["iw3sp_mod.dll", len(data), hashlib.sha1(data).hexdigest()]]
+        # The manifest must include the exe: install_iw3sp rejects one without it.
+        manifest = [["iw3sp_mod.dll", len(data), hashlib.sha1(data).hexdigest()],
+                    ["iw3sp_mod.exe", len(data), hashlib.sha1(data).hexdigest()]]
 
         def fake_download(url, dest, *a, **k):
             Path(dest).write_bytes(data)
