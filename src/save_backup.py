@@ -429,8 +429,14 @@ def _commit(staging: str, dst: str, group: str) -> bool:
     """Swap a finished backup in. The old one is only deleted after the new
     one is in place (it used to be deleted before the copy even started)."""
     old = os.path.join(BACKUP_ROOT, f".{group}.old")
-    shutil.rmtree(old, ignore_errors=True)
     try:
+        if os.path.isdir(old):
+            if not os.path.exists(dst):
+                # A crash between the two renames below left the last complete
+                # backup only in .old. Recover it before starting another swap.
+                os.replace(old, dst)
+            else:
+                shutil.rmtree(old, ignore_errors=True)
         if os.path.isdir(dst):
             os.replace(dst, old)
         try:

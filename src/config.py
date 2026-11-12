@@ -114,6 +114,8 @@ def load() -> dict:
                 st = os.stat(CONFIG_PATH)
             except FileNotFoundError:
                 _unreadable = None
+                _cache = None
+                _cache_key = None
                 return copy.deepcopy(DEFAULTS)
             except OSError as ex:
                 # There may be a real setup behind this (EIO, EACCES on the folder)
@@ -138,6 +140,8 @@ def load() -> dict:
                 try:
                     st2 = os.stat(CONFIG_PATH)
                 except OSError:
+                    _cache = None
+                    _cache_key = None
                     return copy.deepcopy(DEFAULTS)
                 if attempt == 0 and (st2.st_mtime_ns, st2.st_size) != current_key:
                     continue
@@ -145,10 +149,18 @@ def load() -> dict:
                 # aside so the next save() can't overwrite the user's setup.
                 bad = f"{CONFIG_PATH}.corrupt-{datetime.now():%Y%m%d-%H%M%S}"
                 try: os.replace(CONFIG_PATH, bad); _log.warning("deckops.json unreadable, moved to %s", bad)
-                except OSError as ex: _log.warning("deckops.json unreadable and could not be moved aside: %s", ex)
+                except OSError as ex:
+                    _log.warning("deckops.json unreadable and could not be moved aside: %s", ex)
+                    # The damaged setup is still at CONFIG_PATH. Do not let the next
+                    # setter replace it with defaults just because the move failed.
+                    _mark_unreadable(ex)
+                _cache = None
+                _cache_key = None
                 return copy.deepcopy(DEFAULTS)
             except FileNotFoundError:
                 _unreadable = None          # removed between the stat and the read
+                _cache = None
+                _cache_key = None
                 return copy.deepcopy(DEFAULTS)
             except OSError as ex:
                 # Unreadable is not missing: answering with the defaults is fine, but

@@ -157,7 +157,22 @@ def _ensure_qt6():
         log.warning("PyQt6 install skipped: %s", ex)
     finally:
         if z:
-            z.stdin.close(); z.terminate()
+            # Zenity may already have exited (auto-close, a closed session, or a
+            # failed pulse). Cleaning it up must not turn a successful component
+            # install into a startup crash via BrokenPipeError/ProcessLookupError.
+            try:
+                if z.stdin:
+                    z.stdin.close()
+            except OSError:
+                pass
+            try:
+                z.terminate()
+            except OSError:
+                pass
+            try:
+                z.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                pass
 
 
 _ensure_qt6()

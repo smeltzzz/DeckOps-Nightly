@@ -223,7 +223,12 @@ class SetupScreen(QWidget):
         self.inst_btn.setEnabled(False); self._folder_btn.setEnabled(False)
         self._game_scan_sigs = _Sigs()
         self._game_scan_sigs.done.connect(self._on_scanned)
-        threading.Thread(target=self._do_scan, daemon=True).start()
+        try:
+            threading.Thread(target=self._do_scan, daemon=True).start()
+        except Exception as ex:
+            _log_to_file(f"[SetupScreen] scan could not start: {ex}")
+            self._scan_error = True
+            self._game_scan_sigs.done.emit(bool(self.steam_root))
 
     def _do_scan(self):
         root, merged = "", {}
@@ -504,7 +509,12 @@ class SetupScreen(QWidget):
         self.warning.setVisible(True)
         self._scan_sigs = _Sigs()
         self._scan_sigs.done.connect(self._on_folder_scanned)
-        threading.Thread(target=self._do_folder_scan, daemon=True).start()
+        try:
+            threading.Thread(target=self._do_folder_scan, daemon=True).start()
+        except Exception as ex:
+            _log_to_file(f"[SetupScreen] folder scan could not start: {ex}")
+            self._scanned_own = None
+            self._scan_sigs.done.emit(False)
 
     def _do_folder_scan(self):
         from detect_games import find_own_installed
@@ -631,6 +641,13 @@ class SetupScreen(QWidget):
             self.warning.setText("Select at least one game to continue.")
             self.warning.setStyleSheet(f"color:{C_TREY};background:transparent;")
             self.warning.setVisible(True); return
+
+        busy = inhibit.busy()
+        if busy:
+            self.warning.setText(f"Wait for this to finish first: {str(busy).rstrip('.')}.")
+            self.warning.setStyleSheet(f"color:{C_TREY};background:transparent;")
+            self.warning.setVisible(True)
+            return
 
         if not self._preflight_ok(steam_selected, own_selected):
             return
@@ -960,7 +977,9 @@ class _BaseInstallScreen(QWidget):
     def _toggle_details(self):
         self._details_open = not self._details_open
         self.log.setVisible(self._details_open)
-        self.details_btn.setText("Hide details" if self._details_open else "Show details")
+        text = "Hide details" if self._details_open else "Show details"
+        self.details_btn.setText(text)
+        self.details_btn.setAccessibleName(text)
         if self._details_open:
             sb = self.log.verticalScrollBar(); sb.setValue(sb.maximum())
 
@@ -1266,20 +1285,34 @@ class _BaseInstallScreen(QWidget):
             self._iw5_trim_event.set()
 
     def _ask_iw5_verify(self):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("MW3 Single Player")
-        msg.setText(
-            "The MW3 campaign needs a quick file check.\n\n"
-            "An older DeckOps version replaced its exe with a 32-bit copy that won't "
-            "launch through Steam. Steam's Verify Integrity restores the original.\n\n"
-            "Multiplayer is not affected."
-        )
-        verify_btn = msg.addButton("Verify MW3 Now", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-        if msg.clickedButton() == verify_btn:
-            from wrapper import launch_steam
-            launch_steam("steam://validate/42680")
+        try:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("MW3 Single Player")
+            msg.setText(
+                "The MW3 campaign needs a quick file check.\n\n"
+                "An older DeckOps version replaced its exe with a 32-bit copy that won't "
+                "launch through Steam. Steam's Verify Integrity restores the original.\n\n"
+                "Multiplayer is not affected."
+            )
+            verify_btn = msg.addButton("Verify MW3 Now", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            verify = msg.clickedButton() == verify_btn
+        except Exception as ex:
+            _log_to_file(f"[InstallScreen] MW3 verify dialog failed: {ex}")
+            self._note("The MW3 verification prompt could not open. Verify MW3's files in Steam "
+                       "before playing the campaign.")
+            self._render_summary()
+            return
+        if verify:
+            try:
+                from wrapper import launch_steam
+                launch_steam("steam://validate/42680")
+            except Exception as ex:
+                _log_to_file(f"[InstallScreen] could not open Steam verification: {ex}")
+                self._note("Steam verification could not open. Verify MW3's files in Steam "
+                           "before playing the campaign.")
+                self._render_summary()
 
     def _maybe_trim_iw5(self, game_id, install_dir):
         # MP-only MW3: offer to drop the root files duplicated in downgrade/
@@ -1821,6 +1854,8 @@ class _BaseInstallScreen(QWidget):
         self._reset_and_run()
 
     def _reset_and_run(self):
+        if getattr(self, "_running", False):
+            return
         self._running = True
         self._last_complete = False
         self._plut_skip = False; self._dg_skip = False; self._dg_skipped_ids = set()
@@ -1874,7 +1909,17 @@ class _BaseInstallScreen(QWidget):
             self.cont_btn.clicked.connect(lambda: go_to(self.stack, "SetupCompleteScreen"))
         self.cont_btn.setAccessibleName(self.cont_btn.text())
         _log_to_file(f"── {self.screen_name} started ──")
-        QTimer.singleShot(400, lambda: threading.Thread(target=self._run, daemon=True).start())
+        QTimer.singleShot(400, self._start_run_thread)
+
+    def _start_run_thread(self):
+        try:
+            threading.Thread(target=self._run, daemon=True).start()
+        except Exception as ex:
+            _log_to_file(f"[{self.screen_name}] worker could not start: {ex}")
+            self._fail_ok([r["key"] for r in self._results], "setup stopped before it finished; see the log")
+            self._s.log.emit(f"✗  Could not start setup: {ex}")
+            self._s.progress.emit(100, "Setup could not start.")
+            self._s.done.emit(False)
 
     def _run(self):
         import traceback as _tb

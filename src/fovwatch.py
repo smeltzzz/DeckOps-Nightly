@@ -328,8 +328,13 @@ def _child_env():
     env = dict(os.environ)
     for name in ("LD_PRELOAD", "LD_LIBRARY_PATH"):
         saved = env.pop("DECKOPS_" + name, None)
-        if saved:
-            env[name] = saved
+        if saved is not None:
+            # An empty saved value means Steam had none. Do not leak a helper
+            # runtime's ambient LD_LIBRARY_PATH into the game in that case.
+            if saved:
+                env[name] = saved
+            else:
+                env.pop(name, None)
     return env
 
 
