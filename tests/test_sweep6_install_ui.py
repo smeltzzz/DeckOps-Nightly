@@ -274,6 +274,8 @@ class InstallScreenUXTests(_Base):
 
     # UX-L3c/f/g
     def test_results_take_full_height_and_retry_is_primary(self):
+        # Enter as selection does, before showEvent starts the one allowed run.
+        self.screen._selection_entry = True
         self.stack.setCurrentWidget(self.screen)
         self.stack.show()
         self._finish_failed()

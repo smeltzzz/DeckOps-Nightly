@@ -440,7 +440,11 @@ class ManagementCard(QFrame):
             else:
                 self._img_sigs = _Sigs()
                 self._img_sigs.log.connect(self._on_image_fetched)
-                threading.Thread(target=self._fetch, args=(self._appid,), daemon=True).start()
+                try:
+                    threading.Thread(target=self._fetch, args=(self._appid,), daemon=True).start()
+                except Exception:
+                    # Cover art is optional; keep the placeholder and the game actions.
+                    _log.debug("cover download could not start", exc_info=True)
         self._scale_image()
         self.fit_width(_LIBRARY_CARD_W)
 
@@ -620,6 +624,7 @@ class ManagementScreen(QWidget):
                 "A DeckOps update is available. Open Settings to review and install it.")
             self._deckops_update_status.setVisible(True)
             self._deckops_update_btn.setText("Update Available")
+            self._deckops_update_btn.setAccessibleName("Update Available")
             self._deckops_update_btn.setVisible(True)
 
     def _scan_again(self):
@@ -635,7 +640,12 @@ class ManagementScreen(QWidget):
         if not self.installed: self._status.setText("Loading games...")
         self._scan_sigs = _Sigs()
         self._scan_sigs.done.connect(self._on_scanned)
-        threading.Thread(target=self._do_scan, daemon=True).start()
+        try:
+            threading.Thread(target=self._do_scan, daemon=True).start()
+        except Exception:
+            _log.warning("game scan could not start", exc_info=True)
+            self._scanned = None
+            self._scan_sigs.done.emit(False)
 
     def _do_scan(self):
         try:
@@ -659,6 +669,9 @@ class ManagementScreen(QWidget):
             if (cfg.get_setup_games() and not getattr(self, "_deadzone_running", False)
                     and not inhibit.busy() and not self._settings_task_running()):
                 self._deadzone_running = True
+                # This writes game configs. Hold the same busy flag as other
+                # writers so a task started just after the scan cannot race it.
+                inhibit.start("DeckOps is applying controller deadzones")
                 installed = dict(self.installed)
                 def _defaults():
                     try:
@@ -671,7 +684,13 @@ class ManagementScreen(QWidget):
                         _log.warning("could not update existing deadzones", exc_info=True)
                     finally:
                         self._deadzone_running = False
-                threading.Thread(target=_defaults, daemon=True).start()
+                        inhibit.stop()
+                try:
+                    threading.Thread(target=_defaults, daemon=True).start()
+                except Exception:
+                    _log.warning("deadzone pass could not start", exc_info=True)
+                    self._deadzone_running = False
+                    inhibit.stop()
         else:
             # This message is shown on the Library itself: offer the retry here.
             self._status.setText("Couldn't scan for games. Check that Steam is installed, then try again.")
@@ -768,6 +787,7 @@ class ManagementScreen(QWidget):
 
     def _clear_update_notice(self):
         self._deckops_update_btn.setText("DeckOps Update")
+        self._deckops_update_btn.setAccessibleName("DeckOps Update")
         self._deckops_update_btn.setVisible(False)
         self._deckops_update_status.setText("")
         self._deckops_update_status.setVisible(False)
@@ -840,7 +860,11 @@ class ManagementScreen(QWidget):
                 if on else
                 "Remove Offline Mode? It removes the offline launcher, the Offline launch menu entries "
                 "and the bot match files. Steam closes while it is removed.")
-        if QMessageBox.question(self, "Offline Mode", text) != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(
+                self, "Offline Mode", text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes if on else QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
             return
         def task(sigs):
             from wrapper import kill_steam
@@ -1541,12 +1565,16 @@ class SetupCompleteScreen(QWidget):
         """Run save restore in a background thread."""
         if getattr(self, "_restoring", False):
             return
+        busy = inhibit.busy()
+        if busy:
+            self._restore_status.setText(f"Wait for this to finish first: {str(busy).rstrip('.')}.")
+            self._restore_status.setVisible(True)
+            return
         self._restoring = True
         # Copying saves back must not be cut off by a suspend or by leaving for
         # the Library (which could start an install over the same prefixes)
-        self._restore_took_lock = not inhibit.busy()
-        if self._restore_took_lock:
-            inhibit.start("DeckOps is restoring saves")
+        self._restore_took_lock = True
+        inhibit.start("DeckOps is restoring saves")
         self._continue_btn.setEnabled(False)
         self._restore_btn.setEnabled(False)
         self._restore_skip.setEnabled(False)
@@ -1603,9 +1631,8 @@ class SetupCompleteScreen(QWidget):
             self._restore_skip.setEnabled(True)
             return
         self._mark_offer_handled()
-        self._restore_btn.setVisible(False)
-        self._restore_skip.setVisible(False)
-        self._restore_body.setVisible(False)
+        for w in self._restore_widgets:
+            w.setVisible(False)
 
     def _skip_restore(self):
         """Hide the restore section without restoring."""
@@ -1976,7 +2003,9 @@ class ConfigureScreen(QWidget):
 
     def _sync_music_toggle(self):
         self._music_on = _saved_music_enabled()
-        self._music_toggle.setText("Music: ON" if self._music_on else "Music: OFF")
+        text = "Music: ON" if self._music_on else "Music: OFF"
+        self._music_toggle.setText(text)
+        self._music_toggle.setAccessibleName(text)
         self._music_toggle.setStyleSheet(
             _button_style(C_IW if self._music_on else C_DARK_BTN))
 
@@ -2048,6 +2077,10 @@ class ConfigureScreen(QWidget):
         if getattr(self, "_settings_running", False):
             self.status.setText("Please wait for the current task to finish.")
             return False
+        busy = inhibit.busy()
+        if busy:
+            self.status.setText(f"Wait for this to finish first: {str(busy).rstrip('.')}.")
+            return False
         self._settings_running = True
         # The caller's signal object was only referenced by the worker's closure, so
         # it was freed on the worker thread right after its last emit: Qt then drops
@@ -2079,6 +2112,15 @@ class ConfigureScreen(QWidget):
                 pass        # screen closed while the task ran
         s.done.connect(_release)
         return True
+
+    def _start_task_thread(self, s, target):
+        """Start a reserved Settings worker; a spawn failure must release the slot."""
+        try:
+            threading.Thread(target=target, daemon=True).start()
+        except Exception as ex:
+            _log.error("settings task could not start", exc_info=True)
+            s.log.emit(f"✗  Could not start task: {ex}")
+            s.done.emit(False)
 
     def _apply_controller_profiles(self):
         st = self._use_status("maintenance")
@@ -2120,7 +2162,7 @@ class ConfigureScreen(QWidget):
             except Exception as ex:
                 reason.append(f"Failed: {ex}")
                 s.done.emit(False)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_task_thread(s, _run)
 
     def _repair_shortcuts(self):
         self._use_status("maintenance")
@@ -2178,8 +2220,14 @@ class ConfigureScreen(QWidget):
         s = _Sigs()
         if not self._settings_task(s):
             return
+        try:
+            cfg.set_player_name(name)
+        except Exception as ex:
+            _log.warning("could not save player name", exc_info=True)
+            st.setText(f"✗  Could not save player name: {ex}")
+            s.done.emit(False)
+            return
         self._name_input.setText(name)
-        cfg.set_player_name(name)
         st.setText(f"Updating player name to \"{name}\"...")
         s.log.connect(lambda msg: st.setText(msg))
         def _run():
@@ -2198,10 +2246,12 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✗  Failed: {ex}")
             finally:
                 s.done.emit(True)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_task_thread(s, _run)
 
     def _refresh_cap_btn(self):
-        self._cap_btn.setText("MW2/MW3 FPS Limit: " + ("On" if cfg.get_dxvk_frame_cap() else "Off"))
+        text = "MW2/MW3 FPS Limit: " + ("On" if cfg.get_dxvk_frame_cap() else "Off")
+        self._cap_btn.setText(text)
+        self._cap_btn.setAccessibleName(text)
 
     def _toggle_dxvk_cap(self):
         """Apply the cap with shortcut repair, restoring the old value on failure."""
@@ -2276,7 +2326,7 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✗  Failed: {ex}")
             finally:
                 s.done.emit(True)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_task_thread(s, _run)
 
     def _apply_fps_fov(self):
         st = self._use_status("tweaks")
@@ -2307,7 +2357,7 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✗  Failed: {ex}")
             finally:
                 s.done.emit(True)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_task_thread(s, _run)
 
     def _backup_saves_now(self):
         st = self._use_status("maintenance")
@@ -2328,7 +2378,7 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✗  Save backup failed: {ex}")
             finally:
                 s.done.emit(True)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_task_thread(s, _run)
 
     def _clear_shader_cache(self):
         st = self._use_status("maintenance")
@@ -2358,7 +2408,7 @@ class ConfigureScreen(QWidget):
                 s.log.emit(f"✗  Failed: {ex}")
             finally:
                 s.done.emit(True)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_task_thread(s, _run)
 
     def _check_setup(self):
         """Run setup_check in the background, then show the report."""
@@ -2399,7 +2449,7 @@ class ConfigureScreen(QWidget):
             if self._setup_results:
                 self._show_setup_report(*self._setup_results)
         s.log.connect(_show)
-        threading.Thread(target=_run, daemon=True).start()
+        self._start_task_thread(s, _run)
 
     def _show_setup_report(self, results, installed):
         self._setup_installed = installed
@@ -2561,33 +2611,47 @@ class ConfigureScreen(QWidget):
 
     def _check_for_updates(self):
         """Hit GitHub API to compare local SHA against remote HEAD."""
+        if getattr(self, "_checking_update", False):
+            return
+        self._checking_update = True
         self._init_update_signals()
         self._update_btn.setEnabled(False)
         self._update_status.setText("Checking...")
         self._update_status.setStyleSheet(f"color:{C_DIM};")
-        threading.Thread(target=self._update_worker, daemon=True).start()
+        try:
+            threading.Thread(target=self._update_worker, daemon=True).start()
+        except Exception as ex:
+            _log.warning("update check could not start", exc_info=True)
+            self._on_update_signal(f"FAIL|Update check failed: {ex}")
 
     def _update_worker(self):
         self._update_sig.log.emit(_check_update_status())
 
     def _on_update_signal(self, msg):
         """Slot that runs on the main thread via pyqtSignal."""
+        self._checking_update = False
         kind, text = msg.split("|", 1)
         self._update_result(text, kind == "UPDATE")
 
     def _update_result(self, msg, update_available):
         self._update_btn.setEnabled(True)
         self._update_status.setText(msg)
+        try:
+            self._update_btn.clicked.disconnect()
+        except TypeError:
+            pass
         if update_available:
             self._update_status.setStyleSheet(f"color:{C_IW};")
             self._update_btn.setText("Update && Restart")
-            try:
-                self._update_btn.clicked.disconnect()
-            except TypeError:
-                pass
+            self._update_btn.setAccessibleName("Update & Restart")
             self._update_btn.clicked.connect(self._apply_update)
         else:
+            # A failed/offline re-check must not leave the button applying an
+            # update that an earlier check advertised but this one could not verify.
             self._update_status.setStyleSheet(f"color:{C_DIM};")
+            self._update_btn.setText("Check for Updates")
+            self._update_btn.setAccessibleName("Check for Updates")
+            self._update_btn.clicked.connect(self._check_for_updates)
 
     def _apply_update(self):
         # A second click (or the Library's prompt) while one runs would replace the
@@ -2625,6 +2689,7 @@ class ConfigureScreen(QWidget):
 
         self._update_btn.setEnabled(False)
         self._update_btn.setText("Updating...")
+        self._update_btn.setAccessibleName("Updating")
         self._update_status.setText("Downloading update...")
         self._update_status.setStyleSheet(f"color:{C_DIM};")
 
@@ -2762,6 +2827,7 @@ class ConfigureScreen(QWidget):
             self._end_update()
             self._update_btn.setEnabled(True)
             self._update_btn.setText("Check for Updates")
+            self._update_btn.setAccessibleName("Check for Updates")
             try:
                 self._update_btn.clicked.disconnect()
             except TypeError:
@@ -2794,6 +2860,7 @@ class ConfigureScreen(QWidget):
                 pd.close()
             self._end_update()
             self._update_btn.setText("Restart needed")     # stays disabled: nothing left to apply
+            self._update_btn.setAccessibleName("Restart needed")
             self._update_status.setText(
                 f"Update installed, but DeckOps could not restart itself ({ex}). "
                 "Close DeckOps and open it again.")
@@ -2821,7 +2888,12 @@ class ConfigureScreen(QWidget):
 
     def _reset_deckops(self):
         st = self._use_status("danger")
-        cfg.reset()
+        try:
+            cfg.reset()
+        except Exception as ex:
+            _log.error("config reset failed", exc_info=True)
+            st.setText(f"✗  Could not reset config: {ex}")
+            return
         # The screens keep what the old setup chose and found; setup starts clean
         for name in ("SetupScreen",):
             screen = get_screen(self.stack, name)
@@ -3051,6 +3123,8 @@ class UpdateScreen(QWidget):
             self._start_update()
 
     def _start_update(self):
+        if getattr(self, "_running", False):
+            return
         self.bar.setValue(0); self.bar.setFormat("%p% progress"); self.log.clear()
         self.cur.setText("Preparing...")
         self.cur.setStyleSheet(f"color:{C_TEXT};background:transparent;")
@@ -3075,7 +3149,16 @@ class UpdateScreen(QWidget):
         _log_to_file("── Update started ──")
         self._running = True
         self._land_focus()
-        QTimer.singleShot(400, lambda: threading.Thread(target=self._run, daemon=True).start())
+        QTimer.singleShot(400, self._start_run_thread)
+
+    def _start_run_thread(self):
+        try:
+            threading.Thread(target=self._run, daemon=True).start()
+        except Exception as ex:
+            _log.error("update worker could not start", exc_info=True)
+            self._failed_games = list(self.selected)
+            self._s.log.emit(f"✗  Could not start update: {ex}")
+            self._s.done.emit(False)
 
     def _on_done(self, ok):
         self._running = False
