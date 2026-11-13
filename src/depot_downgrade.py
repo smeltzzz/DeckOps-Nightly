@@ -18,6 +18,7 @@ import shutil
 import stat
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
@@ -164,7 +165,7 @@ def _receipt_path(game_id: str, install_dir: str) -> str:
     return os.path.join(_merge_dir(game_id, install_dir), RECEIPT_NAME)
 
 
-def _write_receipt(game_id: str, install_dir: str, merged: dict):
+def _write_receipt(game_id: str, install_dir: str, merged: dict, incomplete: bool = False):
     from datetime import datetime
     path = _receipt_path(game_id, install_dir)
     data = {}
@@ -178,6 +179,7 @@ def _write_receipt(game_id: str, install_dir: str, merged: dict):
             or not isinstance(data.get("files"), dict)):
         data = {"game_id": game_id, "files": {}}
     data["files"].update(merged)
+    data["incomplete"] = incomplete
     data["manifests"] = {str(d["depot"]): d["manifest"] for d in GAME_CONFIGS[game_id]["depots"]}
     data["updated_at"] = datetime.now().isoformat()
     try:
@@ -212,6 +214,8 @@ def _receipt_status(game_id: str, install_dir: str):
     if (not isinstance(data, dict) or data.get("game_id") != game_id
             or not isinstance(data.get("files"), dict) or not data["files"]):
         return None
+    if data.get("incomplete"):
+        return False
     files = {rf: sz for rf, sz in data["files"].items() if not rf.lower().endswith(_UNCHECKED_EXTS)}
     if not files:
         files = data["files"]
@@ -1177,12 +1181,54 @@ def _merge_tree(src: str, dst: str, prog):
             except OSError:
                 _log.warning("could not return %s to the staging folder", pending)
         raise
-    staged = [(pending, dst_file) for pending, dst_file, _src in staged]
-
-    for i, (pending, dst_file) in enumerate(staged, 1):
-        os.replace(pending, dst_file)
-        if i % 25 == 0 or i == total:
-            prog(f"Moving files into place... {i}/{total}")
+    # Back up originals before the first replacement. Hard links on the game
+    # filesystem cost no extra space; copying is the fallback for exFAT. On a
+    # failed commit put both the old game files and the new depot staging back.
+    backup_dir = tempfile.mkdtemp(prefix=".deckops_merge_", dir=dst)
+    committed = []
+    backed_up = {}
+    keep_backups = False
+    try:
+        for i, (pending, dst_file, src_file) in enumerate(staged, 1):
+            if os.path.lexists(dst_file):
+                if not os.path.isfile(dst_file) or os.path.islink(dst_file):
+                    raise ValueError(f"not a regular game file: {dst_file}")
+                backup = os.path.join(backup_dir, str(i))
+                try:
+                    os.link(dst_file, backup)
+                except OSError:
+                    shutil.copy2(dst_file, backup)
+                backed_up[dst_file] = backup
+        for i, (pending, dst_file, src_file) in enumerate(staged, 1):
+            os.replace(pending, dst_file)
+            committed.append((dst_file, src_file))
+            if i % 25 == 0 or i == total:
+                prog(f"Moving files into place... {i}/{total}")
+    except BaseException:
+        restore_failed = False
+        for dst_file, src_file in reversed(committed):
+            try:
+                shutil.move(dst_file, src_file)
+            except OSError:
+                restore_failed = True
+            try:
+                if dst_file in backed_up:
+                    os.replace(backed_up[dst_file], dst_file)
+            except OSError:
+                restore_failed = True
+        for pending, _dst_file, src_file in staged[len(committed):]:
+            if os.path.lexists(pending):
+                try:
+                    shutil.move(pending, src_file)
+                except OSError:
+                    restore_failed = True
+        if restore_failed:
+            keep_backups = True
+            _log.error("depot rollback incomplete; originals kept at %s", backup_dir)
+        raise
+    finally:
+        if not keep_backups:
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
     merged = {}
     for rf in rel_files:
@@ -1245,7 +1291,7 @@ def merge_depots(game_id: str, staging_dir, install_dir: str,
         for path in ([path for _id, path in subdirs] if subdirs else [sdir]):
             expected.update(_tree_sizes(path))
     if expected:
-        _write_receipt(game_id, install_dir, expected)
+        _write_receipt(game_id, install_dir, expected, incomplete=True)
 
     merged = {}
     for sdir in staging_dirs:

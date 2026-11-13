@@ -380,7 +380,7 @@ def add_launch_entries(steam_root: str, appid: int, entries: list, record: bool 
         return changed
 
     ok = _edit_launch(steam_root, appid, edit)
-    if record:
+    if record and ok:
         _record(appid, entries=entries)
     return ok
 
@@ -395,7 +395,8 @@ def remove_launch_entries(steam_root: str, appid: int, executables: list) -> boo
         return len(launch) != before
 
     ok = _edit_launch(steam_root, appid, edit)
-    _record(appid, remove=executables)
+    if ok:
+        _record(appid, remove=executables)
     return ok
 
 

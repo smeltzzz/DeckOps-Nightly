@@ -12,7 +12,8 @@ import subprocess
 
 from qt import (
     QApplication, QLabel, QPushButton, QFrame, QHBoxLayout, QMessageBox, QWidget,
-    QAbstractButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QAbstractButton, QLineEdit, QPlainTextEdit, QTextEdit, QSlider,
+    QScrollArea, QSizePolicy, QStackedWidget,
 )
 from qt import Qt, pyqtSignal, QObject, QUrl, QT6, QTimer, QEvent
 from qt import QFont, QFontDatabase, QKeyEvent
@@ -979,11 +980,21 @@ def _ensure_focus_in(screen):
     QTimer.singleShot(0, go)
 
 
-def _consumes_arrows(widget) -> bool:
-    """Widgets that keep their own arrow keys (text cursor, slider, spin box,
-    list/combo, scrolling a text-only area). Buttons and checkboxes do not."""
+def _consumes_arrows(widget, key) -> bool:
+    """Keep editing/scrolling keys, but leave a D-pad exit from focused inputs.
+
+    A controller has no Tab key: a name field, horizontal volume slider or
+    read-only log otherwise traps focus until the player backs out of the page.
+    """
     if isinstance(widget, QAbstractButton):
         return False
+    if isinstance(widget, QLineEdit):
+        return key in (Qt.Key.Key_Left, Qt.Key.Key_Right)
+    if isinstance(widget, QSlider):
+        horizontal = widget.orientation() == Qt.Orientation.Horizontal
+        return key in (Qt.Key.Key_Left, Qt.Key.Key_Right) if horizontal else key in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+    if isinstance(widget, (QPlainTextEdit, QTextEdit)) and widget.isReadOnly():
+        return key in (Qt.Key.Key_Up, Qt.Key.Key_Down)
     if isinstance(widget, QScrollArea):
         # A plain scroll area with nothing focusable inside scrolls; one holding
         # buttons is a container the D-pad should move through.
@@ -1069,7 +1080,7 @@ class _ControllerNav(QObject):
             return False
 
         # Arrow keys
-        if _consumes_arrows(fw):
+        if _consumes_arrows(fw, key):
             return False
         self._move(fw, key in _NEXT_KEYS)
         return True

@@ -22,6 +22,7 @@ Progress is reported via a callback:
     on_progress(percent: int, status: str)
 """
 
+import contextlib
 import os
 import stat
 import shutil
@@ -1284,24 +1285,32 @@ _LAN_DISK_WARN = 100 * 1024 * 1024
 def _lan_link(src: str, dst: str):
     """dst becomes a hard link to src's real file, a copy if they're on different drives."""
     src = os.path.realpath(src)
-    if os.path.lexists(dst):
-        if not os.path.islink(dst):
-            if os.path.samefile(src, dst):
+    if os.path.lexists(dst) and not os.path.islink(dst):
+        if os.path.samefile(src, dst):
+            return
+        # A copy from an earlier build (other drive): copy2 keeps the mtime, so a
+        # file of the same size and time is current. Recopying all of Plutonium on
+        # every offline launch could run past lan_server.sh's 60 s budget.
+        try:
+            a, b = os.stat(src), os.stat(dst)
+            if a.st_size == b.st_size and a.st_mtime_ns == b.st_mtime_ns:
                 return
-            # A copy from an earlier build (other drive): copy2 keeps the mtime, so a
-            # file of the same size and time is current. Recopying all of Plutonium on
-            # every offline launch could run past lan_server.sh's 60 s budget.
-            try:
-                a, b = os.stat(src), os.stat(dst)
-                if a.st_size == b.st_size and a.st_mtime_ns == b.st_mtime_ns:
-                    return
-            except OSError:
-                pass
-        os.remove(dst)
+        except OSError:
+            pass
+    # Never remove the working offline file before a potentially failing copy.
+    # The temp name is private to this refresh (two launchers may overlap).
+    fd, pending = tempfile.mkstemp(dir=os.path.dirname(dst), prefix=".deckops-lan-")
+    os.close(fd)
     try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+        os.unlink(pending)
+        try:
+            os.link(src, pending)
+        except OSError:
+            shutil.copy2(src, pending)
+        os.replace(pending, dst)
+    finally:
+        if os.path.lexists(pending):
+            os.unlink(pending)
 
 
 def _lan_mirror(src: str, dst: str, rel: str, keep, made=None):
@@ -1438,25 +1447,45 @@ def lan_dirs(mode: str):
     return os.path.join(LAN_ROOT, mode, "server"), os.path.join(LAN_ROOT, mode, "client")
 
 
+@contextlib.contextmanager
+def _lan_refresh_lock(mode: str):
+    """One writer per mode: simultaneous game launches share the same offline trees."""
+    os.makedirs(os.path.join(LAN_ROOT, mode), exist_ok=True)
+    with open(os.path.join(LAN_ROOT, mode, ".refresh.lock"), "a+") as lock:
+        try:
+            import fcntl
+        except ImportError:  # Windows developer tests do not have flock
+            yield
+        else:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def refresh_lan(mode: str, prog=lambda m: None):
     """Rebuild the server and game copies from the online folder saved at install.
     Run at every offline launch (prelaunch.py lan <mode>) so mods added or Plutonium
     files updated since the install show up offline too."""
-    with open(os.path.join(LAN_ROOT, mode, "source.json")) as f:
-        user_plut = json.load(f)["user_plut"]
-    store = _STORAGE_SUBDIRS[mode]
-    server, client = lan_dirs(mode)
-    master = get_dedicated_plut_dir()
-    # Real files from older builds stay in the copies: drop the ones we stopped shipping
-    for rel in _LAN_STALE.get(mode, ()):
-        if os.path.isfile(os.path.join(server, rel)):
-            os.remove(os.path.join(server, rel))
-    if mode in LAN_KEYS:
-        dl = {rel: None for rel, _, _ in LAN_DOWNLOADS.get(mode, ())}
-        _lan_tree(server, user_plut, master, store, {**dl, **_lan_assets(mode, "server")}, False)
-    _lan_tree(client, user_plut, master, store, _lan_assets(mode, "client"), True)
-    _lan_disk_check(prog)
-    prog(f"  ✓ Offline server folders ready ({mode})")
+    with _lan_refresh_lock(mode):
+        with open(os.path.join(LAN_ROOT, mode, "source.json")) as f:
+            user_plut = json.load(f)["user_plut"]
+        if not isinstance(user_plut, str) or not os.path.isdir(user_plut):
+            raise FileNotFoundError(f"offline Plutonium source is missing: {user_plut!r}")
+        store = _STORAGE_SUBDIRS[mode]
+        server, client = lan_dirs(mode)
+        master = get_dedicated_plut_dir()
+        # Real files from older builds stay in the copies: drop the ones we stopped shipping
+        for rel in _LAN_STALE.get(mode, ()):
+            if os.path.isfile(os.path.join(server, rel)):
+                os.remove(os.path.join(server, rel))
+        if mode in LAN_KEYS:
+            dl = {rel: None for rel, _, _ in LAN_DOWNLOADS.get(mode, ())}
+            _lan_tree(server, user_plut, master, store, {**dl, **_lan_assets(mode, "server")}, False)
+        _lan_tree(client, user_plut, master, store, _lan_assets(mode, "client"), True)
+        _lan_disk_check(prog)
+        prog(f"  ✓ Offline server folders ready ({mode})")
 
 
 def setup_lan(game: dict, game_key: str, user_plut: str, source: str, prog):
@@ -1474,6 +1503,9 @@ def setup_lan(game: dict, game_key: str, user_plut: str, source: str, prog):
     if game_key not in OLED_LAN_WRAPPER_NAMES or not _cfg.get_offline_mode():
         return None
     mode = _plut_key(game_key)
+    source_json = os.path.join(LAN_ROOT, mode, "source.json")
+    previous_source = None
+    source_changed = False
     try:
         _lan_prefixes(prog)
         # Offline BO2 stats and settings landed online through the old shared players/ (2026-10-08)
@@ -1482,11 +1514,14 @@ def setup_lan(game: dict, game_key: str, user_plut: str, source: str, prog):
             shutil.rmtree(leak)
         os.makedirs(os.path.join(LAN_ROOT, mode), exist_ok=True)
         from steam_common import write_json
-        source_json = os.path.join(LAN_ROOT, mode, "source.json")
         # MW3 DS shares MW3 MP's folders: MP's online folder is the one they are built
-        # from (its mods and maps), so DS never takes the file over from MP
+        # from (its mods and maps), so DS never takes the file over from MP.
         if game_key == mode or not os.path.isfile(source_json):
+            if os.path.isfile(source_json):
+                with open(source_json, "rb") as f:
+                    previous_source = f.read()
             write_json(source_json, {"user_plut": user_plut})
+            source_changed = True
         # Folders first, so every download lands in a real folder of ours
         refresh_lan(mode, prog)
         server, _ = lan_dirs(mode)
@@ -1506,6 +1541,16 @@ def setup_lan(game: dict, game_key: str, user_plut: str, source: str, prog):
                 if n == "deckops_lan.cfg" or not os.path.exists(os.path.join(dst_dir, n)):
                     shutil.copyfile(os.path.join(admin, n), os.path.join(dst_dir, n))
     except Exception as ex:
+        # Do not leave a failed game install pointing future prelaunch refreshes
+        # at a different (possibly incomplete) online source.
+        if source_changed:
+            try:
+                if previous_source is None:
+                    os.remove(source_json)
+                else:
+                    write_script(source_json, previous_source, mode=0o644)
+            except OSError:
+                _log.error("could not restore offline source %s", source_json, exc_info=True)
         _log.warning("offline setup failed for %s", game_key, exc_info=True)
         prog(f"  ⚠ Offline setup failed: {ex or type(ex).__name__} -- Offline Mode is off "
              f"for this game; run Set Up again to retry")

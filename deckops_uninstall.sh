@@ -59,8 +59,8 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# Set by any step that could not remove or restore something; the final
-# message then says the uninstall finished with warnings instead of fully.
+# Set by any step that could not remove or restore something. Keep the
+# installation and its cleanup ledger for a retry if any step fails.
 FAILED=0
 # Set when the player chose to keep the IW4x DLC maps (the summary then says so)
 IW4X_DLC_KEPT=""
@@ -777,6 +777,10 @@ if [ -n "$STEAM_ROOT" ]; then
     done
 fi
 echo ""
+if [ "$FAILED" -ne 0 ]; then
+    warn "Could not restore every game executable. DeckOps and its settings were kept so you can retry after fixing the errors above."
+    exit 2
+fi
 
 # Helpers for reading Steam's binary shortcuts.vdf, shared by the Python blocks
 # below that decide which shortcuts and game folders are DeckOps'. Those blocks cannot import from
@@ -4351,11 +4355,15 @@ PYEOF
     echo ""
 fi
 
+# A partial cleanup may leave Steam or a game pointing into this install.
+# Keep both the uninstaller and its applied-edit ledger for a safe retry.
+if [ "$FAILED" -ne 0 ]; then
+    warn "Cleanup is incomplete. DeckOps and its settings were kept for a retry; fix the errors above, then uninstall again."
+    exit 2
+fi
 info "Removing DeckOps install directory and config..."
 
-DECKOPS_DIRS=(
-    "$INSTALL_DIR"
-)
+DECKOPS_DIRS=()
 [ "$XDG_ID" != "deckops" ] && DECKOPS_DIRS+=("$HOME/.local/share/$XDG_ID")
 if [ -n "$KEEP_OTHER" ]; then
     # Shared with the other branch: Plutonium prefix, Offline Mode, save backups
@@ -4367,9 +4375,9 @@ else
     DECKOPS_DIRS+=("$HOME/.local/share/deckops")
 fi
 
-# This branch's config last: it holds the shortcuts snapshot and the applied
-# ledger a re-run needs if anything above failed.
-DECKOPS_DIRS+=("$HOME/.config/$XDG_ID")
+# Remove the install and then this branch's config last: the executable and
+# applied-edit ledger remain available if cleaning shared data fails.
+DECKOPS_DIRS+=("$INSTALL_DIR" "$HOME/.config/$XDG_ID")
 
 for d in "${DECKOPS_DIRS[@]}"; do
     # save_backup.py writes here; keep it so a reinstall can restore saves.
@@ -4386,6 +4394,7 @@ for d in "${DECKOPS_DIRS[@]}"; do
         else
             warn "Failed to clean $d"
             FAILED=1
+            break
         fi
     elif [ -d "$d" ]; then
         if rm -rf "$d"; then
@@ -4393,12 +4402,17 @@ for d in "${DECKOPS_DIRS[@]}"; do
         else
             warn "Failed to remove $d"
             FAILED=1
+            break
         fi
     else
         skip "$d -- not found"
     fi
 done
 echo ""
+if [ "$FAILED" -ne 0 ]; then
+    warn "Could not remove every DeckOps directory. Remaining files were kept for a retry."
+    exit 2
+fi
 
 if [ "$FAILED" -ne 0 ]; then
     echo -e "${YELLOW}${BOLD}  DeckOps uninstalled with warnings -- see above.${CLEAR}"

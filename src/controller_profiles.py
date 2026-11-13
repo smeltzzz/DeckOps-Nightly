@@ -106,6 +106,7 @@ def install_layout(src: str, canonical_path: str):
                 _log.info("kept the changed layout %s before replacing it", canonical_path)
             except OSError:
                 _log.warning("could not keep the changed layout %s", canonical_path, exc_info=True)
+                raise  # Never replace a player's changed layout without a safe copy.
     else:
         keep_original(canonical_path)
     atomic_write(canonical_path, data)

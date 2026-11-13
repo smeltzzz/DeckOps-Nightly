@@ -43,7 +43,9 @@ SESSION_FILE=
 STATE_DIR="$HOME/.local/share/deckops/lan/$MODE"
 SERVER_STATE="$STATE_DIR/server.unit"
 SESSIONS="$STATE_DIR/.sessions"
-LOCK_FILE="$STATE_DIR/server.lock"
+# The UDP port is shared across modes: a per-mode lock lets two different
+# games both see it free and start competing servers.
+LOCK_FILE="$HOME/.local/share/deckops/lan/server.lock"
 cleanup_server() {
   if [ -z "$SESSION_FILE" ]; then
     [ -z "$OWN_UNIT" ] || systemctl --user stop "$OWN_UNIT" 2>/dev/null
@@ -66,8 +68,9 @@ cleanup_server() {
   exec 9>&-
 }
 
-mkdir -p "$PROJECT_ROOT/logs"
-exec >"$PROJECT_ROOT/logs/lan_$MODE.log" 2>&1
+mkdir -p "$PROJECT_ROOT/logs" "$(dirname "$LOCK_FILE")"
+# Concurrent launches of the same mode must not truncate one another's log.
+exec >>"$PROJECT_ROOT/logs/lan_$MODE.log" 2>&1
 echo "$(date +%T) start $MODE $GAME${PORT:+, server on port $PORT: $*}"
 [ -x "$PR" ] || { echo "Proton not found: $PR"; exit 1; }
 # Relink the offline copies so mods added and Plutonium files updated since the install
@@ -125,28 +128,22 @@ if [ -n "$PORT" ]; then
   mkdir -p "$STATE_DIR" "$SESSIONS"
   exec 9>"$LOCK_FILE"
   flock 9 || { echo "could not lock server startup"; exit 1; }
+  PORT_BUSY=
   if ss -uln | grep -q ":$PORT "; then
-    # Every mode uses the same port: a server another game left up must not be joined.
-    # It is this mode's when a live session of it is registered or its recorded unit is active.
+    PORT_BUSY=1
+    # Never stop another mode's active server: doing so disconnects its game.
+    # A recorded unit with no live session may be a stale crash; do not assume
+    # an unrelated process listening on this port belongs to DeckOps either.
     OURS=
-    if [ -s "$SERVER_STATE" ]; then
-      for member in "$SESSIONS"/*; do
-        [ -f "$member" ] || continue
-        pid=${member##*/}; pid=${pid%%-*}
-        if kill -0 "$pid" 2>/dev/null; then OURS=1; break; fi
-      done
-      if [ -z "$OURS" ] && systemctl --user is-active --quiet "$(cat "$SERVER_STATE")" 2>/dev/null; then
-        OURS=1
-      fi
+    if [ -s "$SERVER_STATE" ] && systemctl --user is-active --quiet "$(cat "$SERVER_STATE")" 2>/dev/null; then
+      OURS=1
     fi
     if [ -z "$OURS" ]; then
-      echo "$(date +%T) port $PORT held by another offline server, stopping it"
-      systemctl --user stop 'deckops-lan-*' 2>/dev/null
-      rm -f "$SERVER_STATE"
-      for i in $(seq 15); do ss -uln | grep -q ":$PORT " || break; sleep 1; done
+      echo "Port $PORT is already in use by another game/server; close it before launching $MODE"
+      exit 1
     fi
   fi
-  if ! ss -uln | grep -q ":$PORT "; then
+  if [ -z "$PORT_BUSY" ]; then
     UNIT="deckops-lan-$MODE-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
     # systemd-run with the display passed in: a headless server stalls under Proton, and in Game Mode
     # this keeps its window out of the Steam launch so gamescope never focuses it.

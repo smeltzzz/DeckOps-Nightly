@@ -107,7 +107,7 @@ class MainQtProgressCleanupTests(unittest.TestCase):
 
     def test_exited_zenity_does_not_crash_a_successful_component_install(self):
         code = self._function()
-        pip = "/venv/bin/pip"
+        pip = os.path.join("/venv", "bin", "pip")
         z = MagicMock()
         z.stdin.close.side_effect = BrokenPipeError("dialog already closed")
         z.terminate.side_effect = ProcessLookupError("dialog already exited")

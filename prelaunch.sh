@@ -60,6 +60,7 @@ if [ -n "$WATCH_EXE" ] && [ -x "$DIR/.venv/bin/python3" ] && [ -f "$DIR/src/fovw
         'import sys; sys.path.insert(0, sys.argv[1]); import fovwatch' "$DIR/src" >/dev/null 2>&1; then
         env -u LD_PRELOAD -u LD_LIBRARY_PATH -u PYTHONHOME -u PYTHONPATH \
             DECKOPS_LD_PRELOAD="$LD_PRELOAD" DECKOPS_LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+            DECKOPS_PYTHONHOME="$PYTHONHOME" DECKOPS_PYTHONPATH="$PYTHONPATH" \
             "$DIR/.venv/bin/python3" "$DIR/src/fovwatch.py" "$WATCH_EXE" cg_fov=90 -- "$@"
         status=$?
         if [ "$status" -ne 126 ] && [ "$status" -ne 127 ]; then

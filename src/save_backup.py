@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from datetime import datetime
 
 from identity import CONFIG_PATH
@@ -498,25 +499,46 @@ def _write_meta(groups: dict):
 
 
 def _keep_pre_restore(path: str) -> bool:
-    """Copy the current save dir to <path>.pre-restore before a restore
-    overwrites it, so stats earned since the backup aren't lost for good.
-    False when that copy could not be made: the restore must then not go ahead
-    (it would replace the newest stats with no safety copy)."""
+    """Keep the current saves before overwriting them, without losing an older
+    safety copy if the new copy fails (e.g. the disk fills during a restore)."""
+    stage = None
+    retain_stage = False
+    keep = path.rstrip(os.sep) + ".pre-restore"
+    older = keep + ".1"
     try:
         if not os.path.isdir(path) or not any(True for _ in os.scandir(path)):
             return True
-        keep = path.rstrip(os.sep) + ".pre-restore"
-        if os.path.isdir(keep):
-            # A second restore must not destroy what the first one set aside: keep
-            # that one generation back (it holds the newest stats from before).
-            older = keep + ".1"
-            shutil.rmtree(older, ignore_errors=True)
-            os.replace(keep, older)
-        shutil.copytree(path, keep)
+        stage = tempfile.mkdtemp(prefix=".deckops-restore-", dir=os.path.dirname(keep))
+        new = os.path.join(stage, "saves")
+        shutil.copytree(path, new)
+        # Only rotate earlier copies after a full copy of the live saves exists.
+        saved_older = os.path.join(stage, "older")
+        if os.path.isdir(older):
+            os.replace(older, saved_older)
+        try:
+            if os.path.isdir(keep):
+                os.replace(keep, older)
+            os.replace(new, keep)
+        except OSError:
+            try:
+                if not os.path.exists(keep) and os.path.isdir(older):
+                    os.replace(older, keep)
+                if os.path.isdir(saved_older) and not os.path.exists(older):
+                    os.replace(saved_older, older)
+            except OSError:
+                # Preserve the full staged copy and previous generation if
+                # even rollback fails; their location is in the log for recovery.
+                retain_stage = True
+                _log.error("save restore: safety copies retained at %s", stage)
+                raise
+            raise
         return True
     except OSError as ex:
         _log.warning("save restore: could not keep %s: %s", path, ex)
         return False
+    finally:
+        if stage is not None and not retain_stage:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -718,6 +740,15 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
         group = SAVE_GROUPS[group_name]
         keys = group["keys"]
         backup_dir = os.path.join(BACKUP_ROOT, group_name)
+        old_backup = os.path.join(BACKUP_ROOT, f".{group_name}.old")
+        if not os.path.isdir(backup_dir) and os.path.isdir(old_backup):
+            # An interrupted backup swap moved the last complete copy to .old.
+            # Restore it before deciding this group has no saved data.
+            try:
+                os.replace(old_backup, backup_dir)
+            except OSError as ex:
+                on_progress(f"  ⚠ {group_name}: could not recover the previous backup: {ex}")
+                continue
 
         if not os.path.isdir(backup_dir):
             continue
@@ -758,12 +789,13 @@ def restore_saves(steam_root: str = None, installed_games: dict = None,
                     src = os.path.join(src_root, p)
                     if not os.path.isdir(src):
                         continue
-                    # Once per destination: shared WaW gets two sources
-                    if p == "players" and tdst not in kept:
-                        kept.add(tdst)
+                    # Each part can contain player-created data. Keep mods and
+                    # usermaps too, once per destination even with shared sources.
+                    if (tdst, p) not in kept:
+                        kept.add((tdst, p))
                         if not _keep_pre_restore(os.path.join(tdst, p)):
                             unsafe.add(tdst)
-                            on_progress(f"  ⚠ {group_name}: could not keep your current saves in {tdst} "
+                            on_progress(f"  ⚠ {group_name}: could not keep your current {p} in {tdst} "
                                         "(disk full?), so they were not replaced")
                     if tdst in unsafe:
                         continue
