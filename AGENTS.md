@@ -17,7 +17,7 @@ There is no CI, pre-commit, or formatter config. Run the two checks above before
 
 - There is exactly one GitHub release, `v1`, kept up to date in place. Never create new tags or releases. Installs update from `main` via `launcher.sh`; the release only ships `DeckOps-Nightly.desktop`.
 - When `DeckOps-Nightly.desktop` changes, refresh the asset with `gh release upload v1 DeckOps-Nightly.desktop -R smeltzzz/DeckOps-Nightly --clobber` (LF file, as committed) and update its notes with `gh release edit v1 --notes-file ...`. The README links to `releases/latest/download/DeckOps-Nightly.desktop`.
-- Changes land on `main` through a PR merged with a merge commit.
+- For future sweeps, run the required checks, then commit on `main` and push directly to `origin/main`; no PR or merge commit is needed. Other changes land on `main` through a PR merged with a merge commit unless the user requests a different workflow.
 
 ## Layout and wiring
 
