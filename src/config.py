@@ -69,10 +69,9 @@ DEFAULTS = {
 
 _lock = threading.Lock()
 _cache = None        # cached merged dict, or None if invalidated
-# (mtime_ns, size) of CONFIG_PATH when _cache was populated. The size is part
-# of the key because mtime alone is not enough: two saves inside one timestamp
-# tick, or any filesystem with coarse timestamps (an SD card, a network share),
-# leave it unchanged and the reader keeps the settings from before the write.
+# File identity, mtime, ctime and size when _cache was populated. Atomic
+# replacements can have the same mtime and size (e.g. copied files or coarse
+# timestamps); inode/ctime distinguish those from the cached version.
 # prelaunch/cache_cleanup run beside the UI and read the same file.
 _cache_key = None
 # CONFIG_PATH as it was when load() last found the file there but could not read
@@ -121,7 +120,7 @@ def load() -> dict:
                 # There may be a real setup behind this (EIO, EACCES on the folder)
                 _mark_unreadable(ex)
                 return copy.deepcopy(DEFAULTS)
-            current_key = (st.st_mtime_ns, st.st_size)
+            current_key = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
 
             # Return cached copy if file hasn't changed
             if _cache is not None and current_key == _cache_key:
@@ -143,7 +142,8 @@ def load() -> dict:
                     _cache = None
                     _cache_key = None
                     return copy.deepcopy(DEFAULTS)
-                if attempt == 0 and (st2.st_mtime_ns, st2.st_size) != current_key:
+                if attempt == 0 and (st2.st_dev, st2.st_ino, st2.st_mtime_ns,
+                                     st2.st_ctime_ns, st2.st_size) != current_key:
                     continue
                 # Unparseable (truncated by a power loss, bad hand edit). Move it
                 # aside so the next save() can't overwrite the user's setup.
@@ -217,27 +217,53 @@ def save(config: dict):
         _cache_key = None
 
 
-# load() and save() each take _lock, but a setter calls both: with the lock dropped in
-# between, two threads (an install worker marking a game set up while the UI saves a
-# setting) could both load the same dict and the second save would lose the first's
-# change. Read-modify-write sequences hold this one across the whole sequence.
-# Re-entrant, so a setter may call another. (Other processes -- prelaunch -- still
-# write the file on their own; this covers the threads of one process.)
+# A setter holds both the in-process lock and a stable, separate flock file over
+# load -> modify -> save. Prelaunch runs in another process and otherwise loses
+# UI settings (or vice versa). Never lock deckops.json itself: save replaces it.
 _txn_lock = threading.RLock()
+_txn_depth = 0
 
 
 @contextlib.contextmanager
 def transaction():
     """Hold the config update lock: `with config.transaction(): c = load(); ...; save(c)`."""
+    global _txn_depth
     with _txn_lock:
-        yield
+        if _txn_depth:
+            _txn_depth += 1
+            try:
+                yield
+            finally:
+                _txn_depth -= 1
+            return
+        stream = None
+        if os.name == "posix":
+            import fcntl
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            path = CONFIG_PATH + ".lock"
+            try:
+                stream = open(path, "a+")
+            except PermissionError:
+                stream = open(path, "r")  # root-owned lock, like the update lock
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+            except BaseException:
+                stream.close()
+                raise
+        _txn_depth = 1
+        try:
+            yield
+        finally:
+            _txn_depth = 0
+            if stream is not None:
+                stream.close()  # closing also releases flock
 
 
 def _updates(fn):
     """Run a load-modify-save setter under the update lock."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        with _txn_lock:
+        with transaction():
             return fn(*args, **kwargs)
     return wrapper
 
@@ -408,8 +434,8 @@ def get_offline_mode() -> bool:
                  for e in c.get("setup_games", {}).values())
         try:
             _set("offline_mode", on)
-        except ConfigUnreadable:
-            pass                    # a getter must not fail; recorded once the file reads again
+        except OSError:
+            pass                    # a getter must not fail; recorded once the file/lock reads again
         return on
     return bool(c["offline_mode"])
 
@@ -741,7 +767,7 @@ def reset():
     # Same order as the setters (update lock, then cache lock). Without the update
     # lock a setter that had already loaded the old config saved it back right after
     # the delete, and "reset" brought the whole old setup back.
-    with _txn_lock, _lock:
+    with transaction(), _lock:
         try:
             os.remove(CONFIG_PATH)
         except FileNotFoundError:

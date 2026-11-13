@@ -176,8 +176,8 @@ class SnapshotTests(Base):
         self.assertNotIn('SHORTCUTS_SNAPSHOT="$(mktemp -d)"', TEXT)
         self.assertNotIn('rm -rf "$SHORTCUTS_SNAPSHOT"', TEXT)
         self.assertIn('if [ ! -f "$SHORTCUTS_SNAPSHOT/$_uid.vdf" ]; then', TEXT)
-        # The config dir (snapshot + applied ledger) is removed last
-        self.assertIn('DECKOPS_DIRS+=("$HOME/.config/$XDG_ID")\n\nfor d in "${DECKOPS_DIRS[@]}"', TEXT)
+        # Keep the installer and config (snapshot + applied ledger) until shared cleanup succeeds.
+        self.assertIn('DECKOPS_DIRS+=("$INSTALL_DIR" "$HOME/.config/$XDG_ID")\n\nfor d in "${DECKOPS_DIRS[@]}"', TEXT)
 
     def test_scans_read_snapshot_and_live_file(self):
         snap = self.home / "snap"

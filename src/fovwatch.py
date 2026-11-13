@@ -323,10 +323,10 @@ def watch(root_pid, settings, exe, stop, interval=0.2):
 # ── entry point ──────────────────────────────────────────────────────────────
 
 def _child_env():
-    """The game's own environment: prelaunch.sh hid LD_PRELOAD and LD_LIBRARY_PATH
-    from this Python and passed them in DECKOPS_* variables."""
+    """The game's own environment: prelaunch.sh hid Steam's library and Python
+    overrides from this helper and passed them in DECKOPS_* variables."""
     env = dict(os.environ)
-    for name in ("LD_PRELOAD", "LD_LIBRARY_PATH"):
+    for name in ("LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONHOME", "PYTHONPATH"):
         saved = env.pop("DECKOPS_" + name, None)
         if saved is not None:
             # An empty saved value means Steam had none. Do not leak a helper

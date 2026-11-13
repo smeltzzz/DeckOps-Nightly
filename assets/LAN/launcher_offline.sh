@@ -77,6 +77,13 @@ fi
 # Wine's Z: drive exposes Linux paths to the Windows exe.
 INTENT_DIR=$(mktemp -d "$PROJECT_ROOT/.lan_intent.XXXXXXXX") || exit 1
 INTENT_FILE="$INTENT_DIR/intent.json"
+# A literal backslash in a Linux filename is indistinguishable from a Wine
+# path separator. Fail rather than hand the UI an intent path it cannot write.
+if [[ "$INTENT_FILE" == *\\* || "$INTENT_FILE" == *$'\n'* || "$INTENT_FILE" == *$'\r'* ]]; then
+    rmdir "$INTENT_DIR"
+    echo "ERROR: DeckOps path cannot be represented as a Wine launch intent" >&2
+    exit 1
+fi
 INTENT_WIN="Z:${INTENT_FILE//\//\\}"
 cleanup_intent() { rm -f "$INTENT_FILE" "$INTENT_DIR"/.lan_intent-*.tmp; rmdir "$INTENT_DIR" 2>/dev/null || true; }
 trap cleanup_intent EXIT
@@ -97,7 +104,14 @@ export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_ROOT"
 # writes only this invocation's intent when the user picks a game, then exits.
 # PROTON_NO_FSYNC/ESYNC prevents hangs on older kernels.
 
-PROTON_NO_FSYNC=1 PROTON_NO_ESYNC=1 "$PROTON_PATH" run "$LAUNCHER_EXE" --intent-file "$INTENT_WIN" "$@"
+# Steam/user-supplied arguments must not override the private intent path.
+# argparse takes the last occurrence of an option, so pass ours last.
+PROTON_NO_FSYNC=1 PROTON_NO_ESYNC=1 "$PROTON_PATH" run "$LAUNCHER_EXE" "$@" --intent-file "$INTENT_WIN"
+ui_status=$?
+if [ "$ui_status" -ne 0 ]; then
+    echo "ERROR: Offline launcher exited with status $ui_status" >&2
+    exit "$ui_status"
+fi
 
 # ── Check for launch intent ─────────────────────────────────────────────────
 

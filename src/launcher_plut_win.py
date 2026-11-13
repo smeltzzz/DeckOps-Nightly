@@ -247,6 +247,7 @@ class GamepadPoller:
         self._prev_buttons = 0
         self._held_button = None
         self._held_time_ms = 0
+        self._controller_idx = None
 
         self._timer = QTimer()
         self._timer.setInterval(_GAMEPAD_POLL_MS)
@@ -259,6 +260,15 @@ class GamepadPoller:
 
     def stop(self):
         self._timer.stop()
+        self._reset_buttons()
+
+    def _reset_buttons(self):
+        # After disconnect, a poll error or a different controller taking over,
+        # a held A/B/Y must become a fresh press rather than remaining latched.
+        self._prev_buttons = 0
+        self._held_button = None
+        self._held_time_ms = 0
+        self._controller_idx = None
 
     def _poll(self):
         try:
@@ -270,7 +280,11 @@ class GamepadPoller:
                     ctrl_idx = i
                     break
             if ctrl_idx is None:
+                self._reset_buttons()
                 return
+            if self._controller_idx != ctrl_idx:
+                self._reset_buttons()
+                self._controller_idx = ctrl_idx
 
             state = XInput.get_state(ctrl_idx)
             buttons = state.Gamepad.wButtons
@@ -302,7 +316,7 @@ class GamepadPoller:
             self._prev_buttons = buttons
 
         except Exception:
-            pass
+            self._reset_buttons()
 
     def _fire(self, btn):
         cb = self._callbacks.get(btn)
@@ -425,6 +439,14 @@ def _write_intent(lan_wrapper_path: str):
     """
     if not _INTENT_FILE or not os.path.isabs(_INTENT_FILE):
         raise ValueError("No absolute launch intent path was provided")
+    private_dir = os.path.dirname(_INTENT_FILE)
+    if (os.path.basename(_INTENT_FILE) != "intent.json"
+            or not os.path.basename(private_dir).startswith(".lan_intent.")
+            or os.path.normcase(os.path.realpath(os.path.dirname(private_dir)))
+            != os.path.normcase(os.path.realpath(_LINUX_PROJECT_ROOT))
+            or os.path.islink(private_dir) or not os.path.isdir(private_dir)
+            or os.path.lexists(_INTENT_FILE)):
+        raise ValueError("Launch intent must be a new file in this invocation's private DeckOps directory")
     pending = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(_INTENT_FILE),

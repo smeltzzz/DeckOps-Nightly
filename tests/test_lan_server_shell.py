@@ -60,8 +60,10 @@ fi
 touch "$PORT_FLAG"
 """,
                 "systemctl": """#!/bin/sh
-echo "$*" >> "$STOP_LOG"
-rm -f "$PORT_FLAG"
+if [ "$2" = stop ]; then
+  echo "$*" >> "$STOP_LOG"
+  rm -f "$PORT_FLAG"
+fi
 """,
                 "timeout": """#!/bin/sh
 if [ "$1" = 1 ]; then exit 0; fi

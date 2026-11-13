@@ -27,7 +27,7 @@ import tempfile
 import time
 
 from log import get_logger
-from net import download
+from net import download, safe_manifest_path
 from steam_common import sha1_file as _sha1
 
 _log = get_logger(__name__)
@@ -75,8 +75,9 @@ def fetch(timeout: int = 30, tries: int = 3):
             info = json.load(f)
     for e in info["files"]:
         n = e["name"]
-        if os.path.isabs(n) or "\\" in n or ".." in n.split("/"):
-            raise RuntimeError(f"Unsafe path in Plutonium manifest: {n}")
+        if (not isinstance(n, str) or not n or os.path.isabs(n) or "\\" in n or ":" in n
+                or any(part in ("", ".", "..") for part in n.split("/"))):
+            raise RuntimeError(f"Unsafe path in Plutonium manifest: {n!r}")
     return prod, info
 
 
@@ -165,6 +166,12 @@ def sync_master(plut_dir: str, prod: dict, info: dict, log=None, deadline: float
     """
     log = log or (lambda *a: None)
     files = info["files"]
+    # sync_master can be called with an already-loaded manifest. Validate all
+    # destinations (including existing symlink parents) before any download or swap.
+    for entry in files:
+        safe_manifest_path(plut_dir, entry["name"])
+        safe_manifest_path(plut_dir, entry["name"] + ".new")
+        safe_manifest_path(plut_dir, entry["name"] + ".new.part")
     # Hex compared case-insensitively (download() already does): a manifest in upper
     # case made every file look changed, so every launch re-downloaded everything
     todo = [e for e in files if not (
@@ -247,6 +254,13 @@ def link_prefix(master: str, prefix_plut: str, info: dict, log=None) -> int:
     """
     log = log or (lambda *a: None)
     m = os.path.realpath(master)
+    # Reject a malicious/bad manifest before touching any prefix file.
+    for entry in info["files"]:
+        safe_manifest_path(master, entry["name"])
+        # The destination itself is allowed to be an existing managed symlink;
+        # its parent directories must not be links out of this prefix.
+        if entry["name"].startswith("storage/"):
+            safe_manifest_path(prefix_plut, os.path.dirname(entry["name"]) + "/.deckops_check")
     n = 0
     for d in SHARED_DIRS:
         src, dst = os.path.join(m, d), os.path.join(prefix_plut, d)

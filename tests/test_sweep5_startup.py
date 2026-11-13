@@ -412,11 +412,12 @@ class ScriptTextTests(unittest.TestCase):
         self.assertNotIn("FORCE", text)
         self.assertNotIn('"force"', text)
 
-    def test_install_writes_a_version_sentinel_right_after_the_copy(self):
+    def test_install_commits_unpinned_version_with_the_archive(self):
         text = _text("install.sh")
-        early = _between(text, 'cp -r "$EXTRACTED"/. "$INSTALL_DIR"/', "# ── step 3b")
+        early = _between(text, 'PREVIOUS_LIST="none"', "# ── step 3b")
         self.assertIn('INSTALLED_VERSION="0"', early)
-        self.assertIn('echo "$INSTALLED_VERSION" > "$INSTALL_DIR/VERSION.tmp"', early)
+        self.assertIn('"$INSTALLED_VERSION" full "$PREVIOUS_LIST"', early)
+        self.assertNotIn('cp -r "$EXTRACTED"/. "$INSTALL_DIR"/', early)
         # launcher.sh reads anything but a 40-hex SHA as "needs a full update"
         self.assertIn('LOCAL_SHA="0"', _text("launcher.sh"))
 
@@ -425,19 +426,23 @@ class ScriptTextTests(unittest.TestCase):
         self.assertIn('if echo "$BUILD_HASH ($BUILD_DATE)" > "$INSTALL_DIR/BUILD"; then', text)
         self.assertIn('if cat > "$DESKTOP_FILE" << DEOF', text)
         step8 = _between(text, "# ── step 8", "# DeckOps checks the update lock")
-        self.assertIn("if ! {", step8)
-        self.assertLess(step8.index("Could not record"), step8.index('success "Version recorded."'))
+        self.assertIn('"$INSTALL_DIR/VERSION"', step8)
+        self.assertLess(step8.index("does not match"), step8.index('success "Version recorded."'))
 
     @unittest.skipUnless(_HAS_BASH, "requires Linux bash")
-    def test_unpinned_install_replaces_the_tracked_version(self):
-        text = _text("install.sh")
-        block = _between(text, 'if [ -n "$INITIAL_SHA" ]; then\n    INSTALLED_VERSION', "\nif [[ ")
+    def test_unpinned_install_records_zero_transactionally(self):
+        import update_manifest
         with tempfile.TemporaryDirectory() as d:
-            Path(d, "VERSION").write_text("a" * 40 + "\n")       # copied from the archive
-            script = f'warn() {{ echo "WARN $1"; }}\nINSTALL_DIR="{d}"; INITIAL_SHA=""\n{block}\n'
-            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(Path(d, "VERSION").read_text().strip(), "0")
+            stage = Path(d, "stage")
+            (stage / "src").mkdir(parents=True)
+            (stage / "src" / "main.py").write_text("print('new')\n")
+            (stage / "deckops_identity.sh").write_text("BRANCH=nightly\n")
+            (stage / "VERSION").write_text("a" * 40 + "\n")
+            install = Path(d, "install")
+            install.mkdir()
+            update_manifest.apply_update(str(install), str(stage), "0", full=True)
+            self.assertEqual((install / "VERSION").read_text().strip(), "0")
+            self.assertEqual((install / "src" / "main.py").read_text(), "print('new')\n")
 
     def test_install_sweep_knows_snap_steam_after_flatpak(self):
         sweep = _between(_text("install.sh"), 'STEAM_ROOT_FOR_SWEEP=""', "LAN_SWEEP_DIRS=()")

@@ -1032,7 +1032,10 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
         if body is None:
             ok = False
             continue                # unreadable: this user is left entirely alone
-        if body and _split_entries(body):
+        if not _entries_parse(body, uid, prog):
+            ok = False
+            continue  # The entry may still exist; do not remove its artwork.
+        if body:
             new_body, stripped = _strip_entries_by_name(body, {name})
             if stripped:
                 try:
@@ -1041,6 +1044,7 @@ def remove_shortcut(name: str, exe_path: str, artwork_def: dict = None,
                 except OSError as ex:
                     ok = False
                     prog(f"  Could not write shortcuts.vdf: {ex}")
+                    continue  # Keep artwork for a shortcut that may still launch.
 
         # Remove artwork. Even when the shortcut itself is already gone (the player
         # deleted it in Steam, or shortcuts.vdf is empty): its files would stay for good.

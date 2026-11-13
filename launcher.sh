@@ -164,6 +164,16 @@ release_update_lock() {
     fi
 }
 
+# DeckOps holds this lock while it is open (main.py). No shell update or
+# rollback may replace modules under a running process.
+INSTANCE_LOCK="$INSTALL_DIR/.deckops_instance.lock"
+deckops_running() {
+    command -v flock >/dev/null 2>&1 || return 1
+    [ -f "$INSTANCE_LOCK" ] || return 1
+    flock -n -E 75 "$INSTANCE_LOCK" true 2>/dev/null
+    [ $? -eq 75 ]
+}
+
 # Roll back an update interrupted by a crash or power loss. The caller holds the
 # update lock. Fails only when the journal is there and could not be undone.
 ROLLED_BACK=false
@@ -179,8 +189,12 @@ recover_interrupted_update() {
 }
 
 # Before reading its version or starting the app. Never erase .update while its
-# journal is live.
-if ! recover_interrupted_update; then
+# journal is live, or roll files back under an already-running app.
+RUNNING_AT_START=false
+if deckops_running; then
+    RUNNING_AT_START=true
+fi
+if ! $RUNNING_AT_START && ! recover_interrupted_update; then
     release_update_lock
     zenity --error --title="$APP_TITLE" \
         --text="An interrupted update could not be restored. Your files were kept. Please contact DeckOps support before reinstalling." 2>/dev/null
@@ -192,23 +206,19 @@ if $ROLLED_BACK; then
         --text="An interrupted update was rolled back. Your previous DeckOps version is ready; you can retry the update later." 2>/dev/null
 fi
 
-# DeckOps holds this lock while it is open (main.py). An update applied under a
-# running DeckOps would leave it running old modules against new files, and it
-# may be updating itself right now.
-INSTANCE_LOCK="$INSTALL_DIR/.deckops_instance.lock"
-deckops_running() {
-    command -v flock >/dev/null 2>&1 || return 1
-    [ -f "$INSTANCE_LOCK" ] || return 1
-    flock -n -E 75 "$INSTANCE_LOCK" true 2>/dev/null
-    [ $? -eq 75 ]
-}
-
 # ── Update check ──────────────────────────────────────────────────────────────
 # Stage and apply the update check_for_updates found. The caller holds the update
 # lock and shows the outcome after letting go of it; UPDATE_RESULT says which.
 # Uses check_for_updates' locals (LOCAL_SHA, REMOTE_SHA, PARSED, PREVIOUS_SHA...).
 stage_and_apply_update() {
     UPDATE_RESULT=""
+
+    # DeckOps may have opened while the update question was on screen. Recheck
+    # under the update lock, before even rolling back files it is now using.
+    if deckops_running; then
+        UPDATE_RESULT="skipped"
+        return
+    fi
 
     # Another launcher may have stopped part way while this one was asking:
     # restore first, never stage over a live journal.
@@ -554,6 +564,12 @@ case "$choice" in
         # Not while an update writes into the install. The uninstaller inherits
         # the lock (fd 9) and holds it until it is done.
         take_update_lock || { updating_elsewhere; exit 1; }
+        if deckops_running; then
+            release_update_lock
+            zenity --warning --title="$APP_TITLE" \
+                --text="Close DeckOps before uninstalling it." 2>/dev/null
+            exit 1
+        fi
         if [ -f "$INSTALL_DIR/deckops_uninstall.sh" ]; then
             bash "$INSTALL_DIR/deckops_uninstall.sh"
         else

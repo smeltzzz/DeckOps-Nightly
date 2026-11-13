@@ -256,17 +256,16 @@ esac
         self.assertLess(time.monotonic() - start, 60)
         self.assertEqual(proc.returncode, 0, (root / "logs" / "lan_t6mp.log").read_text())
 
-    def test_stale_server_of_another_mode_is_stopped_and_this_modes_started(self):
+    def test_other_modes_server_is_not_stopped_without_proof_it_is_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             command, env, _state, root = self._setup(base)
-            (base / "port").touch()                         # t4mp's server still up
-            self._run(command, env, root)
-            ctl = (base / "ctl").read_text().splitlines()
-            self.assertIn("--user stop deckops-lan-*", ctl)
-            units = (base / "units").read_text().split()
-            self.assertEqual(len(units), 1)
-            self.assertTrue(units[0].startswith("deckops-lan-t6mp-"))
+            (base / "port").touch()  # Another game may be using the shared port.
+            proc = subprocess.run(command, env=env, timeout=60)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("already in use", (root / "logs" / "lan_t6mp.log").read_text())
+            self.assertFalse((base / "units").exists())
+            self.assertFalse((base / "ctl").exists())
 
     def test_this_modes_active_server_is_joined(self):
         with tempfile.TemporaryDirectory() as tmp:

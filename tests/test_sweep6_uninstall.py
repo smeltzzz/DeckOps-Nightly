@@ -244,6 +244,43 @@ class FullScriptTests(_Tmp):
         self.assertFalse((self.home / "DeckOps-Nightly").exists())
         self.assertTrue((self.home / "DeckOps" / "src" / "main.py").exists())
 
+    @LINUX_BASH
+    def test_failed_exe_restore_keeps_installer_and_ledger_for_retry(self):
+        steamapps = self.home / ".local/share/Steam/steamapps"
+        game = steamapps / "common/MW3"
+        game.mkdir(parents=True)
+        (steamapps / "appmanifest_42690.acf").write_text('"AppState"\n{\n "installdir" "MW3"\n}\n')
+        wrapper = game / "iw5mp.exe"
+        wrapper.write_text('#!/bin/sh\nexec "$HOME/DeckOps-Nightly/prelaunch.sh" "$@"\n')
+        backup = game / "iw5mp.exe.bak"
+        backup.write_bytes(b"MZstock-game")
+        install = self.home / "DeckOps-Nightly"
+        install.mkdir()
+        ledger = self.home / ".config/deckops-nightly/steam_edits.json"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text('{"edits": []}')
+        self.stub("mv", f'if [ "$2" = "{backup}" ]; then exit 1; fi\nexec /bin/mv "$@"')
+        result = self._run()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("were kept", result.stdout)
+        self.assertTrue(install.is_dir())
+        self.assertEqual(ledger.read_text(), '{"edits": []}')
+        self.assertIn("prelaunch.sh", wrapper.read_text())
+        self.assertEqual(backup.read_bytes(), b"MZstock-game")
+        self.assertNotIn("zenity --info", self.calls())
+
+    @LINUX_BASH
+    def test_partial_cleanup_never_starts_final_directory_removal(self):
+        guard = TEXT.split('# A partial cleanup may leave Steam', 1)[1].split(
+            'info "Removing DeckOps install directory and config..."', 1)[0]
+        install = self.home / "DeckOps-Nightly"
+        install.mkdir()
+        code = WARN + f'FAILED=1\nINSTALL_DIR="{install}"\n' + guard + '\necho SHOULD_NOT_REMOVE\n'
+        result = self.bash(code)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("SHOULD_NOT_REMOVE", result.stdout)
+        self.assertTrue(install.exists())
+
 
 # ── UNIN-3: closing Flatpak Steam (no `steam` on PATH) ───────────────────────
 

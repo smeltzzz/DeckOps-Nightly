@@ -407,7 +407,9 @@ def apply_update(install_dir, stage_dir, remote_sha, rows=(), full=False, previo
     `previous_files` (full updates only) lists what the installed version
     shipped, so files the new version dropped can be removed.
     """
-    if not _SHA.fullmatch(remote_sha):
+    # An installer whose API version lookup failed still needs a recoverable
+    # full-archive copy. "0" marks that unpinned build for the next update check.
+    if not _SHA.fullmatch(remote_sha) and not (full and remote_sha == "0"):
         raise ValueError("invalid target version")
     install, stage = Path(install_dir), Path(stage_dir)
     update = install / ".update"

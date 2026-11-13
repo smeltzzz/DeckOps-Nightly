@@ -1595,8 +1595,12 @@ class SetupCompleteScreen(QWidget):
                 detail = (" " + "; ".join(problems[:2])) if problems else ""
                 if count > 0:
                     groups = ", ".join(restored.keys())
-                    self._s.log.emit(f"DONE|✓  Restored saves for {count} group(s): {groups}."
-                                     + (f" Not everything could be restored:{detail}" if problems else ""))
+                    # A partial copy is not a completed restore: keep the offer
+                    # available so the remaining backups can be retried.
+                    kind = "RETRY" if problems else "DONE"
+                    self._s.log.emit(f"{kind}|Restored saves for {count} group(s): {groups}."
+                                     + (f" Some saves could not be restored:{detail} Retry Restore Saves."
+                                        if problems else ""))
                 elif problems:
                     # Copies that failed (a full disk, permissions) are not "no save data":
                     # the offer stays so the player can try again

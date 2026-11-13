@@ -276,8 +276,12 @@ class InstallScreenUXTests(_Base):
     def test_results_take_full_height_and_retry_is_primary(self):
         # Enter as selection does, before showEvent starts the one allowed run.
         self.screen._selection_entry = True
-        self.stack.setCurrentWidget(self.screen)
-        self.stack.show()
+        # Showing the screen queues its real installer worker. Suppress that
+        # timer before the synthetic result so later Qt tests cannot launch a
+        # background download against this temporary, already-cleaned-up root.
+        with patch.object(ui_install.QTimer, "singleShot"):
+            self.stack.setCurrentWidget(self.screen)
+            self.stack.show()
         self._finish_failed()
         _APP.processEvents()
         s = self.screen
