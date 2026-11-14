@@ -285,9 +285,17 @@ def _safe_extractall(tar: tarfile.TarFile, dest: str):
     def inside(path):
         p = os.path.realpath(path)
         return p == root or p.startswith(root + os.sep)
+    # Nothing is on disk yet, so realpath() can't follow links that earlier
+    # members will create. Track symlink members and refuse any path that
+    # walks through one, or a chain like "d -> ." then "s -> d/d/../.." would
+    # pass the text check and land outside dest once extracted.
+    links = set()
+    def through_link(path):
+        parts = os.path.normpath(os.path.relpath(path, dest)).split(os.sep)
+        return any(os.sep.join(parts[:i]) in links for i in range(1, len(parts)))
     for m in tar.getmembers():
         target = os.path.join(dest, m.name)
-        if os.path.isabs(m.name) or not inside(target):
+        if os.path.isabs(m.name) or not inside(target) or through_link(target):
             raise RuntimeError(f"unsafe path in GE-Proton archive: {m.name!r}")
         if m.issym():      # relative to the link's own folder
             link_target = os.path.join(os.path.dirname(target), m.linkname)
@@ -295,8 +303,11 @@ def _safe_extractall(tar: tarfile.TarFile, dest: str):
             link_target = os.path.join(dest, m.linkname)
         else:
             link_target = None
-        if link_target is not None and (os.path.isabs(m.linkname) or not inside(link_target)):
+        if link_target is not None and (os.path.isabs(m.linkname) or not inside(link_target)
+                                        or through_link(link_target + os.sep + "x")):
             raise RuntimeError(f"unsafe link in GE-Proton archive: {m.name!r} -> {m.linkname!r}")
+        if m.issym():
+            links.add(os.path.normpath(os.path.relpath(target, dest)))
         if m.isdev():
             raise RuntimeError(f"device file in GE-Proton archive: {m.name!r}")
     tar.extractall(dest)
@@ -551,8 +562,9 @@ def ensure_prefix_deps(ge_version: str | None, prefix_path: str,
             if not os.path.isdir(pfx_dir):
                 _copytree_atomic(default_pfx, pfx_dir)
             if ge_version and not os.path.isfile(version_file):
-                with open(version_file, "w") as f:
-                    f.write(ge_version + "\n")
+                # Atomic: an empty marker from a crash would never be rewritten
+                from steam_common import atomic_write
+                atomic_write(version_file, (ge_version + "\n").encode())
             prog("  ✓ Prefix created from default_pfx (no Proton path — fallback)")
             return True
         except Exception as ex:

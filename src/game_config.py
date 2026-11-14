@@ -526,8 +526,8 @@ def _write_cod4_active_txt(profiles_dir, player_name):
         active_path = os.path.join(profiles_dir, "active.txt")
         from config import clean_player_name
         safe_name = clean_player_name(player_name) or "Player"
-        with open(active_path, "w", encoding="utf-8") as f:
-            f.write(safe_name)
+        from steam_common import atomic_write
+        atomic_write(active_path, safe_name.encode("utf-8"))   # never a half-written name
     except (IOError, OSError):
         pass  # Non-fatal
 

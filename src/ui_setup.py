@@ -273,7 +273,8 @@ class SetupFlowScreen(QWidget):
         nl.addSpacing(4)
         nl.addWidget(_lbl(
             "Your name in IW4x and Plutonium offline. "
-            "Your Steam name is filled in; change it to anything you like.",
+            "Your Steam name is filled in; change it to anything you like. "
+            "Press STEAM + X to open the on-screen keyboard.",
             13, C_DIM, align=Qt.AlignmentFlag.AlignLeft))
         nl.addSpacing(12)
         self._name_input = QLineEdit()

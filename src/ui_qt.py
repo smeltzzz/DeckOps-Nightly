@@ -23,7 +23,7 @@ from ui_constants import (
     _load_font, _app_style, _start_audio, _kill_audio,
     _set_audio_enabled, _clean_enabled,
     go_to, get_screen, screen_title, install_controller_nav, _ensure_focus_in,
-    FONT_BODY, FOCUS_RING_W,
+    FONT_BODY, FOCUS_RING_W, BTN_MIN_H,
 )
 
 from ui_setup import SetupFlowScreen
@@ -113,7 +113,7 @@ class DeckOpsWindow(QMainWindow):
         # A compact status strip owns the persistent music control. Unlike the
         # old floating button it never covers a wizard action or a result card.
         strip = QStatusBar(self)
-        strip.setFixedHeight(48)        # room for the 40px music button
+        strip.setFixedHeight(BTN_MIN_H + 4)     # room for the music button
         strip.setSizeGripEnabled(False)
         strip.setStyleSheet(
             f"QStatusBar{{background:{C_CARD};border-top:1px solid {C_LINE};}}"
@@ -129,7 +129,7 @@ class DeckOpsWindow(QMainWindow):
 
         self._muted = not _clean_enabled(cfg.get_music_enabled())
         self._mute_btn = QPushButton(self)
-        self._mute_btn.setFixedSize(124, 40)
+        self._mute_btn.setFixedSize(124, BTN_MIN_H)
         self._mute_btn.setFont(font(FONT_BODY, bold=True))
         self._mute_btn.setStyleSheet(
             f"QPushButton{{background:{C_DARK_BTN};color:{C_TEXT};"

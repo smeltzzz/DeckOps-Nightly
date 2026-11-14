@@ -170,6 +170,8 @@ class SetupScreen(QWidget):
             return
         if not self._scanning:
             self._build()
+        import preflight
+        preflight.start_online_probe()      # cached before Install, so the check can't stall the UI
 
     # ── Controller protocol (see ui_constants) ─────────────────────────
     def focus_target(self):
@@ -180,6 +182,9 @@ class SetupScreen(QWidget):
 
     def back_action(self):
         self._go_back()
+
+    def escape_allowed(self):
+        return not self._scanning
 
     def _chain(self):
         """D-pad / Tab order: selection buttons, the list top to bottom, then the footer."""
@@ -389,6 +394,15 @@ class SetupScreen(QWidget):
             modes.addStretch()
             outer.addLayout(modes)
             self._add_row(gd, cw)
+
+        # Controllers can't hover, and disabled rows can't take focus, so the
+        # tooltip on a set-up mode is never seen: say it on screen once.
+        if any(not cb.isEnabled() and cb.text().endswith("· set up") for cb, _g, _s in self._checks.values()):
+            note = _lbl("Modes marked \u201cset up\u201d are done. To set one up again, use "
+                        "Game Options > Reinstall Game in the library.", 10, C_DIM,
+                        align=Qt.AlignmentFlag.AlignLeft)
+            note.setObjectName("setUpNote")
+            self._add_row(None, note)
 
         self._build_extras(all_installed)
         self._chain()

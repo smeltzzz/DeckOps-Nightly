@@ -607,6 +607,8 @@ class ManagementScreen(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         self._refresh()
+        import preflight
+        preflight.start_online_probe()      # cached before Set Up, so the check can't stall the UI
         # The desktop icon skips the launcher's update prompt: say here, once
         # per session, when an update is out. One GitHub request; silent if
         # offline or rate limited.
@@ -1762,7 +1764,8 @@ class ConfigureScreen(QWidget):
 
         # ── Game tweaks ───────────────────────────────────────────────────
         self._tweaks_panel, gcol = _panel("GameTweaks", "Game tweaks")
-        self._name_note = _lbl("Player name in IW4x and Plutonium offline", FONT_BODY, C_DIM,
+        self._name_note = _lbl("Player name in IW4x and Plutonium offline "
+                               "(STEAM + X opens the keyboard)", FONT_BODY, C_DIM,
                                align=Qt.AlignmentFlag.AlignLeft)
         gcol.addWidget(self._name_note)
         nr = QHBoxLayout(); nr.setSpacing(8)
